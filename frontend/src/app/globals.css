@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+:root {
+  --color-bg: #ffffff;
+  --color-fg: #18181b;
+  --color-muted: #71717a;
+  --color-line: rgba(0, 0, 0, 0.06);
+  --color-accent: #6b8ee5;
+  --color-accent-2: #a189d6;
+  --font-display: ui-sans-serif, system-ui, sans-serif;
+}
+
+html, body, #__next {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-display);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11", "tnum";
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
