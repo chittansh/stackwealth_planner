@@ -19,7 +19,7 @@ const memory = new Map<string, PlanState>();
 function ensureFixture(household_id: string): PlanState {
   if (memory.has(household_id)) return memory.get(household_id)!;
   const fixture = emptyPlanState(household_id);
-  fixture.personal_details.full_name = 'Demo Household';
+  fixture.personal_details.full_name = household_id === 'demo' ? 'Demo Household' : `Household ${household_id}`;
   memory.set(household_id, fixture);
   return fixture;
 }
@@ -44,5 +44,21 @@ export async function savePlan(plan: PlanState): Promise<void> {
       });
     return;
   }
+  memory.set(plan.household_id, plan);
+}
+
+export async function listAllHouseholds(): Promise<string[]> {
+  if (db) {
+    const rows = await db.select({ id: schema.plan_states.household_id }).from(schema.plan_states);
+    return rows.map((r) => r.id);
+  }
+  return [...memory.keys()];
+}
+
+/**
+ * Seed an in-memory plan state (used by the seed script and tests).
+ * No-op on the DB path — call savePlan for that.
+ */
+export function seedMemory(plan: PlanState): void {
   memory.set(plan.household_id, plan);
 }

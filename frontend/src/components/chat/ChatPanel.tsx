@@ -1,17 +1,20 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { MessageBubble } from './MessageBubble';
 import { StatusPill } from './StatusPill';
 import { AssistantMessage } from './AssistantMessage';
 import { AskInput } from './AskInput';
-import { streamChat, uploadFiles, uploadText } from '@/lib/api';
+import { RiskGate } from './RiskGate';
+import { fetchPlan, streamChat, uploadFiles, uploadText } from '@/lib/api';
 import { Sparkles, ListTodo } from 'lucide-react';
+import type { PlanState } from '@/types/plan-state';
 
 type Msg =
   | { kind: 'user'; text: string; files?: { name: string; size: number }[] }
   | { kind: 'status'; text: string }
-  | { kind: 'assistant'; text: string };
+  | { kind: 'assistant'; text: string }
+  | { kind: 'risk_gate' };
 
 type Mode = 'chat' | 'topics';
 
@@ -25,11 +28,27 @@ const PLANNING_TOPICS = [
   'Plan tools',
 ];
 
+const RISK_TRIGGERS = /(risk|allocat|tax|monte\s?carlo|portfolio|invest)/i;
+
 export function ChatPanel({ householdId }: { householdId: string }) {
   const [mode, setMode] = useState<Mode>('chat');
   const [messages, setMessages] = useState<Msg[]>([]);
   const [busy, setBusy] = useState(false);
+  const [plan, setPlan] = useState<PlanState | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => fetchPlan(householdId).then((p) => !cancelled && setPlan(p)).catch(() => undefined);
+    tick();
+    const id = setInterval(tick, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [householdId]);
+
+  const riskSet = !!plan?.computed.risk_profile?.recommended_score;
 
   const handleSend = useCallback(
     async (text: string, attachments: File[]) => {
@@ -42,7 +61,6 @@ export function ChatPanel({ householdId }: { householdId: string }) {
       };
       setMessages((m) => [...m, userMsg]);
 
-      // Upload any attachments first.
       if (attachments.length) {
         setMessages((m) => [...m, { kind: 'status', text: 'Reading attachments…' }]);
         try {
@@ -52,17 +70,20 @@ export function ChatPanel({ householdId }: { householdId: string }) {
         }
       }
 
-      // Treat plain text > 200 chars as a transcript-like extraction too.
       if (text && attachments.length === 0 && text.length > 200) {
         setMessages((m) => [...m, { kind: 'status', text: 'Extracting from your note…' }]);
         try {
           await uploadText(householdId, text, 'user');
         } catch {
-          /* fall through to chat */
+          /* fall through */
         }
       }
 
-      // Stream the agent's response.
+      // If the message touches a risk-gated topic and we have no profile, drop the in-chat gate.
+      if (!riskSet && RISK_TRIGGERS.test(text)) {
+        setMessages((m) => [...m, { kind: 'risk_gate' }]);
+      }
+
       try {
         for await (const ev of streamChat(householdId, text)) {
           if (ev.event === 'tool_call') {
@@ -84,7 +105,7 @@ export function ChatPanel({ householdId }: { householdId: string }) {
         });
       }
     },
-    [householdId],
+    [householdId, riskSet],
   );
 
   return (
@@ -133,7 +154,22 @@ export function ChatPanel({ householdId }: { householdId: string }) {
           {messages.map((m, i) => {
             if (m.kind === 'user') return <MessageBubble key={i} text={m.text} files={m.files} />;
             if (m.kind === 'status') return <StatusPill key={i} text={m.text} />;
-            return <AssistantMessage key={i} text={m.text} />;
+            if (m.kind === 'assistant') return <AssistantMessage key={i} text={m.text} />;
+            if (m.kind === 'risk_gate') {
+              return (
+                <RiskGate
+                  key={i}
+                  householdId={householdId}
+                  onComplete={() =>
+                    setMessages((m) => [
+                      ...m,
+                      { kind: 'assistant', text: 'Risk profile computed. Allocation, tax, and Monte Carlo are now unlocked.' },
+                    ])
+                  }
+                />
+              );
+            }
+            return null;
           })}
         </div>
       )}

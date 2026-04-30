@@ -1,10 +1,11 @@
 /**
  * India tactical allocator skill.
- * Strategic mapping by risk band → bounded tactical overlay (6 signal blocks).
- * Day 3 hardcodes signals to "Neutral" (zeros). Day 6 swaps in cached real signals.
+ * Strategic anchor by risk band → bounded tactical overlay using the signal
+ * snapshot from `skills/signals` (real signals on Day 6, fixture today).
  */
 import type { AllocationOutput, PlanState } from '../../types/plan-state.js';
 import { getPlan } from '../../db/client.js';
+import { getSignals, regimeFromBlocks } from '../signals/index.js';
 
 const STRATEGIC: Record<string, AllocationOutput['strategic_allocation']> = {
   Conservative: { equity: 20, debt: 60, gold: 15, cash: 5 },
@@ -42,25 +43,54 @@ export function computeAllocation(plan: PlanState): AllocationOutput {
   const strategic = STRATEGIC[band] ?? STRATEGIC.Moderate;
   const equitySplit = EQUITY_SPLIT[band] ?? EQUITY_SPLIT.Moderate;
 
-  // Day 3: signals hardcoded to Neutral. Day 6 swaps in `signal_snapshots`.
-  const signal_breakdown = {
-    valuation: { score: 0, reason: 'Neutral (no live signal feed wired yet)' },
-    trend: { score: 0, reason: 'Neutral' },
-    breadth: { score: 0, reason: 'Neutral' },
-    flows: { score: 0, reason: 'Neutral' },
-    macro: { score: 0, reason: 'Neutral' },
-    external: { score: 0, reason: 'Neutral' },
-  };
-  const composite = Object.values(signal_breakdown).reduce((a, s) => a + s.score, 0);
-  const regime_label =
-    composite >= 4 ? 'Risk-On' :
-    composite >= 1 ? 'Mild Risk-On' :
-    composite >= -1 ? 'Neutral' :
-    composite >= -4 ? 'Mild Defensive' : 'Defensive';
+  const snap = getSignals();
+  const { score: composite, label: regime_label } = regimeFromBlocks(snap.blocks);
 
-  const recommended_allocation = { ...strategic };
-  const recommended_equity_split = { ...equitySplit };
-  const debt_duration_stance: AllocationOutput['debt_duration_stance'] = 'neutral';
+  // Map composite to a desired equity shift (pp) within the band cap.
+  const cap = (TACTICAL_BAND[band] ?? TACTICAL_BAND.Moderate).equity;
+  let desired = composite >= 4 ? cap : composite >= 1 ? cap * 0.5 : composite >= -1 ? 0 : composite >= -4 ? -cap * 0.5 : -cap;
+
+  // Anti-chase: if valuation is very expensive (-2) but composite is positive, cap shift at 0.
+  if (snap.blocks.valuation.score <= -2 && desired > 0) desired = 0;
+
+  // Liquidity safeguard: never reduce cash below strategic.
+  const equityShift = Math.round(Math.max(-cap, Math.min(cap, desired)));
+  const recommended_allocation = {
+    equity: Math.max(0, Math.min(100, strategic.equity + equityShift)),
+    debt: Math.max(0, Math.min(100, strategic.debt - equityShift)),
+    gold: strategic.gold,
+    cash: strategic.cash,
+  };
+
+  // Internal equity rotation
+  const internalShift = composite > 0 ? 5 : composite < 0 ? -5 : 0;
+  const recommended_equity_split = {
+    large: Math.max(0, Math.min(100, equitySplit.large + (internalShift < 0 ? -internalShift : 0))),
+    mid: Math.max(0, Math.min(100, equitySplit.mid + (internalShift > 0 ? Math.round(internalShift / 2) : 0))),
+    small: Math.max(
+      0,
+      Math.min(
+        100,
+        equitySplit.small + (internalShift > 0 ? Math.round(internalShift / 2) : Math.round(internalShift / 2)),
+      ),
+    ),
+  };
+
+  // Debt duration stance
+  const debt_duration_stance: AllocationOutput['debt_duration_stance'] =
+    snap.blocks.macro.score > 0 ? 'extend' : snap.blocks.macro.score < 0 ? 'shorten' : 'neutral';
+
+  // Sector / theme views (light heuristic — dependent on regime)
+  const sector_theme_views =
+    composite > 0
+      ? { overweight: ['Banks', 'Capital Goods', 'Industrials', 'Auto'], underweight: ['Pure defensives'] }
+      : composite < 0
+      ? { overweight: ['Pharma', 'FMCG', 'Quality private banks'], underweight: ['High-beta cyclicals', 'Speculative small caps'] }
+      : { overweight: [], underweight: [] };
+
+  const warnings: string[] = [];
+  if (snap.blocks.valuation.score <= -2) warnings.push('Valuation rich — anti-chase active. Equity tilt capped at 0.');
+  if (composite === 0) warnings.push('Tactical regime Neutral — recommendation tracks strategic anchor.');
 
   return {
     investor_risk_band: band,
@@ -68,28 +98,23 @@ export function computeAllocation(plan: PlanState): AllocationOutput {
     strategic_equity_split: equitySplit,
     tactical_regime_score: composite,
     tactical_regime_label: regime_label,
-    signal_breakdown,
+    signal_breakdown: snap.blocks,
     recommended_allocation,
     recommended_equity_split,
     debt_duration_stance,
-    sector_theme_views: { overweight: [], underweight: [] },
-    rebalancing_actions: [],
-    warnings: composite === 0 ? ['Tactical signals not yet wired — recommendation equals strategic anchor.'] : [],
+    sector_theme_views,
+    rebalancing_actions: rebalanceActions(strategic, recommended_allocation),
+    warnings,
   };
 }
 
-// referenced by Day 4 work — bounded shift helper (kept exported for tests)
-export function applyBoundedShift(
-  base: AllocationOutput['strategic_allocation'],
-  desiredEquityDelta: number,
-  band: string,
-): AllocationOutput['strategic_allocation'] {
-  const cap = (TACTICAL_BAND[band] ?? TACTICAL_BAND.Moderate).equity;
-  const shift = Math.max(-cap, Math.min(cap, desiredEquityDelta));
-  return {
-    equity: Math.max(0, Math.min(100, base.equity + shift)),
-    debt: Math.max(0, Math.min(100, base.debt - shift)),
-    gold: base.gold,
-    cash: base.cash,
-  };
+function rebalanceActions(
+  strat: AllocationOutput['strategic_allocation'],
+  rec: AllocationOutput['recommended_allocation'],
+): string[] {
+  const out: string[] = [];
+  const eqDelta = rec.equity - strat.equity;
+  if (eqDelta > 0) out.push(`Tilt +${eqDelta}pp into equity vs. strategic.`);
+  else if (eqDelta < 0) out.push(`Trim ${Math.abs(eqDelta)}pp from equity vs. strategic.`);
+  return out;
 }

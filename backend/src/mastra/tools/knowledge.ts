@@ -1,12 +1,13 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
+import { retrieve } from '../../skills/knowledge/index.js';
 
 export const knowledgeRetrieveTool = createTool({
   id: 'knowledge.retrieve',
   description:
-    'Retrieve top-K chunks from the firm knowledge base (institutional research, MF policy docs, allocation memos). Returns chunk text + filename for inline citation.',
+    'Retrieve top-K chunks from the firm knowledge base. Returns chunk text + filename + heading + similarity score for inline citation.',
   inputSchema: z.object({
-    org_id: z.string(),
+    org_id: z.string().default('demo'),
     query: z.string(),
     top_k: z.number().int().min(1).max(10).default(3),
   }),
@@ -20,8 +21,5 @@ export const knowledgeRetrieveTool = createTool({
       }),
     ),
   }),
-  execute: async () => {
-    // Day 5 — pgvector retrieval. Stub returns empty chunks today.
-    return { chunks: [] };
-  },
+  execute: async ({ context }) => retrieve(context),
 });

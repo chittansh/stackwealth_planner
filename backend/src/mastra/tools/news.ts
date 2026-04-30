@@ -1,10 +1,11 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
+import { relevanceForHousehold } from '../../skills/news/index.js';
 
 export const newsRelevanceTool = createTool({
   id: 'news.relevance',
   description:
-    'Score how relevant each known news item is for a specific household, using sector × direct holdings × MFs × asset-class exposure.',
+    'Score how relevant each news item in the demo store is for a specific household, using sector × direct holdings × asset-class exposure.',
   inputSchema: z.object({
     household_id: z.string(),
     top_k: z.number().int().min(1).max(20).default(5),
@@ -19,8 +20,5 @@ export const newsRelevanceTool = createTool({
       }),
     ),
   }),
-  execute: async () => {
-    // Day 5 — relevance scoring. Stub returns empty today.
-    return { items: [] };
-  },
+  execute: async ({ context }) => relevanceForHousehold(context),
 });

@@ -1,0 +1,17 @@
+{
+  "as_of": "2026-04-29",
+  "blocks": {
+    "valuation": { "score": -1, "reason": "Nifty 50 P/E percentile ~70 — expensive vs. history" },
+    "trend": { "score": 1, "reason": "Nifty above 200-DMA, mildly improving slope" },
+    "breadth": { "score": 0, "reason": "NSE 500 above-200DMA ~55% — mixed participation" },
+    "flows": { "score": 1, "reason": "Domestic SIP flows positive, FPI improving" },
+    "macro": { "score": 1, "reason": "Disinflation trend, RBI on hold, 10Y G-Sec stable" },
+    "external": { "score": 0, "reason": "INR stable; Brent benign" }
+  },
+  "source_versions": {
+    "nse": "fixture-2026-04-29",
+    "rbi_dbie": "fixture-2026-04-29",
+    "amfi": "fixture-2026-04-29",
+    "nsdl_fpi": "fixture-2026-04-29"
+  }
+}
