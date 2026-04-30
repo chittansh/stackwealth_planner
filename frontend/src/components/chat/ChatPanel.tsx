@@ -35,6 +35,7 @@ export function ChatPanel({ householdId }: { householdId: string }) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [busy, setBusy] = useState(false);
   const [plan, setPlan] = useState<PlanState | null>(null);
+  const [dragging, setDragging] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -108,8 +109,43 @@ export function ChatPanel({ householdId }: { householdId: string }) {
     [householdId, riskSet],
   );
 
+  const onDragOver = useCallback((e: React.DragEvent<HTMLElement>) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    setDragging(true);
+  }, []);
+
+  const onDragLeave = useCallback((e: React.DragEvent<HTMLElement>) => {
+    if (e.currentTarget === e.target) setDragging(false);
+  }, []);
+
+  const onDrop = useCallback(
+    (e: React.DragEvent<HTMLElement>) => {
+      e.preventDefault();
+      setDragging(false);
+      const dropped = Array.from(e.dataTransfer.files ?? []);
+      if (!dropped.length) return;
+      // Fire upload immediately — these are intake artifacts, not chat-bound
+      // attachments waiting for a Send.
+      void handleSend('', dropped).catch(() => undefined);
+    },
+    [handleSend],
+  );
+
   return (
-    <aside className="w-[300px] shrink-0 border-r border-zinc-200 flex flex-col bg-white">
+    <aside
+      className={`relative w-[300px] shrink-0 border-r border-zinc-200 flex flex-col bg-white ${
+        dragging ? 'ring-2 ring-[color:var(--color-accent)] ring-inset' : ''
+      }`}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {dragging && (
+        <div className="pointer-events-none absolute inset-0 bg-[color:var(--color-accent)]/5 grid place-items-center text-xs text-[color:var(--color-accent)] z-20">
+          Drop to attach — PDF · XLSX · CSV · DOCX · MD · image · audio
+        </div>
+      )}
       <div className="h-14 px-4 flex items-center gap-2 border-b border-zinc-200">
         <button
           onClick={() => setMode('chat')}

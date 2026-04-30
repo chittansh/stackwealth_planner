@@ -51,6 +51,42 @@ export async function applyAssumption(args: { household_id: string; path: string
   return { ok: true, updated_path: args.path };
 }
 
+/**
+ * Promote an LLM-extracted (low-confidence) field to confirmed. Flips the
+ * matching evidence row's parser_tier to 'manual' and sets confidence to 1.0,
+ * mirrors the change to the canonical PlanState path, and removes the field
+ * from missing_fields if present.
+ */
+export async function confirmField(args: { household_id: string; field: string; value?: unknown }) {
+  const plan = await getPlan(args.household_id);
+  if (!plan) return { ok: false };
+  const matches = plan.evidence.filter((e) => e.field === args.field);
+  if (matches.length === 0 && args.value === undefined) {
+    return { ok: false };
+  }
+  const valueToWrite = args.value ?? matches[matches.length - 1]?.value;
+  setPath(plan, args.field, valueToWrite);
+  for (const e of matches) {
+    e.parser_tier = 'manual';
+    e.confidence = 1.0;
+    e.value = valueToWrite;
+  }
+  if (!matches.length) {
+    plan.evidence.push({
+      field: args.field,
+      value: valueToWrite,
+      source_file: null,
+      source_type: 'user',
+      parser_tier: 'manual',
+      confidence: 1.0,
+      timestamp: new Date().toISOString(),
+    });
+  }
+  plan.missing_fields = plan.missing_fields.filter((f) => f !== args.field);
+  await savePlan(recompute(plan));
+  return { ok: true };
+}
+
 export async function pin(args: { household_id: string; label: string; mutation?: ScenarioMutation }) {
   const plan = await getPlan(args.household_id);
   if (!plan) return { error: 'household_not_found' };

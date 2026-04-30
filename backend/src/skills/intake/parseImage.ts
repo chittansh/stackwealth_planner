@@ -17,7 +17,7 @@ export async function parseImage(buf: Buffer, filename: string, mime: string): P
   // Future: switch to a single multimodal extraction pass with structured response.
   try {
     const resp = await client().messages.create({
-      model: 'claude-sonnet-4-5-20250929',
+      model: 'claude-sonnet-4-6',
       max_tokens: 2000,
       messages: [
         {

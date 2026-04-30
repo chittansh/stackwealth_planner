@@ -26,6 +26,14 @@ export function NetWorthChart({
   const pins = plan?.computed.milestone_pins ?? [];
   const mc = plan?.computed.monte_carlo;
 
+  if (merged.length === 0) {
+    return (
+      <div className="w-full h-[320px] rounded-xl border border-dashed border-zinc-200 grid place-items-center text-sm text-zinc-500">
+        Drop a statement, paste a note, or click + to add income — your projection appears here.
+      </div>
+    );
+  }
+
   return (
     <>
       <div className="w-full h-[320px]">

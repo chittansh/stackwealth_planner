@@ -1,5 +1,6 @@
 import { AdvisorShell } from '@/components/shell/AdvisorShell';
 import { ClientsTable } from '@/components/advisor/ClientsTable';
+import { HighlightsStrip } from '@/components/advisor/HighlightsStrip';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,6 +11,7 @@ export default function ClientsPage() {
         <h1 className="text-2xl font-medium">Clients</h1>
         <p className="text-sm text-zinc-500">All households under your advisory.</p>
       </header>
+      <HighlightsStrip />
       <ClientsTable />
     </AdvisorShell>
   );

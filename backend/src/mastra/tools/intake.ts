@@ -10,6 +10,7 @@ import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 
 import { ingest } from '../../skills/intake/index.js';
+import { confirmField } from '../../skills/scenario/index.js';
 
 export const intakeIngestTool = createTool({
   id: 'intake.ingest',
@@ -56,8 +57,11 @@ export const intakeConfirmTool = createTool({
   outputSchema: z.object({
     ok: z.boolean(),
   }),
-  execute: async () => {
-    // Day 2 — wired into deltas.ts to flip the evidence row's parser_tier.
-    return { ok: true };
+  execute: async ({ context }) => {
+    return confirmField({
+      household_id: context.household_id,
+      field: context.field,
+      value: context.value,
+    });
   },
 });

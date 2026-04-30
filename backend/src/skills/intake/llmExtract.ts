@@ -52,7 +52,7 @@ export async function llmExtract(args: {
   filename?: string;
 }): Promise<{ partial_state: PlanStateDelta; evidence: EvidenceRow[]; missing: string[] }> {
   const resp = await client().messages.create({
-    model: 'claude-sonnet-4-5-20250929',
+    model: 'claude-sonnet-4-6',
     max_tokens: 4000,
     temperature: 0.1,
     system: SYSTEM,

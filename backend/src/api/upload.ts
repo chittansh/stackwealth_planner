@@ -4,7 +4,7 @@
  */
 import { Hono } from 'hono';
 import { ingest } from '../skills/intake/index.js';
-import { applySet, applyAdd } from '../skills/scenario/index.js';
+import { applySet, applyAdd, confirmField } from '../skills/scenario/index.js';
 
 export const uploadRoute = new Hono();
 
@@ -61,6 +61,13 @@ uploadRoute.post('/:id/text', async (c) => {
     }
   }
   return c.json({ ok: true, result });
+});
+
+uploadRoute.post('/:id/confirm', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json<{ field: string; value?: unknown }>();
+  const r = await confirmField({ household_id: id, field: body.field, value: body.value });
+  return c.json(r);
 });
 
 function parserToSource(p: string): 'pdf_aa' | 'pdf_generic' | 'xlsx' | 'csv' | 'docx' | 'md' | 'image' | 'audio' {

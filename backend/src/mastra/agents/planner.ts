@@ -67,7 +67,7 @@ You are concise. You are exact. You let the canvas speak through PlanState.`;
 export const plannerAgent = new Agent({
   name: 'plannerAgent',
   instructions: SYSTEM_PROMPT,
-  model: anthropic('claude-sonnet-4-5-20250929'),
+  model: anthropic('claude-sonnet-4-6'),
   tools: {
     'intake.ingest': intakeIngestTool,
     'intake.confirm': intakeConfirmTool,

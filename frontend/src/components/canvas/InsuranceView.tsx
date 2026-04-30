@@ -18,11 +18,11 @@ export function InsuranceView({ plan }: { plan: PlanState | null }) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <Card title="Life cover adequacy" subtitle={`Metro multiplier ${(fs?.city_cover_multiplier ?? 1).toFixed(2)}`}>
-        <Bar label="Actual" value={lifeCover} required={reqLife} pct={lifePct} />
+        <Bar pct={lifePct} />
         <Meta required={reqLife} actual={lifeCover} period="lifetime" />
       </Card>
       <Card title="Medical cover adequacy" subtitle="Family floater preferred">
-        <Bar label="Actual" value={medCover} required={reqMed} pct={medPct} />
+        <Bar pct={medPct} />
         <Meta required={reqMed} actual={medCover} period="annual" />
       </Card>
       <div className="rounded-xl border border-zinc-200 bg-white p-5 lg:col-span-2">
@@ -48,15 +48,14 @@ function Card({ title, subtitle, children }: { title: string; subtitle: string; 
   );
 }
 
-function Bar({ label, value, required, pct }: { label: string; value: number; required: number; pct: number }) {
-  const _ = label;
-  void _;
-  void value;
-  void required;
+function Bar({ pct }: { pct: number }) {
   return (
     <div className="space-y-1">
       <div className="h-3 rounded-full bg-zinc-100 overflow-hidden">
-        <div className={`h-full ${pct >= 80 ? 'bg-emerald-500' : pct >= 50 ? 'bg-amber-500' : 'bg-rose-500'}`} style={{ width: `${pct}%` }} />
+        <div
+          className={`h-full ${pct >= 80 ? 'bg-emerald-500' : pct >= 50 ? 'bg-amber-500' : 'bg-rose-500'}`}
+          style={{ width: `${pct}%` }}
+        />
       </div>
       <div className="text-[11px] text-zinc-500 text-right tabular-nums">{pct.toFixed(0)}% of required</div>
     </div>
