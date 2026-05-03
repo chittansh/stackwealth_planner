@@ -1,19 +1,27 @@
 'use client';
 
-import { ChevronDown, BarChart3, Table, Sparkles, Plus, Search, Share, User, Download } from 'lucide-react';
+import { BarChart3, Table, Activity, Share, Download } from 'lucide-react';
 import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import { useCallback } from 'react';
+import { Dropdown } from '@/components/ui/Dropdown';
+import { QuickAddMenu } from './QuickAddMenu';
 
 const VIEWS = [
-  { id: 'net-worth', label: 'Net Worth' },
-  { id: 'cash-flow', label: 'Cash Flow' },
-  { id: 'allocation', label: 'Allocation' },
-  { id: 'goals', label: 'Goals' },
-  { id: 'insurance', label: 'Insurance' },
-  { id: 'tax', label: 'Tax' },
+  { value: 'net-worth', label: 'Net Worth' },
+  { value: 'cash-flow', label: 'Cash Flow' },
+  { value: 'allocation', label: 'Allocation' },
+  { value: 'goals', label: 'Goals' },
+  { value: 'insurance', label: 'Insurance' },
+  { value: 'tax', label: 'Tax' },
 ] as const;
 
-const HORIZONS = [10, 20, 30, 45] as const;
+const HORIZONS = [
+  { value: 10, label: '10 years' },
+  { value: 20, label: '20 years' },
+  { value: 30, label: '30 years' },
+  { value: 45, label: '45 years' },
+  { value: 60, label: '60 years' },
+] as const;
 
 export function TopBar({
   householdId,
@@ -42,77 +50,112 @@ export function TopBar({
     window.open(url, '_blank');
   }, [householdId]);
 
+  const onShare = useCallback(async () => {
+    const url = window.location.href;
+    try {
+      await navigator.clipboard.writeText(url);
+      window.dispatchEvent(
+        new CustomEvent('sw:toast', { detail: { text: 'Link copied to clipboard' } }),
+      );
+    } catch {
+      /* clipboard blocked — silent */
+    }
+  }, []);
+
+  const runMonteCarlo = useCallback(() => {
+    // Surface live in the chat so the user can see the agent kick off the run.
+    window.dispatchEvent(
+      new CustomEvent('sw:chat-prompt', {
+        detail: { prompt: 'Run a Monte Carlo simulation and tell me the P10/P50/P90 freedom age.' },
+      }),
+    );
+  }, []);
+
   return (
-    <header className="h-14 px-6 flex items-center gap-3 border-b border-zinc-200 bg-white">
-      <Pill>
-        <select
-          value={view}
-          onChange={(e) => setParam('view', e.target.value)}
-          className="appearance-none bg-transparent outline-none pr-1 cursor-pointer"
-        >
-          {VIEWS.map((v) => (
-            <option key={v.id} value={v.id}>
-              {v.label}
-            </option>
-          ))}
-        </select>
-        <ChevronDown size={14} className="opacity-60" />
-      </Pill>
+    <header className="h-14 px-6 flex items-center gap-2 border-b border-zinc-200 bg-white">
+      <Dropdown
+        value={view}
+        options={VIEWS as unknown as { value: string; label: string }[]}
+        onChange={(v) => setParam('view', v)}
+        width={180}
+      />
+      <Dropdown
+        value={horizon}
+        options={HORIZONS as unknown as { value: number; label: string }[]}
+        onChange={(v) => setParam('horizon', v)}
+        width={140}
+      />
 
-      <Pill>
-        <select
-          value={horizon}
-          onChange={(e) => setParam('horizon', e.target.value)}
-          className="appearance-none bg-transparent outline-none pr-1 cursor-pointer"
+      {/* Segmented chart/table/MC toggles */}
+      <div className="ml-1 flex items-center rounded-md border border-zinc-200 overflow-hidden">
+        <SegBtn
+          active={view === 'net-worth'}
+          title="Chart view"
+          onClick={() => setParam('view', 'net-worth')}
         >
-          {HORIZONS.map((h) => (
-            <option key={h} value={h}>
-              {h} years
-            </option>
-          ))}
-        </select>
-        <ChevronDown size={14} className="opacity-60" />
-      </Pill>
-
-      <div className="ml-2 flex items-center rounded-lg border border-zinc-200 overflow-hidden">
-        <IconBtn aria-label="chart"><BarChart3 size={14} /></IconBtn>
-        <IconBtn aria-label="table"><Table size={14} /></IconBtn>
-        <IconBtn aria-label="annotated"><Sparkles size={14} /></IconBtn>
+          <BarChart3 size={14} />
+        </SegBtn>
+        <SegBtn
+          active={view === 'cash-flow'}
+          title="Table view"
+          onClick={() => setParam('view', 'cash-flow')}
+        >
+          <Table size={14} />
+        </SegBtn>
+        <SegBtn title="Run Monte Carlo simulation" onClick={runMonteCarlo}>
+          <Activity size={14} />
+        </SegBtn>
       </div>
 
-      <button className="ml-2 w-8 h-8 rounded-md border border-zinc-200 grid place-items-center hover:bg-zinc-50">
-        <Plus size={14} />
-      </button>
+      <QuickAddMenu householdId={householdId} />
 
       <div className="ml-auto flex items-center gap-2">
         <button
           onClick={downloadReport}
-          className="inline-flex items-center gap-1.5 text-xs px-2.5 h-8 rounded-md border border-zinc-200 hover:bg-zinc-50"
-          title="Download plan PDF"
+          className="inline-flex items-center gap-1.5 text-xs px-2.5 h-8 rounded-md border border-zinc-200 hover:bg-zinc-50 text-zinc-700"
+          title="Open print-styled report"
         >
-          <Download size={14} /> Report
+          <Download size={13} /> Report
         </button>
-        <IconBtn aria-label="search"><Search size={16} /></IconBtn>
-        <IconBtn aria-label="share"><Share size={16} /></IconBtn>
-        <div className="w-8 h-8 rounded-full bg-zinc-200 grid place-items-center text-xs">
-          <User size={14} />
-        </div>
+        <button
+          onClick={onShare}
+          className="inline-flex items-center gap-1.5 text-xs px-2.5 h-8 rounded-md border border-zinc-200 hover:bg-zinc-50 text-zinc-700"
+          title="Copy link to this household"
+        >
+          <Share size={13} /> Share
+        </button>
+        <a
+          href={`/plan/${householdId}`}
+          className="w-8 h-8 rounded-full bg-zinc-100 grid place-items-center text-[11px] text-zinc-600 hover:bg-zinc-200"
+          title={`Household: ${householdId}`}
+        >
+          {householdId.slice(0, 2).toUpperCase()}
+        </a>
       </div>
     </header>
   );
 }
 
-function Pill({ children }: { children: React.ReactNode }) {
+function SegBtn({
+  active,
+  title,
+  onClick,
+  children,
+}: {
+  active?: boolean;
+  title: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="inline-flex items-center gap-1 px-2.5 h-8 rounded-md border border-zinc-200 text-sm hover:bg-zinc-50">
-      {children}
-    </div>
-  );
-}
-
-function IconBtn({ children, ...rest }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  return (
-    <button {...rest} className="w-8 h-8 grid place-items-center hover:bg-zinc-50 text-zinc-500">
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      className={`w-8 h-8 grid place-items-center text-zinc-500 hover:bg-zinc-50 ${
+        active ? 'bg-zinc-100 text-zinc-900' : ''
+      }`}
+    >
       {children}
     </button>
   );

@@ -69,22 +69,48 @@ A numeric value mentioned in your reply that did NOT pass through a tool call (a
 ### Worked examples
 
 User: "22" (in answer to your prior "how old are you?")
-   → call \`plan_set(path='freedom_score_inputs.age', value=22)\`
-   → THEN reply ("Got it — age 22. What city do you live in?")
+   → \`plan_set(path='freedom_score_inputs.age', value=22)\`
+   → if assumptions.persons[] is empty, also \`plan_add(path='assumptions.persons', row={ name:'You', date_of_birth:'01-01-2003', life_expectancy:85, retirement_age:60 })\`  (use Jan 1 of the inferred birth year as a placeholder; user can correct it later)
+   → THEN reply
 
 User: "kolkata"
-   → call \`plan_set(path='personal_details.city_of_residence', value='Kolkata')\`
-   → call \`plan_set(path='personal_details.city_type', value='Non-metro')\`  // Kolkata is metro per Indian usage — use 'Metro' here
+   → \`plan_set(path='personal_details.city_of_residence', value='Kolkata')\`
+   → \`plan_set(path='personal_details.city_type', value='Metro')\`  (Kolkata, Mumbai, Delhi, Chennai, Bengaluru, Hyderabad, Pune, Ahmedabad = Metro; everything else = Non-metro)
    → THEN reply
 
 User: "my take-home is 17k"
-   → call \`plan_set(path='income_details.client_salary_in_hand', value=17000)\`
-   → call \`plan_set(path='freedom_score_inputs.monthly_income', value=17000)\`
+   → \`plan_set(path='income_details.client_salary_in_hand', value=17000)\`
+   → \`plan_set(path='freedom_score_inputs.monthly_income', value=17000)\`
    → THEN reply
 
-User: "i want to retire at 55"
-   → if persons[] is empty, first \`plan_add(path='assumptions.persons', row={ name:'Client', retirement_age:55 })\`
+User: "rent is 25k, groceries 10k, utilities 3k"
+   → 3 separate \`plan_set\` calls on \`monthly_expenses.rent_or_emi\`, \`monthly_expenses.groceries\`, \`monthly_expenses.utilities\`
+   → also \`plan_set(path='freedom_score_inputs.monthly_expenses', value=38000)\`  (sum of fixed monthly expenses)
+   → THEN reply
+
+User: "I have ₹5L in savings and ₹3L in mutual funds"
+   → \`plan_set(path='liquid_capital.savings_account_balance', value=500000)\`
+   → \`plan_set(path='freedom_score_inputs.liquid_assets_current_value', value=500000)\`
+   → \`plan_set(path='freedom_score_inputs.portfolio_current_value', value=300000)\`
+   → THEN reply
+
+User: "home loan EMI is 35k, ₹14L outstanding, 12 years left"
+   → \`plan_set(path='loans_liabilities.home_loan', value={ outstanding_amount:1400000, emi:35000, tenure_left:12 })\`
+   → \`plan_set(path='freedom_score_inputs.monthly_emi', value=35000)\`
+   → THEN reply
+
+User: "I have term insurance ₹1Cr cover, ₹15k annual premium"
+   → \`plan_set(path='insurance_details.term_plan', value={ cover_amount:10000000, annual_premium:15000 })\`
+   → THEN reply
+
+User: "I want to retire at 55"
+   → if persons[0] exists, \`plan_set(path='assumptions.persons.0.retirement_age', value=55)\`
+   → else \`plan_add(path='assumptions.persons', row={ name:'You', retirement_age:55 })\`
    → also \`plan_set(path='personal_details.retirement_age_target', value=55)\`
+   → THEN reply
+
+User: "I want to buy a house in 2030 worth ₹1Cr"
+   → \`plan_add(path='financial_goals', row={ goal_name:'House purchase', kind:'house_purchase', target_year:2030, target_amount:10000000, priority:'important' })\`
    → THEN reply
 
 If you skip step 1 the user sees their numbers wrapped in «unverified:N». That is a UX failure.
@@ -350,30 +376,55 @@ export type ToolResultEvent = { id: string; name: string; result: unknown };
 
 export type RunPlannerArgs = {
   householdId: string;
+  chatId?: string;
   message: string;
   onToolCall?: (ev: ToolCallEvent) => void | Promise<void>;
   onToolResult?: (ev: ToolResultEvent) => void | Promise<void>;
 };
 
 /**
- * Per-household conversation memory. Without this, every turn looked like a
- * cold start — the agent kept re-greeting the user and re-asking the same
- * questions. Survives backend restarts only as long as the process lives.
+ * Per-(household, chat) conversation memory. Multiple chats per household
+ * supported — each chat has its own independent message history but they
+ * all edit the same underlying PlanState.
  */
 const convoMemory = new Map<string, CoreMessage[]>();
-
 const MAX_HISTORY_MESSAGES = 60;
 
-export function clearConvo(householdId: string) {
-  convoMemory.delete(householdId);
+const memKey = (householdId: string, chatId = 'main') => `${householdId}::${chatId}`;
+
+export function clearConvo(householdId: string, chatId?: string) {
+  convoMemory.delete(memKey(householdId, chatId));
 }
 
-export function getConvo(householdId: string): CoreMessage[] {
-  return convoMemory.get(householdId) ?? [];
+export function getConvo(householdId: string, chatId?: string): CoreMessage[] {
+  return convoMemory.get(memKey(householdId, chatId)) ?? [];
+}
+
+/**
+ * Restore server-side convo memory from a client-supplied transcript — used
+ * when localStorage has chat history but the backend lost it (process
+ * restart). Only plain user + assistant turns are mirrored; tool calls
+ * aren't replayed since their results may no longer be valid.
+ */
+export function hydrateConvo(
+  householdId: string,
+  chatId: string | undefined,
+  turns: { role: 'user' | 'assistant'; text: string }[],
+) {
+  const messages: CoreMessage[] = turns
+    .filter((t) => t.text && t.text.trim())
+    .slice(-MAX_HISTORY_MESSAGES)
+    .map((t) =>
+      t.role === 'user'
+        ? { role: 'user', content: `[household_id=${householdId}]\n\n${t.text}` }
+        : { role: 'assistant', content: t.text },
+    );
+  convoMemory.set(memKey(householdId, chatId), messages);
 }
 
 export async function runPlannerTurn({
   householdId,
+  chatId,
   message,
   onToolCall,
   onToolResult,
@@ -381,7 +432,8 @@ export async function runPlannerTurn({
   const userText =
     (message ?? '').trim() || '(empty user turn — read state and ask a clarifying question)';
 
-  const history = convoMemory.get(householdId) ?? [];
+  const key = memKey(householdId, chatId);
+  const history = convoMemory.get(key) ?? [];
   const userMessage: CoreMessage = {
     role: 'user',
     content: `[household_id=${householdId}]\n\n${userText}`,
@@ -424,7 +476,7 @@ export async function runPlannerTurn({
   // sees the full context. Trim from the head once we exceed the cap.
   const fresh = (result.response?.messages ?? []) as CoreMessage[];
   const next = [...history, userMessage, ...fresh].slice(-MAX_HISTORY_MESSAGES);
-  convoMemory.set(householdId, next);
+  convoMemory.set(key, next);
 
   return { text: result.text ?? '', steps: result.steps ?? [] };
 }

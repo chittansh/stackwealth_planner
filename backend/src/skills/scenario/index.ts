@@ -169,6 +169,7 @@ export async function runMonteCarlo(args: { household_id: string; paths: number 
 // ── helpers ─────────────────────────────────────────────────────────────
 
 function recompute(plan: PlanState): PlanState {
+  plan.computed.net_worth = deriveNetWorth(plan);
   plan.computed.freedom_score = computeFreedom(plan);
   const cf = computeCashflow(plan, plan.computed.horizon_years || 45);
   plan.computed.cashflow = cf;
@@ -180,11 +181,62 @@ function recompute(plan: PlanState): PlanState {
     .map((g) => ({
       year: g.target_year!,
       label: g.goal_name,
-      type: g.kind === 'house_purchase' ? 'home_purchase' : g.kind === 'child_education' ? 'education' : g.kind === 'retirement' ? 'retirement' : g.kind === 'foreign_travel' ? 'travel' : 'other',
+      type:
+        g.kind === 'house_purchase'
+          ? 'home_purchase'
+          : g.kind === 'child_education'
+          ? 'education'
+          : g.kind === 'retirement'
+          ? 'retirement'
+          : g.kind === 'foreign_travel'
+          ? 'travel'
+          : 'other',
       goal_id: g.id,
     }));
   plan.last_updated_at = new Date().toISOString();
   return plan;
+}
+
+/**
+ * Derive net worth from whatever sections of PlanState are populated. Reads
+ * canonical sources first (liquid_capital, holdings, loans, insurance), then
+ * falls back to the freedom_score_inputs proxies so the cards light up even
+ * before the user has captured every detail.
+ */
+function deriveNetWorth(plan: PlanState): PlanState['computed']['net_worth'] {
+  const fsi = plan.freedom_score_inputs ?? {};
+  const lc = plan.liquid_capital ?? {};
+
+  const cashFromSections =
+    (lc.savings_account_balance ?? 0) +
+    (lc.idle_cash_for_investment ?? 0) +
+    (lc.fd_breakable_for_investment ?? 0) +
+    (lc.bonus_expected_for_investment ?? 0);
+  const liquid = cashFromSections > 0 ? cashFromSections : fsi.liquid_assets_current_value ?? 0;
+
+  const mfTotal = plan.mutual_funds.reduce((s, h) => s + (h.current_value ?? 0), 0);
+  const eqTotal = plan.equity_stocks.reduce((s, h) => s + (h.current_value ?? 0), 0);
+  const fiTotal = plan.fixed_income.reduce((s, h) => s + (h.current_value ?? 0), 0);
+  const portfolioFromHoldings = mfTotal + eqTotal + fiTotal;
+  const investments =
+    portfolioFromHoldings > 0 ? portfolioFromHoldings : fsi.portfolio_current_value ?? 0;
+
+  const assets_total = liquid + investments;
+
+  const l = plan.loans_liabilities ?? {};
+  const debts_total =
+    (l.home_loan?.outstanding_amount ?? 0) +
+    (l.car_loan?.outstanding_amount ?? 0) +
+    (l.personal_loan?.outstanding_amount ?? 0) +
+    (l.credit_card_dues?.outstanding_amount ?? 0);
+
+  return {
+    total: assets_total - debts_total,
+    liquid,
+    non_liquid: Math.max(0, assets_total - liquid),
+    assets_total,
+    debts_total,
+  };
 }
 
 function getPath(o: unknown, path: string): unknown {

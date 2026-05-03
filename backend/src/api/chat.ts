@@ -13,19 +13,34 @@
  */
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import { runPlannerTurn, clearConvo } from '../agent/planner.js';
+import { runPlannerTurn, clearConvo, hydrateConvo } from '../agent/planner.js';
 import { collectNumbers, validateAssistantText } from '../agent/validator.js';
 
 export const chatRoute = new Hono();
 
 chatRoute.post('/:id/reset', async (c) => {
-  clearConvo(c.req.param('id'));
+  const chatId = c.req.query('chat_id') ?? undefined;
+  clearConvo(c.req.param('id'), chatId);
   return c.json({ ok: true });
+});
+
+/**
+ * Restore server-side convo memory from a client-supplied transcript so the
+ * agent has context after a backend restart or chat-switch from localStorage.
+ */
+chatRoute.post('/:id/hydrate', async (c) => {
+  const chatId = c.req.query('chat_id') ?? undefined;
+  const body = await c.req
+    .json<{ turns: { role: 'user' | 'assistant'; text: string }[] }>()
+    .catch(() => ({ turns: [] as { role: 'user' | 'assistant'; text: string }[] }));
+  hydrateConvo(c.req.param('id'), chatId, body.turns ?? []);
+  return c.json({ ok: true, restored: (body.turns ?? []).length });
 });
 
 chatRoute.post('/', async (c) => {
   const body = await c.req.json<{
     household_id: string;
+    chat_id?: string;
     message: string;
     attachments?: { kind: 'file' | 'text'; payload: unknown }[];
   }>();
@@ -38,6 +53,7 @@ chatRoute.post('/', async (c) => {
     try {
       const result = await runPlannerTurn({
         householdId: body.household_id,
+        chatId: body.chat_id,
         message: body.message ?? '',
         onToolCall: async (ev) => {
           collectNumbers(ev.args, seenNumbers);

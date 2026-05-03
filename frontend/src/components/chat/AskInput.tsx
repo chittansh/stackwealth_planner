@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useLayoutEffect } from 'react';
 import { Paperclip, Mic, ArrowUp } from 'lucide-react';
 
 export function AskInput({
@@ -13,6 +13,17 @@ export function AskInput({
   const [text, setText] = useState('');
   const [files, setFiles] = useState<File[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-grow textarea up to ~6 lines, then scroll inside.
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = '0px';
+    const cap = 144; // ~6 rows of 24px line-height
+    el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
+    el.style.overflowY = el.scrollHeight > cap ? 'auto' : 'hidden';
+  }, [text]);
 
   const submit = useCallback(() => {
     if (disabled) return;
@@ -82,13 +93,14 @@ export function AskInput({
           }}
         />
         <textarea
+          ref={textareaRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKey}
           onPaste={onPaste}
           rows={1}
           placeholder="Ask anything…"
-          className="flex-1 resize-none bg-transparent outline-none text-sm py-1 max-h-24"
+          className="scrollbar-hidden flex-1 resize-none bg-transparent outline-none text-sm py-1 leading-6 self-center"
           disabled={disabled}
         />
         <button

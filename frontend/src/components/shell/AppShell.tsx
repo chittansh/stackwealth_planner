@@ -1,6 +1,7 @@
 'use client';
 
 import { IconRail } from './IconRail';
+import { Toast } from '@/components/ui/Toast';
 
 /**
  * 3-column shell — icon rail · chat panel · canvas — matches the reference at ~5/25/70.
@@ -16,6 +17,7 @@ export function AppShell({
     <div className="flex h-screen w-screen overflow-hidden bg-white">
       <IconRail householdId={householdId} />
       {children}
+      <Toast />
     </div>
   );
 }

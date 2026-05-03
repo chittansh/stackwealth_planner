@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { MessageBubble } from './MessageBubble';
 import { StatusPill } from './StatusPill';
 import { ThinkingDots } from './ThinkingDots';
@@ -8,8 +8,10 @@ import { ToolGroup, type GroupedTool } from './ToolGroup';
 import { AssistantMessage } from './AssistantMessage';
 import { AskInput } from './AskInput';
 import { RiskGate } from './RiskGate';
-import { streamChat, uploadFiles, resetChat } from '@/lib/api';
-import { Sparkles, ListTodo, RotateCw } from 'lucide-react';
+import { ChatSwitcher } from './ChatSwitcher';
+import { streamChat, uploadFiles, resetChat, hydrateChat } from '@/lib/api';
+import { Sparkles, ListTodo, Plus } from 'lucide-react';
+import { useChatStore, type StoredMsg } from '@/lib/chatStore';
 
 type ToolMsg = {
   kind: 'tool';
@@ -31,6 +33,11 @@ type Msg =
 // Drop any in-flight "thinking" pills before appending the next event — once
 // a tool_call or assistant message lands, the generic spinner is obsolete.
 const replaceThinking = (m: Msg[], next: Msg): Msg[] => [...m.filter((x) => x.kind !== 'thinking'), next];
+
+// The store keeps StoredMsg shape (one union with all optional fields).
+// Cast safely — every Msg is a structural subset of StoredMsg.
+const toStored = (m: Msg): StoredMsg => m as StoredMsg;
+const fromStored = (m: StoredMsg): Msg => m as Msg;
 
 type Mode = 'chat' | 'topics';
 
@@ -75,10 +82,43 @@ const PLANNING_TOPICS: { label: string; prompt: string }[] = [
 
 export function ChatPanel({ householdId }: { householdId: string }) {
   const [mode, setMode] = useState<Mode>('chat');
-  const [messages, setMessages] = useState<Msg[]>([]);
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const store = useChatStore(householdId);
+  const messages: Msg[] = store.messages.map(fromStored);
+  const setMessages = useCallback(
+    (updater: (prev: Msg[]) => Msg[]) => {
+      store.setMessages((prev) => updater(prev.map(fromStored)).map(toStored));
+    },
+    [store],
+  );
+
+  // Listen for top-bar / quick-add prompts dispatched from the shell.
+  useEffect(() => {
+    const onPrompt = (e: Event) => {
+      const detail = (e as CustomEvent<{ prompt: string }>).detail;
+      if (detail?.prompt) void handleSend(detail.prompt, []);
+    };
+    window.addEventListener('sw:chat-prompt', onPrompt as EventListener);
+    return () => window.removeEventListener('sw:chat-prompt', onPrompt as EventListener);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [householdId, store.activeChatId]);
+
+  // When the active chat changes (or first hydrates from localStorage), push
+  // the prose history to the backend so the agent has context. Skip if the
+  // chat is empty or contains only the in-flight thinking pill.
+  useEffect(() => {
+    if (!store.hydrated) return;
+    const turns = store.messages
+      .filter((m) => (m.kind === 'user' || m.kind === 'assistant') && typeof m.text === 'string' && m.text.trim())
+      .map((m) => ({ role: m.kind as 'user' | 'assistant', text: m.text! }));
+    if (turns.length === 0) return;
+    void hydrateChat(householdId, store.activeChatId, turns).catch(() => undefined);
+    // Only re-hydrate when the chat ID flips (or mounts) — not on every message.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [householdId, store.activeChatId, store.hydrated]);
 
   const handleSend = useCallback(
     async (text: string, attachments: File[]) => {
@@ -105,7 +145,7 @@ export function ChatPanel({ householdId }: { householdId: string }) {
       // when to suggest the risk profile — no client-side regex tripwires.
 
       try {
-        for await (const ev of streamChat(householdId, text)) {
+        for await (const ev of streamChat(householdId, text, store.activeChatId)) {
           if (ev.event === 'tool_call') {
             const data = ev.data as { id: string; name: string; args: unknown };
             setMessages((m) =>
@@ -150,7 +190,7 @@ export function ChatPanel({ householdId }: { householdId: string }) {
         });
       }
     },
-    [householdId],
+    [householdId, store.activeChatId, setMessages],
   );
 
   const onDragOver = useCallback((e: React.DragEvent<HTMLElement>) => {
@@ -203,17 +243,27 @@ export function ChatPanel({ householdId }: { householdId: string }) {
         >
           <ListTodo size={12} className="inline mr-1" /> Topics
         </button>
-        <button
-          onClick={async () => {
-            if (busy) return;
-            await resetChat(householdId).catch(() => undefined);
-            setMessages([]);
-          }}
-          title="Clear chat history (plan data is kept)"
-          className="ml-auto text-xs text-zinc-400 hover:text-zinc-700 inline-flex items-center gap-1"
-        >
-          <RotateCw size={11} /> New chat
-        </button>
+        <div className="ml-auto flex items-center gap-1">
+          <ChatSwitcher
+            chats={store.chatList}
+            activeId={store.activeChatId}
+            onPick={(id) => store.switchChat(id)}
+            onDelete={async (id) => {
+              await resetChat(householdId, id).catch(() => undefined);
+              store.deleteChat(id);
+            }}
+          />
+          <button
+            onClick={() => {
+              if (busy) return;
+              store.newChat();
+            }}
+            title="Start a new chat"
+            className="w-6 h-6 grid place-items-center rounded-md text-zinc-400 hover:text-zinc-900 hover:bg-zinc-50"
+          >
+            <Plus size={13} />
+          </button>
+        </div>
       </div>
 
       {mode === 'topics' ? (
@@ -237,7 +287,7 @@ export function ChatPanel({ householdId }: { householdId: string }) {
         </div>
       ) : (
         <div ref={containerRef} className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
-          {messages.length === 0 && (
+          {store.hydrated && messages.length === 0 && (
             <div className="flex flex-col gap-3">
               <p className="text-sm text-zinc-700">Two ways to start:</p>
               <ol className="text-[13px] text-zinc-600 space-y-1.5 list-decimal list-inside">

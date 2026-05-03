@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Users, Combine, BookOpen, Newspaper, Home } from 'lucide-react';
 import { IconRail } from './IconRail';
+import { Toast } from '@/components/ui/Toast';
 
 const NAV = [
   { href: '/plan/me', label: 'My plan', Icon: Home },
@@ -38,6 +39,7 @@ export function AdvisorShell({ children }: { children: React.ReactNode }) {
         </nav>
       </aside>
       <main className="flex-1 min-w-0 overflow-y-auto px-10 py-8">{children}</main>
+      <Toast />
     </div>
   );
 }

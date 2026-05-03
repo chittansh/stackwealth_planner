@@ -36,11 +36,15 @@ export type ChatEvent =
   | { event: 'done'; data: 'ok' }
   | { event: 'error'; data: { message: string } };
 
-export async function* streamChat(id: string, message: string): AsyncGenerator<ChatEvent> {
+export async function* streamChat(
+  id: string,
+  message: string,
+  chatId?: string,
+): AsyncGenerator<ChatEvent> {
   const r = await fetch(`${BASE}/api/chat`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ household_id: id, message }),
+    body: JSON.stringify({ household_id: id, message, chat_id: chatId }),
   });
   if (!r.body) throw new Error('chat: no body');
 
@@ -82,6 +86,20 @@ export async function planSet(id: string, path: string, value: unknown) {
   }).then((r) => r.json());
 }
 
-export async function resetChat(id: string) {
-  return fetch(`${BASE}/api/chat/${id}/reset`, { method: 'POST' }).then((r) => r.json());
+export async function resetChat(id: string, chatId?: string) {
+  const qs = chatId ? `?chat_id=${encodeURIComponent(chatId)}` : '';
+  return fetch(`${BASE}/api/chat/${id}/reset${qs}`, { method: 'POST' }).then((r) => r.json());
+}
+
+export async function hydrateChat(
+  id: string,
+  chatId: string | undefined,
+  turns: { role: 'user' | 'assistant'; text: string }[],
+) {
+  const qs = chatId ? `?chat_id=${encodeURIComponent(chatId)}` : '';
+  return fetch(`${BASE}/api/chat/${id}/hydrate${qs}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ turns }),
+  }).then((r) => r.json());
 }
