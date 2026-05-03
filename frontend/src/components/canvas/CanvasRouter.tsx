@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchPlan } from '@/lib/api';
 import type { PlanState } from '@/types/plan-state';
 
@@ -25,18 +25,31 @@ export function CanvasRouter({
   view: 'net-worth' | 'cash-flow' | 'allocation' | 'goals' | 'insurance' | 'tax';
   horizon: number;
 }) {
+  void horizon; // sourced from server (plan.computed.horizon_years)
   const [plan, setPlan] = useState<PlanState | null>(null);
+  const cancelledRef = useRef(false);
+
+  const refetch = useCallback(() => {
+    fetchPlan(householdId)
+      .then((p) => !cancelledRef.current && setPlan(p))
+      .catch(() => undefined);
+  }, [householdId]);
 
   useEffect(() => {
-    let cancelled = false;
-    const tick = () => fetchPlan(householdId).then((p) => !cancelled && setPlan(p)).catch(() => undefined);
-    tick();
-    const id = setInterval(tick, 1500);
+    cancelledRef.current = false;
+    refetch();
+    // Slow background poll as a safety net (catches agent-driven mutations
+    // that didn't fire sw:plan-changed for any reason).
+    const id = setInterval(refetch, 2000);
+    // Instant refresh on any explicit mutation event.
+    const onChanged = () => refetch();
+    window.addEventListener('sw:plan-changed', onChanged);
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
       clearInterval(id);
+      window.removeEventListener('sw:plan-changed', onChanged);
     };
-  }, [householdId]);
+  }, [householdId, refetch]);
 
   return (
     <div className="flex flex-col">

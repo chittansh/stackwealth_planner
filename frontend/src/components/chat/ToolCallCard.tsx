@@ -48,20 +48,29 @@ export function ToolCallCard({
       'error' in (result as Record<string, unknown>) &&
       typeof (result as { error: unknown }).error === 'string');
 
+  const running = state === 'running';
   return (
     <div className="self-start max-w-[280px] w-full">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-1.5 px-1.5 py-1 rounded-md text-zinc-500 hover:bg-zinc-50"
+        className={`w-full flex items-center gap-1.5 px-1.5 py-1 rounded-md transition ${
+          running
+            ? 'bg-[var(--color-accent-soft)] text-[color:var(--color-accent)]'
+            : 'text-zinc-500 hover:bg-zinc-50'
+        }`}
       >
         <ChevronRight
           size={9}
-          className={`shrink-0 transition-transform text-zinc-300 ${open ? 'rotate-90' : ''}`}
+          className={`shrink-0 transition-transform ${running ? 'text-[color:var(--color-accent)]/60' : 'text-zinc-300'} ${open ? 'rotate-90' : ''}`}
         />
         <StateIcon state={state} errored={errored} />
-        <span className="text-[10.5px] truncate flex-1 text-left">{friendly}</span>
-        <code className="text-[9.5px] text-zinc-300 font-mono">{name}</code>
+        <span className={`text-[10.5px] truncate flex-1 text-left ${running ? 'font-medium' : ''}`}>
+          {friendly}
+        </span>
+        <code className={`text-[9.5px] font-mono ${running ? 'text-[color:var(--color-accent)]/70' : 'text-zinc-300'}`}>
+          {name}
+        </code>
       </button>
 
       {open && (
@@ -84,11 +93,11 @@ export function ToolCallCard({
 
 function StateIcon({ state, errored }: { state: ToolState; errored: boolean | unknown }) {
   if (state === 'running') {
-    return <Loader2 size={9} className="animate-spin shrink-0" style={{ color: 'var(--color-accent)' }} />;
+    return <Loader2 size={11} className="animate-spin shrink-0" style={{ color: 'var(--color-accent)' }} />;
   }
-  if (errored) return <AlertCircle size={9} className="shrink-0 text-zinc-500" />;
-  if (state === 'done') return <CheckCircle2 size={9} className="shrink-0" style={{ color: 'var(--color-accent)' }} />;
-  return <Wrench size={9} className="shrink-0 text-zinc-300" />;
+  if (errored) return <AlertCircle size={10} className="shrink-0 text-zinc-500" />;
+  if (state === 'done') return <CheckCircle2 size={10} className="shrink-0" style={{ color: 'var(--color-accent)' }} />;
+  return <Wrench size={10} className="shrink-0 text-zinc-300" />;
 }
 
 function Section({ label, children }: { label: string; children: React.ReactNode }) {

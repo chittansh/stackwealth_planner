@@ -6,7 +6,8 @@ import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { Dropdown } from '@/components/ui/Dropdown';
 import { QuickAddMenu } from './QuickAddMenu';
-import { fetchPlan } from '@/lib/api';
+import { fetchPlan, planSet } from '@/lib/api';
+import { firePlanChanged } from '@/lib/prompt';
 
 const VIEWS = [
   { value: 'net-worth', label: 'Net Worth' },
@@ -45,6 +46,20 @@ export function TopBar({
       router.replace(`${pathname}?${u.toString()}`, { scroll: false });
     },
     [router, pathname, sp],
+  );
+
+  const onHorizonChange = useCallback(
+    async (v: number) => {
+      setParam('horizon', v);
+      // Push to the server so the cashflow + headline + chart all recompute.
+      try {
+        await planSet(householdId, 'computed.horizon_years', v);
+        firePlanChanged();
+      } catch {
+        /* swallow — UI will stay on previous projection */
+      }
+    },
+    [householdId, setParam],
   );
 
   const downloadReport = useCallback(() => {
@@ -114,7 +129,7 @@ export function TopBar({
       <Dropdown
         value={horizon}
         options={HORIZONS as unknown as { value: number; label: string }[]}
-        onChange={(v) => setParam('horizon', v)}
+        onChange={(v) => void onHorizonChange(Number(v))}
         width={140}
       />
 

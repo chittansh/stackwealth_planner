@@ -3,6 +3,7 @@
 import type { PlanState } from '@/types/plan-state';
 import { useState, useMemo } from 'react';
 import { formatINR } from '@/lib/utils';
+import { firePlanChanged } from '@/lib/prompt';
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:4000';
 
@@ -52,6 +53,7 @@ export function Scenarios({ householdId, plan }: { householdId: string; plan: Pl
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ label, mutation: { ops } }),
       });
+      firePlanChanged();
     } finally {
       setBusy(false);
     }
@@ -61,6 +63,7 @@ export function Scenarios({ householdId, plan }: { householdId: string; plan: Pl
     setBusy(true);
     try {
       await fetch(`${BACKEND}/api/skill/montecarlo/${householdId}`, { method: 'POST' });
+      firePlanChanged();
     } finally {
       setBusy(false);
     }
@@ -70,6 +73,7 @@ export function Scenarios({ householdId, plan }: { householdId: string; plan: Pl
     setBusy(true);
     try {
       await fetch(`${BACKEND}/api/scenario/${householdId}/clear`, { method: 'POST' });
+      firePlanChanged();
     } finally {
       setBusy(false);
       setSip(0);

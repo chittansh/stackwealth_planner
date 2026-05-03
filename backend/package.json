@@ -29,7 +29,8 @@
     "zod": "^3.23.8"
   },
   "optionalDependencies": {
-    "puppeteer": "^23.0.0"
+    "puppeteer": "^23.0.0",
+    "sharp": "^0.33.5"
   },
   "devDependencies": {
     "@stackwealth/shared": "workspace:*",

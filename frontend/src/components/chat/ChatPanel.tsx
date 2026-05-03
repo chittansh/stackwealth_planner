@@ -10,6 +10,7 @@ import { AskInput } from './AskInput';
 import { RiskGate } from './RiskGate';
 import { ChatSwitcher } from './ChatSwitcher';
 import { streamChat, uploadFiles, resetChat, hydrateChat } from '@/lib/api';
+import { firePlanChanged } from '@/lib/prompt';
 import { Sparkles, ListTodo, Plus } from 'lucide-react';
 import { useChatStore, type StoredMsg } from '@/lib/chatStore';
 
@@ -24,7 +25,7 @@ type ToolMsg = {
 
 type Msg =
   | { kind: 'user'; text: string; files?: { name: string; size: number }[] }
-  | { kind: 'status'; text: string }
+  | { kind: 'status'; text: string; tag?: string; done?: boolean; error?: boolean }
   | { kind: 'thinking' }
   | ToolMsg
   | { kind: 'assistant'; text: string }
@@ -33,6 +34,13 @@ type Msg =
 // Drop any in-flight "thinking" pills before appending the next event — once
 // a tool_call or assistant message lands, the generic spinner is obsolete.
 const replaceThinking = (m: Msg[], next: Msg): Msg[] => [...m.filter((x) => x.kind !== 'thinking'), next];
+
+// Replace any status pill carrying the same `tag` (e.g. drop the in-flight
+// "Reading attachments…" once the terminal "Extracted N fields" lands).
+const replaceTaggedStatus = (m: Msg[], tag: string, next: Msg): Msg[] => [
+  ...m.filter((x) => !(x.kind === 'status' && x.tag === tag)),
+  next,
+];
 
 // The store keeps StoredMsg shape (one union with all optional fields).
 // Cast safely — every Msg is a structural subset of StoredMsg.
@@ -132,30 +140,65 @@ export function ChatPanel({ householdId }: { householdId: string }) {
       setMessages((m) => [...m, userMsg, { kind: 'thinking' }]);
 
       let uploadHint = '';
+      let uploadFailedHard = false;
       if (attachments.length) {
-        setMessages((m) => replaceThinking(m, { kind: 'status', text: 'Reading attachments…' }));
+        setMessages((m) =>
+          replaceThinking(m, { kind: 'status', tag: 'upload', text: 'Reading attachments…' }),
+        );
         try {
           const r = await uploadFiles(householdId, attachments);
-          // Build a compact hint the agent can include in its reply.
-          uploadHint = (r.summaries ?? [])
+          const summaries = r.summaries ?? [];
+          uploadHint = summaries
             .map((s) =>
               s.error
-                ? `• ${s.filename} — extraction failed: ${s.error}`
-                : `• ${s.filename} (parser: ${s.parser_used}) — ${s.fields_extracted} fields extracted across [${s.sections_set.join(', ') || '—'}]; missing: ${s.missing.length ? s.missing.join(', ') : 'none'}`,
+                ? `• ${s.filename} — extraction FAILED: ${s.error}`
+                : `• ${s.filename} (parser=${s.parser_used}) — ${s.fields_extracted} field(s) extracted across [${s.sections_set.join(', ') || '—'}]; missing: ${s.missing.length ? s.missing.join(', ') : 'none'}`,
             )
             .join('\n');
-        } catch {
-          setMessages((m) => [...m, { kind: 'status', text: 'Upload failed.' }]);
+          const totalFields = summaries.reduce((n, s) => n + s.fields_extracted, 0);
+          const failed = summaries.some((s) => s.error || s.fields_extracted === 0);
+          uploadFailedHard = totalFields === 0;
+          if (totalFields > 0) firePlanChanged();
+          // Replace the in-flight pill with the terminal one — don't stack.
+          setMessages((m) =>
+            replaceTaggedStatus(m, 'upload', {
+              kind: 'status',
+              tag: 'upload',
+              done: !uploadFailedHard,
+              error: uploadFailedHard,
+              text: totalFields
+                ? `Extracted ${totalFields} field${totalFields === 1 ? '' : 's'} from ${summaries.length} file${summaries.length === 1 ? '' : 's'}`
+                : failed
+                ? `Could not extract from ${summaries.length} file${summaries.length === 1 ? '' : 's'}. Re-export as JPEG / PNG / PDF / CSV and try again.`
+                : 'Upload processed (no fields extracted)',
+            }),
+          );
+        } catch (err) {
+          uploadFailedHard = true;
+          setMessages((m) =>
+            replaceTaggedStatus(m, 'upload', {
+              kind: 'status',
+              tag: 'upload',
+              error: true,
+              text: `Upload failed: ${(err as Error).message}`,
+            }),
+          );
         }
         setMessages((m) => [...m, { kind: 'thinking' }]);
       }
 
-      // If files were attached but no chat text given, ask the agent to narrate.
-      const finalText =
-        text ||
-        (attachments.length
-          ? `I just uploaded ${attachments.length} file${attachments.length > 1 ? 's' : ''}.\n\nUpload result:\n${uploadHint}\n\nNarrate what was extracted, ask me only for what's missing, and DO NOT re-add anything that's already in the snapshot.`
-          : '');
+      // ALWAYS append the upload context to the agent message when attachments
+      // exist — even if the user typed text. Otherwise the agent has no idea
+      // any extraction happened.
+      const uploadContext = attachments.length
+        ? `\n\n[Uploaded files (already processed by the intake pipeline — DO NOT re-call intake_ingest):\n${uploadHint || '(no extraction summary available)'}\n\nWhat changed in PlanState is reflected in the snapshot above. Narrate it briefly and ask only for what's still missing. If extraction failed for a file, tell the user and suggest a workable alternative format.]`
+        : '';
+      const finalText = text
+        ? `${text}${uploadContext}`
+        : attachments.length
+        ? `I uploaded ${attachments.length} file${attachments.length > 1 ? 's' : ''}.${uploadContext}`
+        : '';
+      void uploadFailedHard; // reserved for future UX hooks
 
       try {
         for await (const ev of streamChat(householdId, finalText, store.activeChatId)) {
@@ -183,6 +226,8 @@ export function ChatPanel({ householdId }: { householdId: string }) {
                   : x,
               ),
             );
+            // Each tool result mutates the plan — push canvas to refresh now.
+            firePlanChanged();
           } else if (ev.event === 'message') {
             const reply = (ev.data as { text: string }).text;
             setMessages((m) => replaceThinking(m, { kind: 'assistant', text: reply }));
@@ -340,7 +385,7 @@ export function ChatPanel({ householdId }: { householdId: string }) {
 function renderMessages(
   messages: Msg[],
   householdId: string,
-  setMessages: React.Dispatch<React.SetStateAction<Msg[]>>,
+  setMessages: (updater: (prev: Msg[]) => Msg[]) => void,
 ): React.ReactNode[] {
   const out: React.ReactNode[] = [];
   let i = 0;
@@ -359,7 +404,8 @@ function renderMessages(
       continue;
     }
     if (m.kind === 'user') out.push(<MessageBubble key={i} text={m.text} files={m.files} />);
-    else if (m.kind === 'status') out.push(<StatusPill key={i} text={m.text} />);
+    else if (m.kind === 'status')
+      out.push(<StatusPill key={i} text={m.text} done={m.done} error={m.error} />);
     else if (m.kind === 'thinking') out.push(<ThinkingDots key={i} />);
     else if (m.kind === 'assistant') out.push(<AssistantMessage key={i} text={m.text} />);
     else if (m.kind === 'risk_gate') {

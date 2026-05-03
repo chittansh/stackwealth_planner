@@ -5,6 +5,7 @@ import { X } from 'lucide-react';
 import type { MilestonePin, PlanState } from '@/types/plan-state';
 import { formatINR } from '@/lib/utils';
 import { planSet } from '@/lib/api';
+import { firePlanChanged } from '@/lib/prompt';
 
 export function MilestoneDrawer({
   householdId,
@@ -32,6 +33,7 @@ export function MilestoneDrawer({
     }
     await planSet(householdId, `financial_goals.${idx}.target_year`, year);
     await planSet(householdId, `financial_goals.${idx}.target_amount`, Number(amount));
+    firePlanChanged();
     setBusy(false);
     onClose();
   };
