@@ -19,6 +19,8 @@ import { anthropic } from '@ai-sdk/anthropic';
 import { generateText, tool, type CoreMessage } from 'ai';
 import { z } from 'zod';
 
+import { getPlan } from '../db/client.js';
+import type { PlanState } from '../types/plan-state.js';
 import { ingest } from '../skills/intake/index.js';
 import {
   applySet,
@@ -441,9 +443,15 @@ export async function runPlannerTurn({
   const messages: CoreMessage[] = [...history, userMessage];
 
   const modelId = process.env.PLANNER_MODEL ?? 'claude-sonnet-4-6';
+  const planSnapshot = await getPlan(householdId).catch(() => null);
+  const stateSection = planSnapshot ? renderStateSummary(planSnapshot) : '';
+  const dynamicSystem = stateSection
+    ? `${SYSTEM_PROMPT}\n\n## Current PlanState (snapshot for THIS turn)\n\n${stateSection}\n\nIf you would call \`plan_add\` for an entry that already exists in the snapshot, use \`plan_set\` on the existing index instead — the server will refuse duplicates.`
+    : SYSTEM_PROMPT;
+
   const result = await generateText({
     model: anthropic(modelId),
-    system: SYSTEM_PROMPT,
+    system: dynamicSystem,
     messages,
     tools,
     maxSteps: 8,
@@ -479,4 +487,88 @@ export async function runPlannerTurn({
   convoMemory.set(key, next);
 
   return { text: result.text ?? '', steps: result.steps ?? [] };
+}
+
+/**
+ * Compact, human-readable summary of what's already in PlanState. Injected
+ * into the system prompt so the agent knows what exists before it tries to
+ * add anything.
+ */
+function renderStateSummary(plan: PlanState): string {
+  const lines: string[] = [];
+
+  const pd = plan.personal_details ?? {};
+  const setKeys = Object.entries(pd)
+    .filter(([, v]) => v !== null && v !== undefined && v !== '')
+    .map(([k]) => k);
+  if (setKeys.length) lines.push(`personal_details: ${setKeys.join(', ')}`);
+
+  const persons = plan.assumptions?.persons ?? [];
+  if (persons.length) {
+    lines.push('assumptions.persons:');
+    persons.forEach((p, i) => {
+      lines.push(
+        `  [${i}] name="${p.name}" dob=${p.date_of_birth ?? '—'} life_exp=${p.life_expectancy ?? '—'} retirement_age=${p.retirement_age ?? '—'} (id=${p.id})`,
+      );
+    });
+  }
+
+  const goals = plan.financial_goals ?? [];
+  if (goals.length) {
+    lines.push('financial_goals:');
+    goals.forEach((g, i) => {
+      lines.push(
+        `  [${i}] "${g.goal_name}" kind=${g.kind} year=${g.target_year ?? '—'} amount=${g.target_amount ?? '—'} (id=${g.id})`,
+      );
+    });
+  }
+
+  const inc = plan.income_details ?? {};
+  const incKeys = Object.entries(inc)
+    .filter(([, v]) => typeof v === 'number' && v > 0)
+    .map(([k, v]) => `${k}=${v}`);
+  if (incKeys.length) lines.push(`income_details: ${incKeys.join(', ')}`);
+
+  const exp = plan.monthly_expenses ?? {};
+  const expKeys = Object.entries(exp)
+    .filter(([, v]) => typeof v === 'number' && v > 0)
+    .map(([k, v]) => `${k}=${v}`);
+  if (expKeys.length) lines.push(`monthly_expenses: ${expKeys.join(', ')}`);
+
+  const lc = plan.liquid_capital ?? {};
+  const lcKeys = Object.entries(lc)
+    .filter(([, v]) => typeof v === 'number' && v > 0)
+    .map(([k, v]) => `${k}=${v}`);
+  if (lcKeys.length) lines.push(`liquid_capital: ${lcKeys.join(', ')}`);
+
+  const ll = plan.loans_liabilities ?? {};
+  const llSet = (['home_loan', 'car_loan', 'personal_loan', 'credit_card_dues'] as const).filter((k) => {
+    const b = ll[k];
+    return b && (b.outstanding_amount || b.emi);
+  });
+  if (llSet.length) lines.push(`loans_liabilities: ${llSet.join(', ')}`);
+
+  const ins = plan.insurance_details ?? {};
+  const insSet = (['term_plan', 'health_insurance', 'family_floater', 'ulip_or_endowment'] as const).filter(
+    (k) => {
+      const b = ins[k];
+      return b && (b.cover_amount || b.annual_premium);
+    },
+  );
+  if (insSet.length) lines.push(`insurance_details: ${insSet.join(', ')}`);
+
+  const fsi = plan.freedom_score_inputs ?? {};
+  const fsiKeys = Object.entries(fsi)
+    .filter(([, v]) => v !== null && v !== undefined && v !== 0 && v !== '')
+    .map(([k, v]) => `${k}=${v}`);
+  if (fsiKeys.length) lines.push(`freedom_score_inputs: ${fsiKeys.join(', ')}`);
+
+  if (plan.mutual_funds.length) lines.push(`mutual_funds: ${plan.mutual_funds.length} holdings`);
+  if (plan.equity_stocks.length) lines.push(`equity_stocks: ${plan.equity_stocks.length} holdings`);
+  if (plan.fixed_income.length) lines.push(`fixed_income: ${plan.fixed_income.length} holdings`);
+
+  const r = plan.computed?.risk_profile;
+  if (r) lines.push(`risk_profile: recommended_score=${r.recommended_score} (${r.recommended_profile})`);
+
+  return lines.length ? lines.join('\n') : '(plan is empty — start from scratch)';
 }

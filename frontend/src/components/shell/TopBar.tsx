@@ -1,10 +1,12 @@
 'use client';
 
-import { BarChart3, Table, Activity, Share, Download } from 'lucide-react';
+import { BarChart3, Table, Activity, Share, Download, ArrowLeft } from 'lucide-react';
+import Link from 'next/link';
 import { useRouter, usePathname, useSearchParams } from 'next/navigation';
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Dropdown } from '@/components/ui/Dropdown';
 import { QuickAddMenu } from './QuickAddMenu';
+import { fetchPlan } from '@/lib/api';
 
 const VIEWS = [
   { value: 'net-worth', label: 'Net Worth' },
@@ -71,8 +73,38 @@ export function TopBar({
     );
   }, []);
 
+  const [clientName, setClientName] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetchPlan(householdId)
+      .then((p) => !cancelled && setClientName(p.personal_details.full_name ?? null))
+      .catch(() => undefined);
+    const id = setInterval(() => {
+      fetchPlan(householdId)
+        .then((p) => !cancelled && setClientName(p.personal_details.full_name ?? null))
+        .catch(() => undefined);
+    }, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [householdId]);
+
   return (
-    <header className="h-14 px-6 flex items-center gap-2 border-b border-zinc-200 bg-white">
+    <header className="h-14 px-4 flex items-center gap-2 border-b border-zinc-200 bg-white">
+      <Link
+        href="/advisor/clients"
+        className="inline-flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-900 px-2 h-8 rounded-md hover:bg-zinc-50"
+        title="Back to clients"
+      >
+        <ArrowLeft size={13} />
+        <span className="hidden md:inline">Clients</span>
+      </Link>
+      <span className="text-zinc-300">/</span>
+      <span className="text-sm text-zinc-800 max-w-[180px] truncate" title={clientName ?? householdId}>
+        {clientName ?? <span className="text-zinc-400 font-mono">{householdId}</span>}
+      </span>
+      <span className="text-zinc-200 mx-1">·</span>
       <Dropdown
         value={view}
         options={VIEWS as unknown as { value: string; label: string }[]}

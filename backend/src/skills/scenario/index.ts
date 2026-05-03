@@ -23,15 +23,90 @@ export async function applySet(args: { household_id: string; path: string; value
   return { ok: true, updated_path: args.path };
 }
 
-export async function applyAdd(args: { household_id: string; path: string; row: unknown; source_type: EvidenceRow['source_type'] }) {
+export async function applyAdd(args: {
+  household_id: string;
+  path: string;
+  row: unknown;
+  source_type: EvidenceRow['source_type'];
+}) {
   const plan = await getPlan(args.household_id);
   if (!plan) return { ok: false, id: '' };
+  const list = (getPath(plan, args.path) as unknown[]) ?? [];
+
+  // Dedup guard — agent occasionally re-adds an existing entry instead of
+  // updating it. Refuse with a structured error so it can fall back to plan_set.
+  const dup = findDuplicate(args.path, list, args.row);
+  if (dup) {
+    return {
+      ok: false,
+      error: 'duplicate',
+      reason: dup.reason,
+      existing_id: dup.id,
+      existing_index: dup.index,
+      hint: dup.hint,
+    } as const;
+  }
+
   const id = (args.row as { id?: string })?.id ?? randomUUID();
   const rowWithId = { ...(args.row as object), id };
-  const list = (getPath(plan, args.path) as unknown[]) ?? [];
   setPath(plan, args.path, [...list, rowWithId]);
   await savePlan(recompute(plan));
   return { ok: true, id };
+}
+
+function findDuplicate(
+  path: string,
+  list: unknown[],
+  row: unknown,
+): { reason: string; id: string; index: number; hint: string } | null {
+  if (!Array.isArray(list) || !row || typeof row !== 'object') return null;
+  const r = row as Record<string, unknown>;
+
+  if (path === 'assumptions.persons') {
+    const incomingName = String(r.name ?? '').trim().toLowerCase();
+    const incomingDob = String(r.date_of_birth ?? '').trim();
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i] as { id?: string; name?: string; date_of_birth?: string };
+      const same =
+        (incomingName && e.name?.trim().toLowerCase() === incomingName) ||
+        (incomingDob && e.date_of_birth?.trim() === incomingDob);
+      if (same) {
+        return {
+          reason: `A person with ${incomingName ? `name "${e.name}"` : `DOB ${e.date_of_birth}`} already exists`,
+          id: e.id ?? '',
+          index: i,
+          hint: `Use plan_set on assumptions.persons.${i}.<field> to update, or plan_remove first.`,
+        };
+      }
+    }
+  }
+
+  if (path === 'financial_goals') {
+    const incomingName = String(r.goal_name ?? '').trim().toLowerCase();
+    const incomingYear = (r.target_year as number | undefined) ?? null;
+    const incomingKind = String(r.kind ?? '').trim();
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i] as { id?: string; goal_name?: string; target_year?: number; kind?: string };
+      const sameName = incomingName && e.goal_name?.trim().toLowerCase() === incomingName;
+      const sameYearAndKind =
+        incomingYear &&
+        e.target_year === incomingYear &&
+        incomingKind &&
+        e.kind === incomingKind;
+      if (sameName || sameYearAndKind) {
+        return {
+          reason: sameName
+            ? `Goal "${e.goal_name}" already exists`
+            : `A ${e.kind} goal in ${e.target_year} already exists ("${e.goal_name}")`,
+          id: e.id ?? '',
+          index: i,
+          hint: `Use plan_set on financial_goals.${i}.<field> to update, or plan_remove first.`,
+        };
+      }
+    }
+  }
+
+  return null;
 }
 
 export async function applyRemove(args: { household_id: string; path: string; id: string }) {

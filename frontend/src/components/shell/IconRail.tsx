@@ -3,22 +3,12 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
-import {
-  Home,
-  Users,
-  Combine,
-  BookOpen,
-  Newspaper,
-  Settings,
-  RotateCw,
-  Trash2,
-} from 'lucide-react';
+import { Home, Combine, BookOpen, Newspaper, Settings, RotateCw, Trash2 } from 'lucide-react';
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:4000';
 
 const NAV: { href: string; label: string; Icon: React.ComponentType<{ size?: number }> }[] = [
-  { href: '/plan/me', label: 'My plan', Icon: Home },
-  { href: '/advisor/clients', label: 'Clients', Icon: Users },
+  { href: '/advisor/clients', label: 'Clients', Icon: Home },
   { href: '/advisor/household-merge', label: 'Household merge', Icon: Combine },
   { href: '/advisor/knowledge', label: 'Knowledge base', Icon: BookOpen },
   { href: '/advisor/news', label: 'News', Icon: Newspaper },
@@ -39,8 +29,7 @@ export function IconRail({ householdId }: { householdId: string }) {
       </Link>
 
       {NAV.map(({ href, label, Icon }) => {
-        const active =
-          href === '/plan/me' ? pathname?.startsWith('/plan/') : pathname?.startsWith(href);
+        const active = pathname?.startsWith(href);
         return (
           <Link
             key={href}

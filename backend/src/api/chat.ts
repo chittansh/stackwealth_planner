@@ -15,6 +15,7 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { runPlannerTurn, clearConvo, hydrateConvo } from '../agent/planner.js';
 import { collectNumbers, validateAssistantText } from '../agent/validator.js';
+import { getPlan } from '../db/client.js';
 
 export const chatRoute = new Hono();
 
@@ -48,7 +49,11 @@ chatRoute.post('/', async (c) => {
   return streamSSE(c, async (stream) => {
     await stream.writeSSE({ event: 'status', data: 'thinking' });
 
+    // Prime the validator's bag with every number already in PlanState — the
+    // agent can reference these in prose even when no tool call fires this turn.
     const seenNumbers = new Set<string>();
+    const priorPlan = await getPlan(body.household_id).catch(() => null);
+    if (priorPlan) collectNumbers(priorPlan, seenNumbers);
 
     try {
       const result = await runPlannerTurn({

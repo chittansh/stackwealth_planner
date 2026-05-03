@@ -2,12 +2,11 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Users, Combine, BookOpen, Newspaper, Home } from 'lucide-react';
+import { Users, Combine, BookOpen, Newspaper } from 'lucide-react';
 import { IconRail } from './IconRail';
 import { Toast } from '@/components/ui/Toast';
 
 const NAV = [
-  { href: '/plan/me', label: 'My plan', Icon: Home },
   { href: '/advisor/clients', label: 'Clients', Icon: Users },
   { href: '/advisor/household-merge', label: 'Household merge', Icon: Combine },
   { href: '/advisor/knowledge', label: 'Knowledge base', Icon: BookOpen },

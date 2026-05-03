@@ -103,3 +103,13 @@ export async function hydrateChat(
     body: JSON.stringify({ turns }),
   }).then((r) => r.json());
 }
+
+export async function createHousehold(name: string, advisorId?: string): Promise<{ id: string }> {
+  const r = await fetch(`${BASE}/api/plan`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name, advisor_id: advisorId }),
+  });
+  if (!r.ok) throw new Error(`createHousehold ${r.status}`);
+  return r.json();
+}

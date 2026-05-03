@@ -42,6 +42,10 @@ export function validateAssistantText(text: string, knownNumbers: Set<string>): 
   return text.replace(NUMBER_RE, (token) => {
     const stripped = token.replace(/,/g, '').replace(/\.0+$/, '');
     if (known.has(stripped)) return token;
+    // Year-range whitelist (1900–2200) — calendar years are factual references,
+    // not numeric claims that need tool-tracing.
+    const asInt = Number(stripped);
+    if (Number.isInteger(asInt) && asInt >= 1900 && asInt <= 2200) return token;
     // Allow values within ±1 of a known integer (rounding) and within 2% of
     // any known number (compounding/projection drift).
     const n = Number(stripped);

@@ -4,6 +4,7 @@
  * pipeline as agent-driven edits.
  */
 import { Hono } from 'hono';
+import { randomUUID } from 'node:crypto';
 import { getPlan, savePlan } from '../db/client.js';
 import { applySet, applyAdd, applyRemove, applyAssumption } from '../skills/scenario/index.js';
 import { emptyPlanState } from '../types/plan-state.js';
@@ -18,6 +19,30 @@ planRoute.get('/:id', async (c) => {
     await savePlan(plan);
   }
   return c.json(plan);
+});
+
+/**
+ * Create a new household with a friendly name. Returns the new id so the
+ * client can navigate to /plan/:id. Idempotent if the same name + id is
+ * passed.
+ */
+planRoute.post('/', async (c) => {
+  const body = await c.req
+    .json<{ name?: string; advisor_id?: string; id?: string }>()
+    .catch(() => ({}));
+  const id = body.id ?? `h_${randomUUID().slice(0, 8)}`;
+  const existing = await getPlan(id);
+  if (existing) {
+    if (body.name) existing.personal_details.full_name = body.name;
+    if (body.advisor_id) (existing as unknown as { advisor_id?: string }).advisor_id = body.advisor_id;
+    await savePlan(existing);
+    return c.json({ ok: true, id, created: false });
+  }
+  const plan = emptyPlanState(id);
+  if (body.name) plan.personal_details.full_name = body.name;
+  if (body.advisor_id) (plan as unknown as { advisor_id?: string }).advisor_id = body.advisor_id;
+  await savePlan(plan);
+  return c.json({ ok: true, id, created: true });
 });
 
 planRoute.post('/:id/set', async (c) => {
