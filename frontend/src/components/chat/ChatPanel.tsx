@@ -131,21 +131,34 @@ export function ChatPanel({ householdId }: { householdId: string }) {
       };
       setMessages((m) => [...m, userMsg, { kind: 'thinking' }]);
 
+      let uploadHint = '';
       if (attachments.length) {
         setMessages((m) => replaceThinking(m, { kind: 'status', text: 'Reading attachments…' }));
         try {
-          await uploadFiles(householdId, attachments);
+          const r = await uploadFiles(householdId, attachments);
+          // Build a compact hint the agent can include in its reply.
+          uploadHint = (r.summaries ?? [])
+            .map((s) =>
+              s.error
+                ? `• ${s.filename} — extraction failed: ${s.error}`
+                : `• ${s.filename} (parser: ${s.parser_used}) — ${s.fields_extracted} fields extracted across [${s.sections_set.join(', ') || '—'}]; missing: ${s.missing.length ? s.missing.join(', ') : 'none'}`,
+            )
+            .join('\n');
         } catch {
           setMessages((m) => [...m, { kind: 'status', text: 'Upload failed.' }]);
         }
         setMessages((m) => [...m, { kind: 'thinking' }]);
       }
 
-      // The agent decides whether to call intake_ingest on long pastes and
-      // when to suggest the risk profile — no client-side regex tripwires.
+      // If files were attached but no chat text given, ask the agent to narrate.
+      const finalText =
+        text ||
+        (attachments.length
+          ? `I just uploaded ${attachments.length} file${attachments.length > 1 ? 's' : ''}.\n\nUpload result:\n${uploadHint}\n\nNarrate what was extracted, ask me only for what's missing, and DO NOT re-add anything that's already in the snapshot.`
+          : '');
 
       try {
-        for await (const ev of streamChat(householdId, text, store.activeChatId)) {
+        for await (const ev of streamChat(householdId, finalText, store.activeChatId)) {
           if (ev.event === 'tool_call') {
             const data = ev.data as { id: string; name: string; args: unknown };
             setMessages((m) =>

@@ -14,34 +14,81 @@ uploadRoute.post('/:id', async (c) => {
   const file = form['file'] as File | File[] | undefined;
   const files = Array.isArray(file) ? file : file ? [file] : [];
 
-  const results: unknown[] = [];
+  type Summary = {
+    filename: string;
+    parser_used: string;
+    sections_set: string[];
+    list_rows_added: number;
+    fields_extracted: number;
+    missing: string[];
+    error?: string;
+  };
+  const summaries: Summary[] = [];
 
   for (const f of files) {
     const buf = Buffer.from(await f.arrayBuffer());
-    const result = await ingest({
-      household_id: id,
-      source: {
-        kind: 'file',
-        filename: f.name,
-        mime: f.type || 'application/octet-stream',
-        contents_b64: buf.toString('base64'),
-      },
-    });
-    results.push(result);
+    const filename = f.name;
+    let result;
+    try {
+      result = await ingest({
+        household_id: id,
+        source: {
+          kind: 'file',
+          filename,
+          mime: f.type || 'application/octet-stream',
+          contents_b64: buf.toString('base64'),
+        },
+      });
+    } catch (err) {
+      summaries.push({
+        filename,
+        parser_used: 'failed',
+        sections_set: [],
+        list_rows_added: 0,
+        fields_extracted: 0,
+        missing: [],
+        error: (err as Error).message,
+      });
+      continue;
+    }
+
+    const sectionsSet: string[] = [];
+    let listRowsAdded = 0;
 
     // Apply each top-level partial section as a single set; lists go through add().
     for (const [path, value] of Object.entries(result.partial_state ?? {})) {
       if (Array.isArray(value)) {
         for (const row of value) {
-          await applyAdd({ household_id: id, path, row, source_type: parserToSource(result.parser_used) });
+          const addRes = await applyAdd({
+            household_id: id,
+            path,
+            row,
+            source_type: parserToSource(result.parser_used),
+          });
+          if ((addRes as { ok: boolean }).ok) listRowsAdded++;
         }
       } else {
-        await applySet({ household_id: id, path, value, source_type: parserToSource(result.parser_used) });
+        await applySet({
+          household_id: id,
+          path,
+          value,
+          source_type: parserToSource(result.parser_used),
+        });
       }
+      sectionsSet.push(path);
     }
+
+    summaries.push({
+      filename,
+      parser_used: result.parser_used,
+      sections_set: sectionsSet,
+      list_rows_added: listRowsAdded,
+      fields_extracted: result.evidence?.length ?? 0,
+      missing: result.missing ?? [],
+    });
   }
 
-  return c.json({ ok: true, results });
+  return c.json({ ok: true, summaries });
 });
 
 uploadRoute.post('/:id/text', async (c) => {

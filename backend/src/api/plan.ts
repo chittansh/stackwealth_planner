@@ -26,10 +26,9 @@ planRoute.get('/:id', async (c) => {
  * client can navigate to /plan/:id. Idempotent if the same name + id is
  * passed.
  */
+type CreateBody = { name?: string; advisor_id?: string; id?: string };
 planRoute.post('/', async (c) => {
-  const body = await c.req
-    .json<{ name?: string; advisor_id?: string; id?: string }>()
-    .catch(() => ({}));
+  const body: CreateBody = await c.req.json<CreateBody>().catch(() => ({}) as CreateBody);
   const id = body.id ?? `h_${randomUUID().slice(0, 8)}`;
   const existing = await getPlan(id);
   if (existing) {

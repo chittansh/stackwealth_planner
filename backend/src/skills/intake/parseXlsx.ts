@@ -28,21 +28,18 @@ export async function parseXlsx(buf: Buffer, filename: string): Promise<IngestRe
 
   const matched = KNOWN_TEMPLATES.find((t) => t.required_sheets.every((s) => sheetNames.includes(s)));
 
-  if (matched) {
-    // Day 2 — implement deterministic per-template extractors. For now, fall through to LLM
-    // with a hint about which template was matched.
-    const flat = flattenWorkbook(wb);
-    const result = await llmExtract({
-      text: `[matched_template=${matched.name}]\n\n${flat}`,
-      source_type: 'xlsx',
-      filename,
-    });
-    return { ...result, parser_used: `xlsx:${matched.name}+llm` };
-  }
-
   const flat = flattenWorkbook(wb);
-  const result = await llmExtract({ text: flat, source_type: 'xlsx', filename });
-  return { ...result, parser_used: 'xlsx+llm' };
+  const hint = matched
+    ? `Excel matches the "${matched.name}" template; sheets: ${sheetNames.join(', ')}.`
+    : `Excel with ${sheetNames.length} sheet(s): ${sheetNames.join(', ')}.`;
+
+  const result = await llmExtract({
+    text: flat,
+    source_type: 'xlsx',
+    filename,
+    hint,
+  });
+  return { ...result, parser_used: matched ? `xlsx:${matched.name}+multimodal` : 'xlsx+multimodal' };
 }
 
 function flattenWorkbook(wb: XLSX.WorkBook): string {
@@ -51,7 +48,11 @@ function flattenWorkbook(wb: XLSX.WorkBook): string {
     const sheet = wb.Sheets[name];
     const csv = XLSX.utils.sheet_to_csv(sheet, { strip: true, blankrows: false });
     if (!csv.trim()) continue;
-    out.push(`### Sheet: ${name}\n${csv.split('\n').slice(0, 200).join('\n')}`);
+    // Cap each sheet to the first 400 lines so a giant ledger doesn't blow context.
+    const lines = csv.split('\n');
+    const truncated = lines.length > 400;
+    const body = (truncated ? lines.slice(0, 400) : lines).join('\n');
+    out.push(`### Sheet: ${name}${truncated ? ` (first 400 of ${lines.length} rows)` : ''}\n${body}`);
   }
   return out.join('\n\n');
 }

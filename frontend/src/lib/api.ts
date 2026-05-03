@@ -10,7 +10,20 @@ export async function fetchPlan(id: string): Promise<PlanState> {
   return r.json();
 }
 
-export async function uploadFiles(id: string, files: File[]): Promise<unknown> {
+export type UploadSummary = {
+  filename: string;
+  parser_used: string;
+  sections_set: string[];
+  list_rows_added: number;
+  fields_extracted: number;
+  missing: string[];
+  error?: string;
+};
+
+export async function uploadFiles(
+  id: string,
+  files: File[],
+): Promise<{ ok: boolean; summaries: UploadSummary[] }> {
   const fd = new FormData();
   for (const f of files) fd.append('file', f);
   const r = await fetch(`${BASE}/api/upload/${id}`, { method: 'POST', body: fd });

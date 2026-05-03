@@ -5,7 +5,6 @@
  *   - AA-style bank statement
  * Anchors per `aa_pdf_patterns.md`.
  */
-// @ts-expect-error pdf-parse has no shipped types
 import pdfParse from 'pdf-parse';
 import { randomUUID } from 'node:crypto';
 import type { IngestResult } from './index.js';

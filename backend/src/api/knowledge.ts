@@ -1,6 +1,5 @@
 import { Hono } from 'hono';
 import { ingestDocument, listDocuments, retrieve } from '../skills/knowledge/index.js';
-// @ts-expect-error pdf-parse has no shipped types
 import pdfParse from 'pdf-parse';
 import * as XLSX from 'xlsx';
 import mammoth from 'mammoth';
