@@ -30,7 +30,7 @@ export function GoalsView({ plan }: { plan: PlanState | null }) {
             const yr = g.target_year ?? today + (g.horizon_years ?? 10);
             return (
               <li key={g.id} className="flex items-center gap-3">
-                <Pill color={status.color}>{status.label}</Pill>
+                <Pill tone={status.tone}>{status.label}</Pill>
                 <div className="flex-1">
                   <div className="flex justify-between text-sm">
                     <span className="text-zinc-800">
@@ -52,7 +52,7 @@ export function GoalsView({ plan }: { plan: PlanState | null }) {
         <div className="mt-3 ml-1 text-[11px] uppercase tracking-wide text-zinc-400">horizon · {today + horizon}</div>
       </div>
       {plan.computed.risk_profile?.alignment_status === 'goal_risk_mismatch' && (
-        <div className="mt-4 rounded-lg bg-amber-50 border border-amber-100 p-3 text-xs text-amber-800">
+        <div className="mt-4 rounded-lg bg-zinc-50 border border-zinc-200 p-3 text-xs text-zinc-600">
           One or more goals require more risk than is prudent. Try: increase contribution · extend horizon · reduce
           target · split into essential and aspirational layers.
         </div>
@@ -61,12 +61,12 @@ export function GoalsView({ plan }: { plan: PlanState | null }) {
   );
 }
 
-function goalStatus(g: Goal, recommendedScore: number): { label: string; color: 'emerald' | 'amber' | 'rose' } {
+function goalStatus(g: Goal, recommendedScore: number): { label: string; tone: 'matcha' | 'muted' | 'dark' } {
   const r = estReqReturn(g);
   const need = r <= 0.06 ? 25 : r <= 0.08 ? 40 : r <= 0.10 ? 55 : r <= 0.12 ? 70 : r <= 0.14 ? 85 : 95;
-  if (need <= recommendedScore - 10) return { label: 'on track', color: 'emerald' };
-  if (need <= recommendedScore + 5) return { label: 'at risk', color: 'amber' };
-  return { label: 'unrealistic', color: 'rose' };
+  if (need <= recommendedScore - 10) return { label: 'on track', tone: 'matcha' };
+  if (need <= recommendedScore + 5) return { label: 'at risk', tone: 'muted' };
+  return { label: 'unrealistic', tone: 'dark' };
 }
 
 function estReqReturn(g: Goal): number {
@@ -90,11 +90,13 @@ function estReqReturn(g: Goal): number {
   return (lo + hi) / 2;
 }
 
-function Pill({ color, children }: { color: 'emerald' | 'amber' | 'rose'; children: React.ReactNode }) {
+function Pill({ tone, children }: { tone: 'matcha' | 'muted' | 'dark'; children: React.ReactNode }) {
   const map = {
-    emerald: 'bg-emerald-50 text-emerald-700',
-    amber: 'bg-amber-50 text-amber-700',
-    rose: 'bg-rose-50 text-rose-700',
+    matcha: 'bg-[var(--color-accent-soft)] text-[color:var(--color-accent)]',
+    muted: 'bg-zinc-100 text-zinc-600',
+    dark: 'bg-zinc-200 text-zinc-800',
   } as const;
-  return <span className={`text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full ${map[color]}`}>{children}</span>;
+  return (
+    <span className={`text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full ${map[tone]}`}>{children}</span>
+  );
 }

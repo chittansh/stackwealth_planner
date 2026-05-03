@@ -41,12 +41,12 @@ export function NetWorthChart({
           <AreaChart data={merged} margin={{ top: 10, right: 24, bottom: 8, left: 0 }}>
             <defs>
               <linearGradient id="grad-baseline" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#6b8ee5" stopOpacity={0.45} />
-                <stop offset="100%" stopColor="#6b8ee5" stopOpacity={0.05} />
+                <stop offset="0%" stopColor="#52525b" stopOpacity={0.18} />
+                <stop offset="100%" stopColor="#52525b" stopOpacity={0.02} />
               </linearGradient>
               <linearGradient id="grad-planb" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#a189d6" stopOpacity={0.4} />
-                <stop offset="100%" stopColor="#a189d6" stopOpacity={0.04} />
+                <stop offset="0%" stopColor="#87a17e" stopOpacity={0.32} />
+                <stop offset="100%" stopColor="#87a17e" stopOpacity={0.03} />
               </linearGradient>
             </defs>
             <XAxis
@@ -67,8 +67,8 @@ export function NetWorthChart({
               formatter={(v: number) => formatINR(v, { compact: true })}
               contentStyle={{ borderRadius: 8, border: '1px solid #e4e4e7', fontSize: 12 }}
             />
-            <Area type="monotone" dataKey="baseline" stroke="#6b8ee5" strokeWidth={2} fill="url(#grad-baseline)" dot={false} />
-            {planB && <Area type="monotone" dataKey="planB" stroke="#a189d6" strokeWidth={2} fill="url(#grad-planb)" dot={false} />}
+            <Area type="monotone" dataKey="baseline" stroke="#52525b" strokeWidth={1.5} fill="url(#grad-baseline)" dot={false} />
+            {planB && <Area type="monotone" dataKey="planB" stroke="#87a17e" strokeWidth={1.5} fill="url(#grad-planb)" dot={false} />}
             {pins.map((p, i) => {
               const point = merged.find((m) => m.year === p.year);
               if (!point) return null;
@@ -77,9 +77,9 @@ export function NetWorthChart({
                   key={i}
                   x={p.year}
                   y={point.baseline ?? 0}
-                  r={6}
-                  stroke="#6b8ee5"
-                  strokeWidth={2}
+                  r={5}
+                  stroke="#52525b"
+                  strokeWidth={1.5}
                   fill="#fff"
                   onClick={() => setPinIdx(i)}
                   style={{ cursor: 'pointer' }}

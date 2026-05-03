@@ -18,14 +18,14 @@ export function ScenarioChips({ plan }: { plan: PlanState | null }) {
 
   return (
     <div className="mt-2 flex flex-wrap items-center gap-2">
-      <Chip label="Baseline" color="#6b8ee5" active />
+      <Chip label="Baseline" color="#52525b" active />
       {plan.scenarios.map((s, i) => {
         const active = plan.active_scenario_ids.includes(s.id);
         return (
           <Chip
             key={s.id}
             label={s.label || `Scenario ${String.fromCharCode(65 + i)}`}
-            color="#a189d6"
+            color="#87a17e"
             active={active}
             onClick={() => toggle(s.id)}
           />

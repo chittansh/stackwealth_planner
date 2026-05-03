@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { Upload, FileText } from 'lucide-react';
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:4000';
-const ORG = 'demo';
+const ORG = 'main';
 
 type Doc = { id: string; filename: string; uploaded_at: string; chunk_count: number };
 

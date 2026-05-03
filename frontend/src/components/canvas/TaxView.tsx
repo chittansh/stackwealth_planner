@@ -42,7 +42,7 @@ export function TaxView({ householdId, plan }: { householdId: string; plan: Plan
         >
           {busy ? 'Running…' : 'Run tax review'}
         </button>
-        {err && <p className="text-xs text-amber-600">{err}</p>}
+        {err && <p className="text-xs text-zinc-500">{err}</p>}
       </div>
     );
   }
@@ -58,7 +58,7 @@ export function TaxView({ householdId, plan }: { householdId: string; plan: Plan
           <span className="text-zinc-400 text-xs">of ₹1.25 L</span>
         </div>
         <div className="mt-3 h-2 rounded-full bg-zinc-100 overflow-hidden">
-          <div className="h-full bg-emerald-500" style={{ width: `${headroomPct}%` }} />
+          <div className="h-full" style={{ width: `${headroomPct}%`, background: 'var(--color-accent)' }} />
         </div>
         <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
           <Stat label="Realized LTCG" value={formatINR(data.realized_ltcg_fy, { compact: true })} />
@@ -94,7 +94,7 @@ export function TaxView({ householdId, plan }: { householdId: string; plan: Plan
         )}
 
         {data.fee_vs_value_warnings.length > 0 && (
-          <ul className="mt-4 text-xs text-amber-600 space-y-1">
+          <ul className="mt-4 text-xs text-zinc-500 space-y-1">
             {data.fee_vs_value_warnings.map((w, i) => (
               <li key={i}>· {w}</li>
             ))}
@@ -118,12 +118,14 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 function Row({ label, value, tag }: { label: string; value: string; tag: 'gain' | 'loss' }) {
+  const tagClass =
+    tag === 'gain'
+      ? 'bg-[var(--color-accent-soft)] text-[color:var(--color-accent)]'
+      : 'bg-zinc-100 text-zinc-700';
   return (
     <div className="flex items-center justify-between border-b border-zinc-100 pb-1.5 last:border-0 last:pb-0">
       <div className="flex items-center gap-2">
-        <span className={`px-1.5 py-0.5 text-[10px] uppercase rounded ${tag === 'gain' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
-          {tag}
-        </span>
+        <span className={`px-1.5 py-0.5 text-[10px] uppercase rounded ${tagClass}`}>{tag}</span>
         <span className="text-zinc-700">{label}</span>
       </div>
       <span className="text-xs text-zinc-600">{value}</span>

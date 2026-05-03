@@ -9,7 +9,20 @@ import { eq } from 'drizzle-orm';
 import * as schema from './schema.js';
 import { emptyPlanState, type PlanState } from '../types/plan-state.js';
 
-const url = process.env.DATABASE_URL;
+const rawUrl = process.env.DATABASE_URL?.trim();
+// Treat the .env.example placeholder (or any obviously-fake URL) as "unset" so
+// the backend falls back to the in-memory store instead of trying to dial a
+// host that doesn't exist.
+const isPlaceholder =
+  !rawUrl ||
+  rawUrl.includes('user:pass@host') ||
+  rawUrl.includes('your-neon-host') ||
+  rawUrl === 'postgres://';
+const url = isPlaceholder ? null : rawUrl;
+
+if (rawUrl && isPlaceholder) {
+  console.warn('[db] DATABASE_URL looks like a placeholder — using in-memory store instead.');
+}
 
 const client = url ? postgres(url, { prepare: false }) : null;
 export const db = client ? drizzle(client, { schema }) : null;
@@ -18,10 +31,11 @@ const memory = new Map<string, PlanState>();
 
 function ensureFixture(household_id: string): PlanState {
   if (memory.has(household_id)) return memory.get(household_id)!;
-  const fixture = emptyPlanState(household_id);
-  fixture.personal_details.full_name = household_id === 'demo' ? 'Demo Household' : `Household ${household_id}`;
-  memory.set(household_id, fixture);
-  return fixture;
+  // Brand-new household — start fully empty. The agent / UI will fill in
+  // personal_details on the first user turn.
+  const blank = emptyPlanState(household_id);
+  memory.set(household_id, blank);
+  return blank;
 }
 
 export async function getPlan(household_id: string): Promise<PlanState | null> {

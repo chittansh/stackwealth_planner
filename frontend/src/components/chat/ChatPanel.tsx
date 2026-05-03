@@ -1,55 +1,84 @@
 'use client';
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { MessageBubble } from './MessageBubble';
 import { StatusPill } from './StatusPill';
+import { ThinkingDots } from './ThinkingDots';
+import { ToolGroup, type GroupedTool } from './ToolGroup';
 import { AssistantMessage } from './AssistantMessage';
 import { AskInput } from './AskInput';
 import { RiskGate } from './RiskGate';
-import { fetchPlan, streamChat, uploadFiles, uploadText } from '@/lib/api';
-import { Sparkles, ListTodo } from 'lucide-react';
-import type { PlanState } from '@/types/plan-state';
+import { streamChat, uploadFiles, resetChat } from '@/lib/api';
+import { Sparkles, ListTodo, RotateCw } from 'lucide-react';
+
+type ToolMsg = {
+  kind: 'tool';
+  id: string;
+  name: string;
+  args: unknown;
+  result?: unknown;
+  state: 'running' | 'done' | 'error';
+};
 
 type Msg =
   | { kind: 'user'; text: string; files?: { name: string; size: number }[] }
   | { kind: 'status'; text: string }
+  | { kind: 'thinking' }
+  | ToolMsg
   | { kind: 'assistant'; text: string }
   | { kind: 'risk_gate' };
 
+// Drop any in-flight "thinking" pills before appending the next event — once
+// a tool_call or assistant message lands, the generic spinner is obsolete.
+const replaceThinking = (m: Msg[], next: Msg): Msg[] => [...m.filter((x) => x.kind !== 'thinking'), next];
+
 type Mode = 'chat' | 'topics';
 
-const PLANNING_TOPICS = [
-  'Financial independence',
-  'Life changes',
-  'Buying property',
-  'Retirement planning',
-  'Optimization',
-  'Scenarios',
-  'Plan tools',
+const PLANNING_TOPICS: { label: string; prompt: string }[] = [
+  {
+    label: 'Set up my plan',
+    prompt: "Let's set up my plan from scratch — ask me what you need.",
+  },
+  {
+    label: 'Add my income & expenses',
+    prompt: "Help me capture my monthly income and recurring expenses.",
+  },
+  {
+    label: 'Add a financial goal',
+    prompt: "I want to add a financial goal — walk me through it.",
+  },
+  {
+    label: 'Compute my Freedom Score',
+    prompt: "Compute my Freedom Score and tell me what's holding me back.",
+  },
+  {
+    label: 'Set my risk profile',
+    prompt: 'Run the 3-question risk profile.',
+  },
+  {
+    label: 'Recommend an allocation',
+    prompt: 'Recommend an asset allocation for me.',
+  },
+  {
+    label: 'Compare scenarios (Plan A vs Plan B)',
+    prompt: 'What if I retire 5 years later? Pin it as Plan B and compare.',
+  },
+  {
+    label: 'Run Monte Carlo',
+    prompt: 'Run a Monte Carlo simulation and tell me the P10/P50/P90 freedom age.',
+  },
+  {
+    label: 'Tax harvest review',
+    prompt: 'Review my LTCG/STCG tax harvesting opportunities for this FY.',
+  },
 ];
-
-const RISK_TRIGGERS = /(risk|allocat|tax|monte\s?carlo|portfolio|invest)/i;
 
 export function ChatPanel({ householdId }: { householdId: string }) {
   const [mode, setMode] = useState<Mode>('chat');
   const [messages, setMessages] = useState<Msg[]>([]);
   const [busy, setBusy] = useState(false);
-  const [plan, setPlan] = useState<PlanState | null>(null);
   const [dragging, setDragging] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const tick = () => fetchPlan(householdId).then((p) => !cancelled && setPlan(p)).catch(() => undefined);
-    tick();
-    const id = setInterval(tick, 2000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [householdId]);
-
-  const riskSet = !!plan?.computed.risk_profile?.recommended_score;
 
   const handleSend = useCallback(
     async (text: string, attachments: File[]) => {
@@ -60,53 +89,68 @@ export function ChatPanel({ householdId }: { householdId: string }) {
         text,
         files: attachments.map((f) => ({ name: f.name, size: f.size })),
       };
-      setMessages((m) => [...m, userMsg]);
+      setMessages((m) => [...m, userMsg, { kind: 'thinking' }]);
 
       if (attachments.length) {
-        setMessages((m) => [...m, { kind: 'status', text: 'Reading attachments…' }]);
+        setMessages((m) => replaceThinking(m, { kind: 'status', text: 'Reading attachments…' }));
         try {
           await uploadFiles(householdId, attachments);
         } catch {
           setMessages((m) => [...m, { kind: 'status', text: 'Upload failed.' }]);
         }
+        setMessages((m) => [...m, { kind: 'thinking' }]);
       }
 
-      if (text && attachments.length === 0 && text.length > 200) {
-        setMessages((m) => [...m, { kind: 'status', text: 'Extracting from your note…' }]);
-        try {
-          await uploadText(householdId, text, 'user');
-        } catch {
-          /* fall through */
-        }
-      }
-
-      // If the message touches a risk-gated topic and we have no profile, drop the in-chat gate.
-      if (!riskSet && RISK_TRIGGERS.test(text)) {
-        setMessages((m) => [...m, { kind: 'risk_gate' }]);
-      }
+      // The agent decides whether to call intake_ingest on long pastes and
+      // when to suggest the risk profile — no client-side regex tripwires.
 
       try {
         for await (const ev of streamChat(householdId, text)) {
           if (ev.event === 'tool_call') {
-            const name = (ev.data as { name: string }).name;
-            setMessages((m) => [...m, { kind: 'status', text: `${humanizeTool(name)}…` }]);
+            const data = ev.data as { id: string; name: string; args: unknown };
+            setMessages((m) =>
+              replaceThinking(m, {
+                kind: 'tool',
+                id: data.id,
+                name: data.name,
+                args: data.args,
+                state: 'running',
+              }),
+            );
+          } else if (ev.event === 'tool_result') {
+            const data = ev.data as { id: string; name: string; result: unknown };
+            const errored =
+              data.result &&
+              typeof data.result === 'object' &&
+              'error' in (data.result as Record<string, unknown>);
+            setMessages((m) =>
+              m.map((x) =>
+                x.kind === 'tool' && x.id === data.id
+                  ? { ...x, result: data.result, state: errored ? 'error' : 'done' }
+                  : x,
+              ),
+            );
           } else if (ev.event === 'message') {
             const reply = (ev.data as { text: string }).text;
-            setMessages((m) => [...m, { kind: 'assistant', text: reply }]);
+            setMessages((m) => replaceThinking(m, { kind: 'assistant', text: reply }));
           } else if (ev.event === 'error') {
-            setMessages((m) => [...m, { kind: 'assistant', text: 'Something went wrong. Try again.' }]);
+            setMessages((m) =>
+              replaceThinking(m, { kind: 'assistant', text: 'Something went wrong. Try again.' }),
+            );
           }
         }
       } catch {
-        setMessages((m) => [...m, { kind: 'assistant', text: 'Network error.' }]);
+        setMessages((m) => replaceThinking(m, { kind: 'assistant', text: 'Network error.' }));
       } finally {
+        // Make sure no orphan "thinking" pill is left behind on early returns.
+        setMessages((m) => m.filter((x) => x.kind !== 'thinking'));
         setBusy(false);
         requestAnimationFrame(() => {
           containerRef.current?.scrollTo({ top: containerRef.current.scrollHeight, behavior: 'smooth' });
         });
       }
     },
-    [householdId, riskSet],
+    [householdId],
   );
 
   const onDragOver = useCallback((e: React.DragEvent<HTMLElement>) => {
@@ -159,22 +203,33 @@ export function ChatPanel({ householdId }: { householdId: string }) {
         >
           <ListTodo size={12} className="inline mr-1" /> Topics
         </button>
+        <button
+          onClick={async () => {
+            if (busy) return;
+            await resetChat(householdId).catch(() => undefined);
+            setMessages([]);
+          }}
+          title="Clear chat history (plan data is kept)"
+          className="ml-auto text-xs text-zinc-400 hover:text-zinc-700 inline-flex items-center gap-1"
+        >
+          <RotateCw size={11} /> New chat
+        </button>
       </div>
 
       {mode === 'topics' ? (
         <div className="p-3 text-sm text-zinc-700">
-          <div className="text-xs text-zinc-400 uppercase tracking-wide mb-2">Planning topics</div>
+          <div className="text-xs text-zinc-400 uppercase tracking-wide mb-2">Quick prompts</div>
           <ul className="flex flex-col">
             {PLANNING_TOPICS.map((t) => (
-              <li key={t}>
+              <li key={t.label}>
                 <button
                   onClick={() => {
                     setMode('chat');
-                    void handleSend(`Tell me about ${t}`, []);
+                    void handleSend(t.prompt, []);
                   }}
-                  className="w-full text-left px-2 py-1.5 rounded-md hover:bg-zinc-50"
+                  className="w-full text-left px-2 py-1.5 rounded-md hover:bg-zinc-50 text-zinc-700"
                 >
-                  {t}
+                  {t.label}
                 </button>
               </li>
             ))}
@@ -183,30 +238,28 @@ export function ChatPanel({ householdId }: { householdId: string }) {
       ) : (
         <div ref={containerRef} className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
           {messages.length === 0 && (
-            <p className="text-sm text-zinc-500">
-              Drop a PDF / Excel / CSV / image / audio file or paste a note. I’ll extract what I can and ask only for what’s missing.
-            </p>
+            <div className="flex flex-col gap-3">
+              <p className="text-sm text-zinc-700">Two ways to start:</p>
+              <ol className="text-[13px] text-zinc-600 space-y-1.5 list-decimal list-inside">
+                <li>
+                  <span className="text-zinc-800">Drop a doc</span> — PDF, Excel, CSV, image, or audio note.
+                  I&apos;ll extract what I can and ask only for what&apos;s missing.
+                </li>
+                <li>
+                  <span className="text-zinc-800">Just chat</span> — type your details (age, income,
+                  expenses, goals) and I&apos;ll fill the plan as we go.
+                </li>
+              </ol>
+              <button
+                onClick={() => void handleSend("Let's set up my plan from scratch — ask me what you need.", [])}
+                className="self-start text-xs px-3 py-1.5 rounded-md text-white"
+                style={{ background: 'var(--color-accent)' }}
+              >
+                Start from scratch
+              </button>
+            </div>
           )}
-          {messages.map((m, i) => {
-            if (m.kind === 'user') return <MessageBubble key={i} text={m.text} files={m.files} />;
-            if (m.kind === 'status') return <StatusPill key={i} text={m.text} />;
-            if (m.kind === 'assistant') return <AssistantMessage key={i} text={m.text} />;
-            if (m.kind === 'risk_gate') {
-              return (
-                <RiskGate
-                  key={i}
-                  householdId={householdId}
-                  onComplete={() =>
-                    setMessages((m) => [
-                      ...m,
-                      { kind: 'assistant', text: 'Risk profile computed. Allocation, tax, and Monte Carlo are now unlocked.' },
-                    ])
-                  }
-                />
-              );
-            }
-            return null;
-          })}
+          {renderMessages(messages, householdId, setMessages)}
         </div>
       )}
 
@@ -217,24 +270,54 @@ export function ChatPanel({ householdId }: { householdId: string }) {
   );
 }
 
-function humanizeTool(name: string): string {
-  const map: Record<string, string> = {
-    'intake.ingest': 'Reading your file',
-    'intake.confirm': 'Confirming a value',
-    'plan.set': 'Updating plan',
-    'plan.add': 'Adding a row',
-    'plan.remove': 'Removing a row',
-    'plan.assumption': 'Updating assumptions',
-    'risk.assess': 'Assessing risk',
-    'allocate.recommend': 'Recommending allocation',
-    'freedom.score': 'Computing freedom score',
-    'tax.harvest': 'Computing tax view',
-    'cashflow.project': 'Projecting cash flow',
-    'scenario.pin': 'Pinning scenario',
-    'scenario.diff': 'Comparing scenarios',
-    'montecarlo.run': 'Running Monte Carlo',
-    'knowledge.retrieve': 'Looking up knowledge base',
-    'news.relevance': 'Scoring news relevance',
-  };
-  return map[name] ?? name;
+/**
+ * Walk the message list and fold any run of consecutive tool messages into a
+ * single ToolGroup, leaving everything else as-is.
+ */
+function renderMessages(
+  messages: Msg[],
+  householdId: string,
+  setMessages: React.Dispatch<React.SetStateAction<Msg[]>>,
+): React.ReactNode[] {
+  const out: React.ReactNode[] = [];
+  let i = 0;
+  while (i < messages.length) {
+    const m = messages[i];
+    if (m.kind === 'tool') {
+      // Collect every consecutive tool message into one group.
+      const group: GroupedTool[] = [];
+      const startIdx = i;
+      while (i < messages.length && messages[i].kind === 'tool') {
+        const t = messages[i] as ToolMsg;
+        group.push({ id: t.id, name: t.name, args: t.args, result: t.result, state: t.state });
+        i++;
+      }
+      out.push(<ToolGroup key={`group-${startIdx}`} tools={group} />);
+      continue;
+    }
+    if (m.kind === 'user') out.push(<MessageBubble key={i} text={m.text} files={m.files} />);
+    else if (m.kind === 'status') out.push(<StatusPill key={i} text={m.text} />);
+    else if (m.kind === 'thinking') out.push(<ThinkingDots key={i} />);
+    else if (m.kind === 'assistant') out.push(<AssistantMessage key={i} text={m.text} />);
+    else if (m.kind === 'risk_gate') {
+      out.push(
+        <RiskGate
+          key={i}
+          householdId={householdId}
+          onComplete={() =>
+            setMessages((mm) => [
+              ...mm,
+              {
+                kind: 'assistant',
+                text: 'Risk profile computed. Allocation, tax, and Monte Carlo are now unlocked.',
+              },
+            ])
+          }
+        />,
+      );
+    }
+    i++;
+  }
+  return out;
 }
+

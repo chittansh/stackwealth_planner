@@ -30,7 +30,8 @@ export function NewsBoard() {
   if (!items.length) {
     return (
       <div className="rounded-xl border border-dashed border-zinc-200 p-10 text-sm text-zinc-500 text-center">
-        No news items in the demo. Seed runs on first plan open.
+        No news items yet. Wire up a fetcher (or POST to <code className="text-zinc-700">/api/news</code>)
+        to populate this board.
       </div>
     );
   }
@@ -52,7 +53,7 @@ export function NewsBoard() {
             <ul className="flex flex-col gap-1.5">
               {n.affected.map((a) => (
                 <li key={a.household_id} className="flex items-center gap-2 text-xs">
-                  <span className="inline-flex items-center justify-center w-7 h-5 rounded bg-amber-50 text-amber-700 text-[10px] tabular-nums">
+                  <span className="inline-flex items-center justify-center w-7 h-5 rounded bg-zinc-100 text-zinc-700 text-[10px] tabular-nums">
                     {a.relevance.toFixed(2)}
                   </span>
                   <Link href={`/plan/${a.household_id}`} className="text-zinc-700 hover:underline">

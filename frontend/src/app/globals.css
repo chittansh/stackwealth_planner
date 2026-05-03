@@ -1,12 +1,18 @@
 @import "tailwindcss";
 
 :root {
+  /* Monochrome palette: white primary + matcha as a very subtle accent.
+     Everything else is grayscale (zinc). No blues, no lavenders. */
   --color-bg: #ffffff;
   --color-fg: #18181b;
   --color-muted: #71717a;
-  --color-line: rgba(0, 0, 0, 0.06);
-  --color-accent: #6b8ee5;
-  --color-accent-2: #a189d6;
+  --color-line: rgba(0, 0, 0, 0.08);
+
+  /* Matcha — used sparingly: focus rings, Plan B series, single-digit highlights. */
+  --color-accent: #87a17e;
+  --color-accent-2: #b8caaf;
+  --color-accent-soft: #f0f4ed;
+
   --font-display: ui-sans-serif, system-ui, sans-serif;
 }
 
@@ -17,8 +23,35 @@ html, body, #__next {
 body {
   font-family: var(--font-display);
   font-feature-settings: "cv02", "cv03", "cv04", "cv11", "tnum";
+  color: var(--color-fg);
+  background: var(--color-bg);
 }
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+/* Range input thumb — matcha tint instead of the OS default blue. */
+input[type="range"] {
+  accent-color: var(--color-accent);
+}
+
+/* Scrollbars are intentionally hidden everywhere. Containers still scroll —
+   we just don't paint the visual bar. Keeps the surface calm. */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.scrollbar-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
 }

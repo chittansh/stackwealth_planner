@@ -1,14 +1,27 @@
 /**
- * /api/chat — streams the plannerAgent's response. Surfaces tool calls as
- * status pills and runs every assistant text through the numbers-from-tools
- * validator before sending to the client.
+ * /api/chat — streams the planner's response. Surfaces tool calls + tool
+ * results as live SSE events and runs every assistant text through the
+ * numbers-from-tools validator before sending to the client.
+ *
+ * SSE event shape:
+ *   status      — "thinking" once at the start
+ *   tool_call   — { id, name, args }   (one per tool call)
+ *   tool_result — { id, name, result } (one per tool result; same id as the call)
+ *   message     — { role: 'assistant', text }  final assistant text
+ *   done        — "ok"
+ *   error       — { message }
  */
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import { plannerAgent } from '../mastra/index.js';
+import { runPlannerTurn, clearConvo } from '../agent/planner.js';
 import { collectNumbers, validateAssistantText } from '../agent/validator.js';
 
 export const chatRoute = new Hono();
+
+chatRoute.post('/:id/reset', async (c) => {
+  clearConvo(c.req.param('id'));
+  return c.json({ ok: true });
+});
 
 chatRoute.post('/', async (c) => {
   const body = await c.req.json<{
@@ -23,28 +36,26 @@ chatRoute.post('/', async (c) => {
     const seenNumbers = new Set<string>();
 
     try {
-      const userText = body.message ?? '';
-      const result = await plannerAgent.generate(
-        [{ role: 'user', content: userText }],
-        {
-          context: { household_id: body.household_id },
-          maxSteps: 8,
-        },
-      );
-
-      for (const step of result.steps ?? []) {
-        for (const call of step.toolCalls ?? []) {
+      const result = await runPlannerTurn({
+        householdId: body.household_id,
+        message: body.message ?? '',
+        onToolCall: async (ev) => {
+          collectNumbers(ev.args, seenNumbers);
           await stream.writeSSE({
             event: 'tool_call',
-            data: JSON.stringify({ name: call.toolName, args: call.args }),
+            data: JSON.stringify(ev),
           });
-        }
-        for (const tr of step.toolResults ?? []) {
-          collectNumbers(tr.result, seenNumbers);
-        }
-      }
+        },
+        onToolResult: async (ev) => {
+          collectNumbers(ev.result, seenNumbers);
+          await stream.writeSSE({
+            event: 'tool_result',
+            data: JSON.stringify(ev),
+          });
+        },
+      });
 
-      const validated = validateAssistantText(result.text ?? '', seenNumbers);
+      const validated = validateAssistantText(result.text, seenNumbers);
 
       await stream.writeSSE({
         event: 'message',
@@ -52,6 +63,7 @@ chatRoute.post('/', async (c) => {
       });
       await stream.writeSSE({ event: 'done', data: 'ok' });
     } catch (err) {
+      console.error('[chat] error:', err);
       await stream.writeSSE({
         event: 'error',
         data: JSON.stringify({ message: (err as Error).message }),

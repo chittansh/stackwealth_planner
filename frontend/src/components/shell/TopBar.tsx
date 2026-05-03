@@ -48,7 +48,7 @@ export function TopBar({
         <select
           value={view}
           onChange={(e) => setParam('view', e.target.value)}
-          className="bg-transparent outline-none pr-1 cursor-pointer"
+          className="appearance-none bg-transparent outline-none pr-1 cursor-pointer"
         >
           {VIEWS.map((v) => (
             <option key={v.id} value={v.id}>
@@ -63,7 +63,7 @@ export function TopBar({
         <select
           value={horizon}
           onChange={(e) => setParam('horizon', e.target.value)}
-          className="bg-transparent outline-none pr-1 cursor-pointer"
+          className="appearance-none bg-transparent outline-none pr-1 cursor-pointer"
         >
           {HORIZONS.map((h) => (
             <option key={h} value={h}>

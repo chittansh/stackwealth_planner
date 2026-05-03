@@ -41,7 +41,7 @@ app.route('/api/knowledge', knowledgeRoute);
 app.route('/api/news', newsRoute);
 app.route('/api/report', reportRoute);
 
-// Seed demo data on boot (idempotent).
+// Seed hook (currently a no-op — add fixtures here if you want any).
 runSeed().catch((err) => console.error('[seed] failed:', err));
 
 const port = Number(process.env.PORT ?? 4000);

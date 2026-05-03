@@ -17,7 +17,7 @@ export function Headline({ householdId, plan }: { householdId: string; plan: Pla
           In {horizon} years you’ll have <span className="text-zinc-900">{formatINR(baseline, { compact: true })}</span>
         </h1>
         {planB && (
-          <p className="text-[20px] mt-1 text-[color:var(--color-accent-2)]">
+          <p className="text-[20px] mt-1 text-[color:var(--color-accent)]">
             In {horizon} years you’ll have {formatINR(planB.computed.headline_amount_at_horizon, { compact: true })}
           </p>
         )}

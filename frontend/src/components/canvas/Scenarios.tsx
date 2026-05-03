@@ -93,7 +93,8 @@ export function Scenarios({ householdId, plan }: { householdId: string; plan: Pl
         <div className="flex items-center gap-2">
           {planB && (
             <span className="text-xs text-zinc-500">
-              Plan B Δ <span className={projectedDelta >= 0 ? 'text-emerald-700' : 'text-rose-700'}>
+              Plan B Δ{' '}
+              <span style={{ color: projectedDelta >= 0 ? 'var(--color-accent)' : '#52525b' }}>
                 {projectedDelta >= 0 ? '+' : ''}
                 {formatINR(projectedDelta, { compact: true })}
               </span>

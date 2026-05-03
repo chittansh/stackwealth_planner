@@ -5,8 +5,10 @@ import type { PlanState } from '@/types/plan-state';
 import { ChevronRight } from 'lucide-react';
 import { useState } from 'react';
 
-const COLORS_STRATEGIC = ['#6b8ee5', '#7dd3fc', '#fbbf24', '#a3a3a3'];
-const COLORS_RECOMMENDED = ['#a189d6', '#67e8f9', '#facc15', '#9ca3af'];
+// Monochromatic — both donuts use grayscale shades, with the recommended
+// donut tinted matcha so it reads as the "live" recommendation.
+const COLORS_STRATEGIC = ['#52525b', '#a1a1aa', '#d4d4d8', '#e4e4e7'];
+const COLORS_RECOMMENDED = ['#87a17e', '#a8be9b', '#cbd6c2', '#e7ecdf'];
 
 export function AllocationView({ plan }: { plan: PlanState | null }) {
   const a = plan?.computed.allocation;
@@ -79,7 +81,7 @@ export function AllocationView({ plan }: { plan: PlanState | null }) {
           <span className="text-sm capitalize">{a.debt_duration_stance}</span>
         </SmallCard>
         <SmallCard label="Warnings">
-          <ul className="text-xs text-amber-600 space-y-0.5">
+          <ul className="text-xs text-zinc-500 space-y-0.5">
             {(a.warnings.length ? a.warnings : ['—']).map((w, i) => (
               <li key={i}>{w}</li>
             ))}

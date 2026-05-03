@@ -6,7 +6,7 @@ import { Users, Combine, BookOpen, Newspaper, Home } from 'lucide-react';
 import { IconRail } from './IconRail';
 
 const NAV = [
-  { href: '/plan/demo', label: 'Demo plan', Icon: Home },
+  { href: '/plan/me', label: 'My plan', Icon: Home },
   { href: '/advisor/clients', label: 'Clients', Icon: Users },
   { href: '/advisor/household-merge', label: 'Household merge', Icon: Combine },
   { href: '/advisor/knowledge', label: 'Knowledge base', Icon: BookOpen },
@@ -19,7 +19,10 @@ export function AdvisorShell({ children }: { children: React.ReactNode }) {
     <div className="flex h-screen w-screen overflow-hidden bg-white">
       <IconRail householdId="advisor" />
       <aside className="w-[240px] border-r border-zinc-200 bg-white flex flex-col">
-        <div className="h-14 px-4 flex items-center text-sm font-medium border-b border-zinc-200">Advisor</div>
+        <div className="h-14 px-4 flex items-center border-b border-zinc-200">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/stackwealth-logo.png" alt="stackwealth" className="h-6 w-auto select-none" />
+        </div>
         <nav className="p-2 flex flex-col gap-0.5 text-sm">
           {NAV.map(({ href, label, Icon }) => (
             <Link

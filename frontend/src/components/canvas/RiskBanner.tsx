@@ -12,7 +12,7 @@ export function RiskBanner({ plan }: { plan: PlanState | null }) {
 
   if (!r) {
     return (
-      <div className="mt-3 rounded-lg bg-amber-50 border border-amber-100 px-3 py-2 text-xs text-amber-800 inline-block">
+      <div className="mt-3 rounded-lg bg-zinc-50 border border-zinc-200 px-3 py-2 text-xs text-zinc-600 inline-block">
         Risk profile not set. Allocation, tax, and Monte Carlo are gated until you answer 3 quick questions in chat.
       </div>
     );
@@ -28,7 +28,7 @@ export function RiskBanner({ plan }: { plan: PlanState | null }) {
       <Sep />
       <Stat label="Recommended" value={`${r.recommended_score} · ${r.recommended_profile}`} bold />
       {r.alignment_status !== 'aligned' && (
-        <span className="ml-2 text-amber-700 capitalize">{r.alignment_status.replace(/_/g, ' ')}</span>
+        <span className="ml-2 text-zinc-500 capitalize">{r.alignment_status.replace(/_/g, ' ')}</span>
       )}
     </div>
   );

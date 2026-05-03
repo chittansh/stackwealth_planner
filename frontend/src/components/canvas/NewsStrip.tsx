@@ -52,11 +52,11 @@ export function NewsStrip({ householdId }: { householdId: string }) {
     <div className="relative inline-block">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1.5 rounded-md border border-amber-100 bg-amber-50 text-amber-800 px-2 py-1 text-xs hover:bg-amber-100"
+        className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white text-zinc-700 px-2 py-1 text-xs hover:bg-zinc-50"
       >
-        <Newspaper size={12} />
+        <Newspaper size={12} className="text-zinc-400" />
         {items.length} news item{items.length > 1 ? 's' : ''} affecting this household
-        <ChevronRight size={12} className={open ? 'rotate-90 transition' : 'transition'} />
+        <ChevronRight size={12} className={open ? 'rotate-90 transition text-zinc-400' : 'transition text-zinc-400'} />
       </button>
       {open && (
         <ul className="absolute right-0 mt-2 w-[360px] z-30 rounded-lg border border-zinc-200 bg-white shadow-md p-2 text-sm">
@@ -64,7 +64,7 @@ export function NewsStrip({ householdId }: { householdId: string }) {
             <li key={it.news_id} className="px-2 py-1.5 border-b border-zinc-100 last:border-0">
               <div className="flex items-baseline justify-between gap-2">
                 <span className="text-zinc-800">{it.title}</span>
-                <span className="text-[10px] text-amber-700 tabular-nums">{it.relevance.toFixed(2)}</span>
+                <span className="text-[10px] text-zinc-500 tabular-nums">{it.relevance.toFixed(2)}</span>
               </div>
               <p className="text-[11px] text-zinc-500">{it.rationale}</p>
             </li>

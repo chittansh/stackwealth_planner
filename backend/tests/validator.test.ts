@@ -31,4 +31,16 @@ describe('numbers-from-tools validator', () => {
     const out = validateAssistantText(txt, seen);
     expect(out).not.toContain('«unverified');
   });
+
+  it('accepts Indian-formatted numbers (1,25,000)', () => {
+    const seen = new Set(['125000']);
+    const txt = 'Monthly take-home: ₹1,25,000.';
+    expect(validateAssistantText(txt, seen)).toBe(txt);
+  });
+
+  it('accepts numbers within 2% of a known value (projection drift)', () => {
+    const seen = new Set(['10000000']);
+    const txt = 'Projection: ₹10,050,000 (basically the same).';
+    expect(validateAssistantText(txt, seen)).not.toContain('«unverified');
+  });
 });

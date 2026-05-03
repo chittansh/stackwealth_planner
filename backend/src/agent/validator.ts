@@ -32,16 +32,28 @@ export function collectNumbers(value: unknown, out: Set<string> = new Set()): Se
   return out;
 }
 
+// Matches a numeric run with arbitrary digit/comma grouping (Western 1,234,567
+// AND Indian 1,25,000), with an optional decimal. Excludes leading word/dot
+// chars so we don't mangle identifiers like `v1.2` or `id_42`.
+const NUMBER_RE = /(?<![\w.])(-?\d(?:[\d,]*\d)?(?:\.\d+)?)/g;
+
 export function validateAssistantText(text: string, knownNumbers: Set<string>): string {
   const known = new Set([...knownNumbers, ...PERMISSIBLE_SMALL]);
-  return text.replace(/(?<![\w.])(-?\d{1,3}(?:,\d{3})+|-?\d+(?:\.\d+)?)/g, (token) => {
+  return text.replace(NUMBER_RE, (token) => {
     const stripped = token.replace(/,/g, '').replace(/\.0+$/, '');
     if (known.has(stripped)) return token;
-    // Allow values within ±1 of a known integer to absorb rounding.
+    // Allow values within ±1 of a known integer (rounding) and within 2% of
+    // any known number (compounding/projection drift).
     const n = Number(stripped);
     if (Number.isFinite(n)) {
       const r = Math.round(n);
       if (known.has(String(r)) || known.has(String(r - 1)) || known.has(String(r + 1))) return token;
+      const abs = Math.abs(n);
+      for (const k of known) {
+        const kn = Number(k);
+        if (!Number.isFinite(kn) || kn === 0) continue;
+        if (Math.abs(kn - n) / Math.max(abs, Math.abs(kn)) <= 0.02) return token;
+      }
     }
     return `«unverified:${token}»`;
   });

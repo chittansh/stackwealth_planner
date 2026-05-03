@@ -32,7 +32,8 @@ export function ClientsTable() {
   if (rows.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-zinc-200 p-10 text-sm text-zinc-500 text-center">
-        No clients yet. Open the demo plan to seed one.
+        No clients yet. Open <a href="/plan/me" className="text-zinc-700 underline">/plan/me</a> (or any
+        <code className="text-zinc-700"> /plan/&lt;id&gt;</code> URL) to create one.
       </div>
     );
   }
@@ -68,7 +69,7 @@ export function ClientsTable() {
               <td className="px-4 py-2.5 text-zinc-500">{r.last_activity}</td>
               <td className="px-4 py-2.5 text-right">
                 {r.news_count > 0 ? (
-                  <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-100 text-amber-700 text-[11px]">
+                  <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-zinc-100 text-zinc-700 text-[11px]">
                     {r.news_count}
                   </span>
                 ) : (
@@ -88,6 +89,7 @@ function Th({ children, right }: { children: React.ReactNode; right?: boolean })
 }
 
 function Score({ n }: { n: number }) {
-  const color = n >= 75 ? 'text-emerald-700' : n >= 50 ? 'text-zinc-700' : 'text-amber-700';
-  return <span className={color}>{n.toFixed(0)}</span>;
+  // Monochromatic — strong scores get the matcha tint, everything else is plain zinc.
+  const style: React.CSSProperties = n >= 75 ? { color: 'var(--color-accent)' } : { color: '#3f3f46' };
+  return <span style={style}>{n.toFixed(0)}</span>;
 }

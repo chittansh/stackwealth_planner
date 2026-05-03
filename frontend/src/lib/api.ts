@@ -30,7 +30,8 @@ export async function uploadText(id: string, text: string, source_type: 'user' |
 
 export type ChatEvent =
   | { event: 'status'; data: string }
-  | { event: 'tool_call'; data: { name: string; args: unknown } }
+  | { event: 'tool_call'; data: { id: string; name: string; args: unknown } }
+  | { event: 'tool_result'; data: { id: string; name: string; result: unknown } }
   | { event: 'message'; data: { role: 'assistant'; text: string } }
   | { event: 'done'; data: 'ok' }
   | { event: 'error'; data: { message: string } };
@@ -79,4 +80,8 @@ export async function planSet(id: string, path: string, value: unknown) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ path, value }),
   }).then((r) => r.json());
+}
+
+export async function resetChat(id: string) {
+  return fetch(`${BASE}/api/chat/${id}/reset`, { method: 'POST' }).then((r) => r.json());
 }

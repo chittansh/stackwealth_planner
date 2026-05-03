@@ -49,13 +49,12 @@ function Card({ title, subtitle, children }: { title: string; subtitle: string; 
 }
 
 function Bar({ pct }: { pct: number }) {
+  // Monochromatic — matcha for "covered", graded zinc otherwise.
+  const color = pct >= 80 ? 'var(--color-accent)' : pct >= 50 ? '#a1a1aa' : '#52525b';
   return (
     <div className="space-y-1">
-      <div className="h-3 rounded-full bg-zinc-100 overflow-hidden">
-        <div
-          className={`h-full ${pct >= 80 ? 'bg-emerald-500' : pct >= 50 ? 'bg-amber-500' : 'bg-rose-500'}`}
-          style={{ width: `${pct}%` }}
-        />
+      <div className="h-2 rounded-full bg-zinc-100 overflow-hidden">
+        <div className="h-full" style={{ width: `${pct}%`, background: color }} />
       </div>
       <div className="text-[11px] text-zinc-500 text-right tabular-nums">{pct.toFixed(0)}% of required</div>
     </div>
