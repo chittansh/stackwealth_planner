@@ -1,0 +1,40 @@
+# Frontend — Fly.io app config.
+# Run `fly deploy --config frontend/fly.toml --dockerfile frontend/Dockerfile \
+#                 --build-arg NEXT_PUBLIC_BACKEND_URL=https://stackwealth-backend.fly.dev \
+#                 --build-arg BACKEND_URL=https://stackwealth-backend.fly.dev`
+# from the REPO ROOT.
+
+app = "stackwealth-frontend"
+primary_region = "bom"
+
+kill_signal = "SIGINT"
+kill_timeout = "10s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+  NODE_ENV = "production"
+  HOSTNAME = "0.0.0.0"
+  NEXT_TELEMETRY_DISABLED = "1"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "GET"
+    path = "/"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  cpus = 1
