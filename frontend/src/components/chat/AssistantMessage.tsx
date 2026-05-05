@@ -16,13 +16,13 @@ import { Sparkles } from 'lucide-react';
  */
 export function AssistantMessage({ text }: { text: string }) {
   return (
-    <div className="self-start max-w-[280px] flex flex-col gap-1">
+    <div className="self-start w-full max-w-full min-w-0 flex flex-col gap-1">
       <div className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wide text-zinc-400">
         <Sparkles size={10} className="text-[color:var(--color-accent)]" />
         Planner
       </div>
-      <div className="rounded-2xl rounded-tl-md border border-zinc-200 bg-white px-3 py-2 shadow-[0_1px_0_rgba(0,0,0,0.02)]">
-        <div className="text-[13px] leading-relaxed">
+      <div className="rounded-2xl rounded-tl-md border border-zinc-200 bg-white px-3 py-2 shadow-[0_1px_0_rgba(0,0,0,0.02)] min-w-0 overflow-hidden">
+        <div className="text-[13px] leading-relaxed min-w-0 break-words">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             components={{
@@ -33,7 +33,9 @@ export function AssistantMessage({ text }: { text: string }) {
               strong: ({ children }) => <strong className="font-semibold text-zinc-900">{children}</strong>,
               em: ({ children }) => <em className="italic text-zinc-700">{children}</em>,
               code: ({ children }) => (
-                <code className="rounded bg-zinc-100 px-1 py-0.5 text-[12px] text-zinc-800">{children}</code>
+                <code className="rounded bg-zinc-100 px-1 py-0.5 text-[11.5px] text-zinc-800 break-all">
+                  {children}
+                </code>
               ),
               h1: ({ children }) => <h3 className="text-[13px] font-medium mt-2 mb-1 text-zinc-900">{children}</h3>,
               h2: ({ children }) => <h3 className="text-[13px] font-medium mt-2 mb-1 text-zinc-900">{children}</h3>,

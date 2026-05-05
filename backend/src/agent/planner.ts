@@ -435,7 +435,8 @@ export async function runPlannerTurn({
     (message ?? '').trim() || '(empty user turn — read state and ask a clarifying question)';
 
   const key = memKey(householdId, chatId);
-  const history = convoMemory.get(key) ?? [];
+  // Defensive trim on read — earlier versions could stash a partial tool pair.
+  const history = safeTrim(convoMemory.get(key) ?? [], MAX_HISTORY_MESSAGES);
   const userMessage: CoreMessage = {
     role: 'user',
     content: `[household_id=${householdId}]\n\n${userText}`,
@@ -481,12 +482,42 @@ export async function runPlannerTurn({
 
   // Persist the user turn + every message the model produced (including the
   // assistant tool-use blocks and the tool-result blocks) so the next turn
-  // sees the full context. Trim from the head once we exceed the cap.
+  // sees the full context. Trim from the head — but ONLY at conversationally-
+  // valid boundaries so we never start with a stray tool_result block.
   const fresh = (result.response?.messages ?? []) as CoreMessage[];
-  const next = [...history, userMessage, ...fresh].slice(-MAX_HISTORY_MESSAGES);
-  convoMemory.set(key, next);
+  const merged = [...history, userMessage, ...fresh];
+  convoMemory.set(key, safeTrim(merged, MAX_HISTORY_MESSAGES));
 
   return { text: result.text ?? '', steps: result.steps ?? [] };
+}
+
+/**
+ * Anthropic rejects a request whose first message is a tool_result block with
+ * no preceding tool_use. A naive slice(-N) of the convo can land mid-pair,
+ * dropping the tool_use while keeping the tool_result. This helper walks
+ * forward from the cap-cut point until it finds a "clean" user message (one
+ * with text-only content, no tool_result blocks), and starts the kept window
+ * there. Worst case: keeps the whole history.
+ */
+function safeTrim(messages: CoreMessage[], cap: number): CoreMessage[] {
+  if (messages.length <= cap) return messages;
+  let start = messages.length - cap;
+  while (start < messages.length) {
+    const m = messages[start];
+    if (m.role === 'user') {
+      const c = m.content;
+      const hasToolResult =
+        Array.isArray(c) &&
+        c.some((b) => {
+          const obj = b as unknown as Record<string, unknown>;
+          return obj !== null && typeof obj === 'object' && obj.type === 'tool_result';
+        });
+      if (!hasToolResult) return messages.slice(start);
+    }
+    start++;
+  }
+  // Fallback: last user-only message we can find, or empty.
+  return messages.slice(-1).filter((m) => m.role === 'user');
 }
 
 /**
