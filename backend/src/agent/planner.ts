@@ -15,6 +15,7 @@
  *  - Numbers in chat must come from a tool result; the validator middleware
  *    rejects anything else.
  */
+import { randomUUID } from 'node:crypto';
 import { anthropic } from '@ai-sdk/anthropic';
 import { generateText, tool, type CoreMessage } from 'ai';
 import { z } from 'zod';
@@ -398,10 +399,21 @@ export type RunPlannerArgs = {
 const convoMemory = new Map<string, CoreMessage[]>();
 const MAX_HISTORY_MESSAGES = 60;
 
+/**
+ * Per-(household, chat) Langfuse trace metadata. ONE trace per chat — every
+ * subsequent turn lands as a span under the same trace, so the entire
+ * conversation lives inside a single Langfuse trace view.
+ */
+type TraceMeta = { traceId: string; turnNumber: number };
+const traceRegistry = new Map<string, TraceMeta>();
+
 const memKey = (householdId: string, chatId = 'main') => `${householdId}::${chatId}`;
 
 export function clearConvo(householdId: string, chatId?: string) {
-  convoMemory.delete(memKey(householdId, chatId));
+  const key = memKey(householdId, chatId);
+  convoMemory.delete(key);
+  // Drop the trace pointer too — the next turn starts a new trace.
+  traceRegistry.delete(key);
 }
 
 export function getConvo(householdId: string, chatId?: string): CoreMessage[] {
@@ -427,7 +439,11 @@ export function hydrateConvo(
         ? { role: 'user', content: `[household_id=${householdId}]\n\n${t.text}` }
         : { role: 'assistant', content: t.text },
     );
-  convoMemory.set(memKey(householdId, chatId), messages);
+  const k = memKey(householdId, chatId);
+  convoMemory.set(k, messages);
+  // After hydration the original Langfuse trace id is gone, so the next turn
+  // should open a fresh trace and start counting turns from 1 again.
+  traceRegistry.delete(k);
 }
 
 export async function runPlannerTurn({
@@ -456,30 +472,58 @@ export async function runPlannerTurn({
     ? `${SYSTEM_PROMPT}\n\n## Current PlanState (snapshot for THIS turn)\n\n${stateSection}\n\nIf you would call \`plan_add\` for an entry that already exists in the snapshot, use \`plan_set\` on the existing index instead — the server will refuse duplicates.`
     : SYSTEM_PROMPT;
 
-  // Langfuse: one trace per turn, all turns in this chat share a sessionId so
-  // the entire conversation rolls up under one session in the Langfuse UI.
-  // The trace input carries the FULL conversation (history + new user turn)
-  // so each individual trace is self-contained.
+  // Langfuse: ONE trace per chat. Every turn lands as a span under the same
+  // trace, so the whole conversation is visible inside a single trace in the
+  // Langfuse UI. Tool calls and the LLM generation nest under the turn span.
   const lf = getLangfuse();
   const sessionId = sessionIdFor(householdId, chatId);
+
+  let traceMeta = traceRegistry.get(key);
+  const isFirstTurn = !traceMeta;
+  if (!traceMeta) {
+    traceMeta = { traceId: randomUUID(), turnNumber: 0 };
+    traceRegistry.set(key, traceMeta);
+  }
+  traceMeta.turnNumber += 1;
+  const turnNumber = traceMeta.turnNumber;
+
+  // Calling lf.trace() with the same id is an upsert — first turn creates,
+  // subsequent turns update. We only set `input` on the first turn (the
+  // opening user message); `output` gets refreshed each turn with the latest
+  // cumulative transcript.
   const trace = lf?.trace({
-    name: 'planner.turn',
+    id: traceMeta.traceId,
+    // Embed household + chat in the name so it's findable via the IDs/Names
+    // search box in the Langfuse UI.
+    name: `chat ${householdId}::${chatId ?? 'main'}`,
     sessionId,
     userId: householdId,
-    input: {
-      conversation: transcriptForTrace(messages),
-      latest_user_message: userText,
-    },
+    ...(isFirstTurn
+      ? {
+          input: { opening_user_message: userText },
+        }
+      : {}),
     metadata: {
       household_id: householdId,
       chat_id: chatId ?? 'main',
       model: modelId,
-      history_length: history.length,
+      latest_turn: turnNumber,
     },
     tags: ['planner', 'chat'],
   });
 
-  const generation = trace?.generation({
+  // One span per user turn. Input = the user's message + prior history.
+  // Tool calls and the generation nest under this span.
+  const turnSpan = trace?.span({
+    name: `turn ${turnNumber}: ${userText.slice(0, 60)}`,
+    input: {
+      user_message: userText,
+      prior_history: transcriptForTrace(history),
+    },
+    metadata: { turn: turnNumber, history_length: history.length },
+  });
+
+  const generation = turnSpan?.generation({
     name: 'planner.generateText',
     model: modelId,
     modelParameters: { temperature: 0.2, maxSteps: 8 },
@@ -489,8 +533,10 @@ export async function runPlannerTurn({
     },
   });
 
-  // Track in-flight spans so we can close them on the matching tool-result.
-  const toolSpans = new Map<string, ReturnType<NonNullable<typeof trace>['span']>>();
+  // Track in-flight tool spans so we can close them on the matching result.
+  // Spans hang off the turn span (not the trace) so they appear under the
+  // correct turn in the UI.
+  const toolSpans = new Map<string, ReturnType<NonNullable<typeof turnSpan>['span']>>();
 
   try {
     const result = await generateText({
@@ -504,11 +550,11 @@ export async function runPlannerTurn({
         if (step.toolCalls?.length) {
           for (const call of step.toolCalls) {
             const callId = (call as { toolCallId?: string }).toolCallId ?? call.toolName;
-            if (trace) {
-              const span = trace.span({
+            if (turnSpan) {
+              const span = turnSpan.span({
                 name: `tool.${call.toolName}`,
                 input: call.args,
-                metadata: { tool_call_id: callId },
+                metadata: { tool_call_id: callId, turn: turnNumber },
               });
               toolSpans.set(callId, span);
             }
@@ -556,9 +602,16 @@ export async function runPlannerTurn({
         : undefined,
     });
 
+    turnSpan?.end({
+      output: { assistant_text: finalText },
+    });
+
+    // Refresh the trace's output with the latest cumulative transcript so
+    // opening the trace shows the entire conversation up to this point.
     trace?.update({
       output: {
-        assistant_text: finalText,
+        assistant_text_latest: finalText,
+        turns: turnNumber,
         full_conversation: transcriptForTrace(merged),
       },
     });
@@ -568,13 +621,18 @@ export async function runPlannerTurn({
 
     return { text: finalText, steps: result.steps ?? [] };
   } catch (err) {
-    // Close any open tool spans + record the error on the generation/trace.
+    // Close any open tool spans + record the error on the generation/turn.
     for (const span of toolSpans.values()) {
       span.end({ level: 'ERROR', statusMessage: (err as Error).message });
     }
     toolSpans.clear();
     generation?.end({ level: 'ERROR', statusMessage: (err as Error).message });
-    trace?.update({ output: { error: (err as Error).message } });
+    turnSpan?.end({
+      level: 'ERROR',
+      statusMessage: (err as Error).message,
+      output: { error: (err as Error).message },
+    });
+    trace?.update({ output: { last_error: (err as Error).message, turns: turnNumber } });
     void flushLangfuse();
     throw err;
   }
