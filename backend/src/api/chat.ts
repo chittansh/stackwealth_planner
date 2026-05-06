@@ -78,6 +78,19 @@ chatRoute.post('/', async (c) => {
 
       const validated = validateAssistantText(result.text, seenNumbers);
 
+      // Emit Langfuse trace pointers BEFORE the assistant message so the
+      // frontend can stamp them onto the rendered bubble for feedback.
+      if (result.traceId) {
+        await stream.writeSSE({
+          event: 'trace',
+          data: JSON.stringify({
+            trace_id: result.traceId,
+            observation_id: result.observationId,
+            turn: result.turnNumber,
+          }),
+        });
+      }
+
       await stream.writeSSE({
         event: 'message',
         data: JSON.stringify({ role: 'assistant', text: validated }),

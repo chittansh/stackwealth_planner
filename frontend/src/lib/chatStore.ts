@@ -23,6 +23,15 @@ export type StoredMsg = {
   args?: unknown;
   result?: unknown;
   state?: 'running' | 'done' | 'error';
+  // Langfuse trace pointers, attached to assistant messages so the user can
+  // submit thumbs-up/down feedback that hits the right turn observation.
+  traceId?: string;
+  observationId?: string;
+  turn?: number;
+  // The feedback the user already submitted on this message (1 / -1) — drives
+  // the "submitted" UI state on reload.
+  feedback?: 1 | -1;
+  feedbackComment?: string;
 };
 
 export type ChatRecord = {

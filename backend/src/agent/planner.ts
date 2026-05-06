@@ -619,7 +619,13 @@ export async function runPlannerTurn({
     // Fire-and-forget flush — Langfuse SDK batches in the background.
     void flushLangfuse();
 
-    return { text: finalText, steps: result.steps ?? [] };
+    return {
+      text: finalText,
+      steps: result.steps ?? [],
+      traceId: trace ? traceMeta.traceId : undefined,
+      observationId: turnSpan?.id,
+      turnNumber,
+    };
   } catch (err) {
     // Close any open tool spans + record the error on the generation/turn.
     for (const span of toolSpans.values()) {

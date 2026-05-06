@@ -23,12 +23,22 @@ type ToolMsg = {
   state: 'running' | 'done' | 'error';
 };
 
+type AssistantMsg = {
+  kind: 'assistant';
+  text: string;
+  traceId?: string;
+  observationId?: string;
+  turn?: number;
+  feedback?: 1 | -1;
+  feedbackComment?: string;
+};
+
 type Msg =
   | { kind: 'user'; text: string; files?: { name: string; size: number }[] }
   | { kind: 'status'; text: string; tag?: string; done?: boolean; error?: boolean }
   | { kind: 'thinking' }
   | ToolMsg
-  | { kind: 'assistant'; text: string }
+  | AssistantMsg
   | { kind: 'risk_gate' };
 
 // Drop any in-flight "thinking" pills before appending the next event — once
@@ -200,6 +210,11 @@ export function ChatPanel({ householdId }: { householdId: string }) {
         : '';
       void uploadFailedHard; // reserved for future UX hooks
 
+      // Captured from the 'trace' SSE event and stamped onto the next
+      // assistant message so the feedback UI knows which trace/observation
+      // to score.
+      let pendingTrace: { traceId?: string; observationId?: string; turn?: number } = {};
+
       try {
         for await (const ev of streamChat(householdId, finalText, store.activeChatId)) {
           if (ev.event === 'tool_call') {
@@ -228,9 +243,26 @@ export function ChatPanel({ householdId }: { householdId: string }) {
             );
             // Each tool result mutates the plan — push canvas to refresh now.
             firePlanChanged();
+          } else if (ev.event === 'trace') {
+            const d = ev.data as { trace_id: string; observation_id?: string; turn?: number };
+            pendingTrace = {
+              traceId: d.trace_id,
+              observationId: d.observation_id,
+              turn: d.turn,
+            };
           } else if (ev.event === 'message') {
             const reply = (ev.data as { text: string }).text;
-            setMessages((m) => replaceThinking(m, { kind: 'assistant', text: reply }));
+            const stamp = pendingTrace;
+            pendingTrace = {};
+            setMessages((m) =>
+              replaceThinking(m, {
+                kind: 'assistant',
+                text: reply,
+                traceId: stamp.traceId,
+                observationId: stamp.observationId,
+                turn: stamp.turn,
+              }),
+            );
           } else if (ev.event === 'error') {
             setMessages((m) =>
               replaceThinking(m, { kind: 'assistant', text: 'Something went wrong. Try again.' }),
@@ -407,7 +439,29 @@ function renderMessages(
     else if (m.kind === 'status')
       out.push(<StatusPill key={i} text={m.text} done={m.done} error={m.error} />);
     else if (m.kind === 'thinking') out.push(<ThinkingDots key={i} />);
-    else if (m.kind === 'assistant') out.push(<AssistantMessage key={i} text={m.text} />);
+    else if (m.kind === 'assistant') {
+      const idx = i;
+      out.push(
+        <AssistantMessage
+          key={i}
+          text={m.text}
+          traceId={m.traceId}
+          observationId={m.observationId}
+          turn={m.turn}
+          feedback={m.feedback}
+          feedbackComment={m.feedbackComment}
+          onFeedback={(value, comment) =>
+            setMessages((mm) =>
+              mm.map((x, j) =>
+                j === idx && x.kind === 'assistant'
+                  ? { ...x, feedback: value, feedbackComment: comment }
+                  : x,
+              ),
+            )
+          }
+        />,
+      );
+    }
     else if (m.kind === 'risk_gate') {
       out.push(
         <RiskGate

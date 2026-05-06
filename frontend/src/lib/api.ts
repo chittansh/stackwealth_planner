@@ -45,6 +45,10 @@ export type ChatEvent =
   | { event: 'status'; data: string }
   | { event: 'tool_call'; data: { id: string; name: string; args: unknown } }
   | { event: 'tool_result'; data: { id: string; name: string; result: unknown } }
+  | {
+      event: 'trace';
+      data: { trace_id: string; observation_id?: string; turn?: number };
+    }
   | { event: 'message'; data: { role: 'assistant'; text: string } }
   | { event: 'done'; data: 'ok' }
   | { event: 'error'; data: { message: string } };
@@ -115,6 +119,31 @@ export async function hydrateChat(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ turns }),
   }).then((r) => r.json());
+}
+
+export type FeedbackBody = {
+  trace_id: string;
+  observation_id?: string;
+  value: number; // 1 = thumbs up, -1 = thumbs down
+  comment?: string;
+  household_id?: string;
+  chat_id?: string;
+  turn?: number;
+};
+
+export async function submitFeedback(
+  body: FeedbackBody,
+): Promise<{ ok: boolean; recorded?: boolean; error?: string }> {
+  const r = await fetch(`${BASE}/api/feedback`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    return { ok: false, error: text || `HTTP ${r.status}` };
+  }
+  return r.json();
 }
 
 export async function createHousehold(name: string, advisorId?: string): Promise<{ id: string }> {

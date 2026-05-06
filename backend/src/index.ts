@@ -13,6 +13,7 @@ import { householdRoute } from './api/household.js';
 import { knowledgeRoute } from './api/knowledge.js';
 import { newsRoute } from './api/news.js';
 import { reportRoute } from './api/report.js';
+import { feedbackRoute } from './api/feedback.js';
 
 import { runSeed } from './seed/index.js';
 
@@ -40,6 +41,7 @@ app.route('/api/household', householdRoute);
 app.route('/api/knowledge', knowledgeRoute);
 app.route('/api/news', newsRoute);
 app.route('/api/report', reportRoute);
+app.route('/api/feedback', feedbackRoute);
 
 // Seed hook (currently a no-op — add fixtures here if you want any).
 runSeed().catch((err) => console.error('[seed] failed:', err));
