@@ -21,6 +21,12 @@ import { z } from 'zod';
 
 import { getPlan } from '../db/client.js';
 import type { PlanState } from '../types/plan-state.js';
+import {
+  getLangfuse,
+  sessionIdFor,
+  transcriptForTrace,
+  flushLangfuse,
+} from './langfuse.js';
 import { ingest } from '../skills/intake/index.js';
 import {
   applySet,
@@ -450,45 +456,128 @@ export async function runPlannerTurn({
     ? `${SYSTEM_PROMPT}\n\n## Current PlanState (snapshot for THIS turn)\n\n${stateSection}\n\nIf you would call \`plan_add\` for an entry that already exists in the snapshot, use \`plan_set\` on the existing index instead — the server will refuse duplicates.`
     : SYSTEM_PROMPT;
 
-  const result = await generateText({
-    model: anthropic(modelId),
-    system: dynamicSystem,
-    messages,
-    tools,
-    maxSteps: 8,
-    temperature: 0.2,
-    onStepFinish: async (step) => {
-      if (onToolCall && step.toolCalls?.length) {
-        for (const call of step.toolCalls) {
-          await onToolCall({
-            id: (call as { toolCallId?: string }).toolCallId ?? call.toolName,
-            name: call.toolName,
-            args: call.args,
-          });
-        }
-      }
-      if (onToolResult && step.toolResults?.length) {
-        for (const tr of step.toolResults) {
-          const t = tr as { toolCallId?: string; toolName: string; result: unknown };
-          await onToolResult({
-            id: t.toolCallId ?? t.toolName,
-            name: t.toolName,
-            result: t.result,
-          });
-        }
-      }
+  // Langfuse: one trace per turn, all turns in this chat share a sessionId so
+  // the entire conversation rolls up under one session in the Langfuse UI.
+  // The trace input carries the FULL conversation (history + new user turn)
+  // so each individual trace is self-contained.
+  const lf = getLangfuse();
+  const sessionId = sessionIdFor(householdId, chatId);
+  const trace = lf?.trace({
+    name: 'planner.turn',
+    sessionId,
+    userId: householdId,
+    input: {
+      conversation: transcriptForTrace(messages),
+      latest_user_message: userText,
+    },
+    metadata: {
+      household_id: householdId,
+      chat_id: chatId ?? 'main',
+      model: modelId,
+      history_length: history.length,
+    },
+    tags: ['planner', 'chat'],
+  });
+
+  const generation = trace?.generation({
+    name: 'planner.generateText',
+    model: modelId,
+    modelParameters: { temperature: 0.2, maxSteps: 8 },
+    input: {
+      system: dynamicSystem,
+      messages: transcriptForTrace(messages),
     },
   });
 
-  // Persist the user turn + every message the model produced (including the
-  // assistant tool-use blocks and the tool-result blocks) so the next turn
-  // sees the full context. Trim from the head — but ONLY at conversationally-
-  // valid boundaries so we never start with a stray tool_result block.
-  const fresh = (result.response?.messages ?? []) as CoreMessage[];
-  const merged = [...history, userMessage, ...fresh];
-  convoMemory.set(key, safeTrim(merged, MAX_HISTORY_MESSAGES));
+  // Track in-flight spans so we can close them on the matching tool-result.
+  const toolSpans = new Map<string, ReturnType<NonNullable<typeof trace>['span']>>();
 
-  return { text: result.text ?? '', steps: result.steps ?? [] };
+  try {
+    const result = await generateText({
+      model: anthropic(modelId),
+      system: dynamicSystem,
+      messages,
+      tools,
+      maxSteps: 8,
+      temperature: 0.2,
+      onStepFinish: async (step) => {
+        if (step.toolCalls?.length) {
+          for (const call of step.toolCalls) {
+            const callId = (call as { toolCallId?: string }).toolCallId ?? call.toolName;
+            if (trace) {
+              const span = trace.span({
+                name: `tool.${call.toolName}`,
+                input: call.args,
+                metadata: { tool_call_id: callId },
+              });
+              toolSpans.set(callId, span);
+            }
+            if (onToolCall) {
+              await onToolCall({ id: callId, name: call.toolName, args: call.args });
+            }
+          }
+        }
+        if (step.toolResults?.length) {
+          for (const tr of step.toolResults) {
+            const t = tr as { toolCallId?: string; toolName: string; result: unknown };
+            const callId = t.toolCallId ?? t.toolName;
+            const span = toolSpans.get(callId);
+            if (span) {
+              span.end({ output: t.result });
+              toolSpans.delete(callId);
+            }
+            if (onToolResult) {
+              await onToolResult({ id: callId, name: t.toolName, result: t.result });
+            }
+          }
+        }
+      },
+    });
+
+    // Persist the user turn + every message the model produced (including the
+    // assistant tool-use blocks and the tool-result blocks) so the next turn
+    // sees the full context. Trim from the head — but ONLY at conversationally-
+    // valid boundaries so we never start with a stray tool_result block.
+    const fresh = (result.response?.messages ?? []) as CoreMessage[];
+    const merged = [...history, userMessage, ...fresh];
+    convoMemory.set(key, safeTrim(merged, MAX_HISTORY_MESSAGES));
+
+    const finalText = result.text ?? '';
+    const usage = (result as { usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number } }).usage;
+
+    generation?.end({
+      output: finalText,
+      usage: usage
+        ? {
+            input: usage.promptTokens,
+            output: usage.completionTokens,
+            total: usage.totalTokens,
+          }
+        : undefined,
+    });
+
+    trace?.update({
+      output: {
+        assistant_text: finalText,
+        full_conversation: transcriptForTrace(merged),
+      },
+    });
+
+    // Fire-and-forget flush — Langfuse SDK batches in the background.
+    void flushLangfuse();
+
+    return { text: finalText, steps: result.steps ?? [] };
+  } catch (err) {
+    // Close any open tool spans + record the error on the generation/trace.
+    for (const span of toolSpans.values()) {
+      span.end({ level: 'ERROR', statusMessage: (err as Error).message });
+    }
+    toolSpans.clear();
+    generation?.end({ level: 'ERROR', statusMessage: (err as Error).message });
+    trace?.update({ output: { error: (err as Error).message } });
+    void flushLangfuse();
+    throw err;
+  }
 }
 
 /**
