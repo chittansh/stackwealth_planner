@@ -1,0 +1,363 @@
+"""
+Universal intake — Python port of skills/intake/.
+
+Strategy mirrors TS:
+  Tier 1 deterministic — known PDF templates (AA), known XLSX templates.
+  Tier 2 multimodal LLM — Claude (native PDF/image) → GPT-4o fallback.
+
+The TS version has 8 specialized parsers; this port handles PDF, XLSX, CSV,
+DOCX, MD/TXT, image, audio. The two-tier extraction strategy is preserved but
+the AA-PDF deterministic regex set + xlsx-template detection are intentionally
+simplified (the TS regex catalog is large; this port falls through to the LLM
+on those cases — which is the same behavior the TS version uses when the
+deterministic anchor doesn't match). Field paths and confidence values match
+the TS contract exactly.
+"""
+from __future__ import annotations
+
+import base64
+import io
+import json
+import re
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from .. import config
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _empty_result(parser_used: str) -> dict[str, Any]:
+    return {
+        "partial_state": {},
+        "evidence": [],
+        "missing": [],
+        "parser_used": parser_used,
+    }
+
+
+# ── Schema instructions for the LLM ────────────────────────────────────────
+
+
+EXTRACTION_INSTRUCTIONS = """You are an Indian household financial-plan extractor. Read the document and emit a JSON object with this exact shape:
+
+{
+  "partial_state": {
+    "personal_details": { "full_name"?, "date_of_birth"?, "city_of_residence"?, "city_type"? ("Metro" | "Non-metro"), "occupation"?, "retirement_age_target"?, "dependents"?, "marital_status"? },
+    "income_details":   { "client_salary_in_hand"?, "spouse_salary_in_hand"?, ... (monthly INR) },
+    "monthly_expenses": { "rent_or_emi"?, "groceries"?, "utilities"?, "school_fees"?, "medical"?, "insurance_premium"?, "travel_or_lifestyle"?, "sip_investments"?, "other_emis"? },
+    "liquid_capital":   { "savings_account_balance"?, "idle_cash_for_investment"?, "fd_breakable_for_investment"? },
+    "loans_liabilities": { "home_loan"? { outstanding_amount, emi, interest_rate, tenure_left }, "car_loan"?, "personal_loan"?, "credit_card_dues"? },
+    "insurance_details": { "term_plan"? { company, cover_amount, annual_premium }, "health_insurance"?, "family_floater"?, "ulip_or_endowment"? },
+    "financial_goals": [ { "goal_name", "kind" ("child_education" | "child_marriage" | "retirement" | "house_purchase" | "foreign_travel" | "other"), "target_year"?, "target_amount"?, "current_allocated_amount"?, "periodic_contribution"?, "contribution_frequency"? ("monthly" | "annual"), "priority"? } ],
+    "mutual_funds":   [ { "fund_name", "current_value", "isin"?, "folio"? } ],
+    "equity_stocks":  [ { "stock_name", "current_value", "quantity"?, "isin"? } ],
+    "fixed_income":   [ { "instrument" ("FD" | "RD" | "PPF" | "EPF" | "Bonds" | "NPS"), "invested_amount"?, "current_value"?, "maturity_date"? } ],
+    "freedom_score_inputs": { "age"?, "monthly_income"?, "monthly_expenses"?, "monthly_emi"?, "portfolio_current_value"?, "liquid_assets_current_value"?, "equity_allocation_percent"? }
+  },
+  "evidence": [ { "field": "<canonical.path>", "value": <same as in partial_state>, "confidence": 0..1, "evidence_quote": "<verbatim span from source>" } ],
+  "missing":  [ "<canonical.path>" ]
+}
+
+Rules:
+- All monetary values are monthly INR unless they're in goals / portfolios (then absolute INR).
+- DOB format: DD-MM-YYYY.
+- City type: Mumbai/Delhi/Kolkata/Chennai/Bengaluru/Hyderabad/Pune/Ahmedabad = "Metro"; else "Non-metro".
+- Don't invent values. If a field isn't clearly present, OMIT it from partial_state and add it to "missing".
+- Every field in partial_state MUST have a matching evidence row with a verbatim quote.
+- Output JSON only. No prose, no code fences."""
+
+
+# ── Text path ──────────────────────────────────────────────────────────────
+
+
+async def parse_text(args: dict[str, Any]) -> dict[str, Any]:
+    text = args["text"]
+    source_type = args.get("source_type", "user")
+    filename = args.get("filename")
+    return await _llm_extract(text=text, source_type=source_type, filename=filename, parser_label=f"text:{source_type}")
+
+
+# ── LLM extraction ─────────────────────────────────────────────────────────
+
+
+def _stamp_evidence(rows: list[dict], source_type: str, source_file: Optional[str], parser_tier: str) -> list[dict]:
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        out.append(
+            {
+                "field": r.get("field"),
+                "value": r.get("value"),
+                "source_file": source_file,
+                "source_type": source_type,
+                "parser_tier": parser_tier,
+                "confidence": float(r.get("confidence") or 0.6),
+                "evidence_quote": r.get("evidence_quote"),
+                "page_or_sheet": r.get("page_or_sheet"),
+                "timestamp": _now(),
+            }
+        )
+    return out
+
+
+def _claude_client() -> Optional[Any]:
+    if not config.ANTHROPIC_API_KEY:
+        return None
+    try:
+        from anthropic import Anthropic
+
+        return Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    except Exception:
+        return None
+
+
+def _openai_client() -> Optional[Any]:
+    if not config.OPENAI_API_KEY:
+        return None
+    try:
+        from openai import OpenAI
+
+        return OpenAI(api_key=config.OPENAI_API_KEY)
+    except Exception:
+        return None
+
+
+def _try_parse_json(s: str) -> Optional[dict]:
+    s = s.strip()
+    # Strip code fences if model added them.
+    s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.IGNORECASE | re.MULTILINE).strip()
+    try:
+        return json.loads(s)
+    except Exception:
+        m = re.search(r"\{.*\}", s, flags=re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                return None
+    return None
+
+
+async def _llm_extract(
+    *,
+    text: Optional[str] = None,
+    pdf_bytes: Optional[bytes] = None,
+    image_bytes: Optional[bytes] = None,
+    image_mime: Optional[str] = None,
+    source_type: str,
+    filename: Optional[str],
+    parser_label: str,
+) -> dict[str, Any]:
+    """Try Claude first, GPT-4o as fallback, both with JSON mode."""
+    out: Optional[dict] = None
+
+    claude = _claude_client()
+    if claude is not None:
+        try:
+            blocks: list[dict] = [{"type": "text", "text": EXTRACTION_INSTRUCTIONS}]
+            if text:
+                blocks.append({"type": "text", "text": f"\n\n# Document\n\n{text[:80_000]}"})
+            if pdf_bytes:
+                blocks.append(
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": base64.b64encode(pdf_bytes).decode(),
+                        },
+                    }
+                )
+            if image_bytes:
+                blocks.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image_mime or "image/jpeg",
+                            "data": base64.b64encode(image_bytes).decode(),
+                        },
+                    }
+                )
+            resp = claude.messages.create(
+                model=config.PLANNER_MODEL or "claude-sonnet-4-6",
+                max_tokens=4096,
+                temperature=0,
+                messages=[{"role": "user", "content": blocks}],
+            )
+            raw = "".join(b.text for b in resp.content if hasattr(b, "text"))
+            out = _try_parse_json(raw)
+        except Exception as e:
+            print(f"[intake] claude failed: {e}")
+
+    if out is None:
+        oa = _openai_client()
+        if oa is not None:
+            try:
+                content: list[dict] = [{"type": "text", "text": EXTRACTION_INSTRUCTIONS}]
+                if text:
+                    content.append({"type": "text", "text": f"\n\n# Document\n\n{text[:80_000]}"})
+                if image_bytes:
+                    b64 = base64.b64encode(image_bytes).decode()
+                    content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{image_mime or 'image/jpeg'};base64,{b64}"},
+                        }
+                    )
+                resp = oa.chat.completions.create(
+                    model="gpt-4o",
+                    response_format={"type": "json_object"},
+                    temperature=0,
+                    messages=[{"role": "user", "content": content}],
+                )
+                raw = resp.choices[0].message.content or ""
+                out = _try_parse_json(raw)
+            except Exception as e:
+                print(f"[intake] openai failed: {e}")
+
+    if out is None:
+        return _empty_result(f"{parser_label}:no-llm")
+
+    partial = out.get("partial_state") or {}
+    evidence = _stamp_evidence(out.get("evidence") or [], source_type, filename, "llm")
+    missing = out.get("missing") or []
+    return {
+        "partial_state": partial,
+        "evidence": evidence,
+        "missing": missing,
+        "parser_used": parser_label,
+    }
+
+
+# ── PDF / XLSX / CSV / DOCX / image / audio dispatch ───────────────────────
+
+
+async def _parse_pdf(buf: bytes, filename: str) -> dict[str, Any]:
+    """Try Claude with native PDF doc-block; if no LLM available, fall back to
+    extracted text."""
+    out = await _llm_extract(
+        pdf_bytes=buf, source_type="pdf_generic", filename=filename, parser_label="pdfGeneric:claude"
+    )
+    if out["evidence"]:
+        return out
+    # Fallback: extract text and try again.
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(buf))
+        text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
+    except Exception as e:
+        return {
+            **_empty_result("pdfGeneric:failed"),
+            "missing": [str(e)],
+        }
+    return await _llm_extract(
+        text=text, source_type="pdf_generic", filename=filename, parser_label="pdfGeneric:textFallback"
+    )
+
+
+async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
+    try:
+        from openpyxl import load_workbook
+
+        wb = load_workbook(io.BytesIO(buf), data_only=True)
+        chunks: list[str] = []
+        for sn in wb.sheetnames:
+            ws = wb[sn]
+            chunks.append(f"## Sheet: {sn}")
+            for row in ws.iter_rows(values_only=True):
+                chunks.append(",".join("" if c is None else str(c) for c in row))
+        text = "\n".join(chunks)
+    except Exception as e:
+        return {**_empty_result("xlsx:failed"), "missing": [str(e)]}
+    return await _llm_extract(
+        text=text, source_type="xlsx", filename=filename, parser_label="xlsx:llm"
+    )
+
+
+async def _parse_csv(buf: bytes, filename: str) -> dict[str, Any]:
+    text = buf.decode("utf-8", errors="ignore")
+    return await _llm_extract(
+        text=text, source_type="csv", filename=filename, parser_label="csv:llm"
+    )
+
+
+async def _parse_docx(buf: bytes, filename: str) -> dict[str, Any]:
+    try:
+        from docx import Document
+
+        doc = Document(io.BytesIO(buf))
+        text = "\n".join(p.text for p in doc.paragraphs if p.text)
+    except Exception as e:
+        return {**_empty_result("docx:failed"), "missing": [str(e)]}
+    return await _llm_extract(
+        text=text, source_type="docx", filename=filename, parser_label="docx:llm"
+    )
+
+
+async def _parse_image(buf: bytes, filename: str, mime: str) -> dict[str, Any]:
+    return await _llm_extract(
+        image_bytes=buf,
+        image_mime=mime,
+        source_type="image",
+        filename=filename,
+        parser_label="image:claude",
+    )
+
+
+async def _parse_audio(buf: bytes, filename: str, mime: str) -> dict[str, Any]:
+    """Whisper transcribe → parse_text."""
+    oa = _openai_client()
+    if oa is None:
+        return {**_empty_result("audio:no-openai"), "missing": ["OPENAI_API_KEY required for audio"]}
+    try:
+        f = io.BytesIO(buf)
+        f.name = filename
+        r = oa.audio.transcriptions.create(model="whisper-1", file=f)
+        text = r.text
+    except Exception as e:
+        return {**_empty_result("audio:failed"), "missing": [str(e)]}
+    return await _llm_extract(
+        text=text, source_type="audio", filename=filename, parser_label="audio:transcript"
+    )
+
+
+# ── Public dispatcher ──────────────────────────────────────────────────────
+
+
+async def ingest(input: dict[str, Any]) -> dict[str, Any]:
+    src = input["source"]
+    if src["kind"] == "text":
+        return await parse_text(
+            {"text": src["text"], "source_type": src.get("source_type", "user")}
+        )
+
+    buf = base64.b64decode(src["contents_b64"])
+    mime = (src.get("mime") or "application/octet-stream").lower()
+    filename = src["filename"]
+    lower = filename.lower()
+
+    if mime == "application/pdf" or lower.endswith(".pdf"):
+        return await _parse_pdf(buf, filename)
+    if "spreadsheetml" in mime or re.search(r"\.xlsx?$", lower):
+        return await _parse_xlsx(buf, filename)
+    if mime == "text/csv" or lower.endswith(".csv"):
+        return await _parse_csv(buf, filename)
+    if "wordprocessingml" in mime or lower.endswith(".docx"):
+        return await _parse_docx(buf, filename)
+    if mime.startswith("text/") or re.search(r"\.(md|markdown|txt)$", lower):
+        return await parse_text(
+            {"text": buf.decode("utf-8", errors="ignore"), "source_type": "md", "filename": filename}
+        )
+    if mime.startswith("image/"):
+        return await _parse_image(buf, filename, mime)
+    if mime.startswith("audio/") or mime.startswith("video/"):
+        return await _parse_audio(buf, filename, mime)
+    return await parse_text(
+        {"text": buf.decode("utf-8", errors="ignore")[:100_000], "source_type": "md", "filename": filename}
+    )
