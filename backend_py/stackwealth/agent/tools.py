@@ -128,6 +128,9 @@ class RiskAssessArgs(BaseModel):
 
 
 async def _risk_assess(**kwargs: Any) -> Any:
+    w = kwargs.get("willingness")
+    if isinstance(w, BaseModel):
+        kwargs["willingness"] = w.model_dump(exclude_none=True)
     return await risk_skill.assess(kwargs)
 
 
