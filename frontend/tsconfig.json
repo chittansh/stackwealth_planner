@@ -15,10 +15,9 @@
     "incremental": true,
     "plugins": [{ "name": "next" }],
     "paths": {
-      "@/*": ["./src/*"],
-      "@stackwealth/shared/*": ["../shared/*"]
+      "@/*": ["./src/*"]
     }
   },
-  "include": ["next-env.d.ts", "src/**/*", "../shared/**/*", ".next/types/**/*.ts"],
+  "include": ["next-env.d.ts", "src/**/*", ".next/types/**/*.ts"],
   "exclude": ["node_modules"]
 }
