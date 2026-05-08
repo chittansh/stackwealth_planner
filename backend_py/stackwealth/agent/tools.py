@@ -6,11 +6,13 @@ agent's JSON tool-call shapes are identical to the TS version.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from ..db import get_plan, save_plan
 from ..skills import allocate as allocate_skill
 from ..skills import cashflow as cashflow_skill
 from ..skills import freedom as freedom_skill
@@ -20,6 +22,27 @@ from ..skills import news as news_skill
 from ..skills import risk as risk_skill
 from ..skills import scenario as scenario_skill
 from ..skills import tax as tax_skill
+from ..skills.allocate import compute_allocation
+from ..skills.report import render_plan_pdf
+
+
+# ── Persistence helper ─────────────────────────────────────────────────────
+
+
+async def _persist_computed(household_id: str, field: str, result: Any) -> Any:
+    """Save a skill result to plan.computed.<field> so the report PDF and the
+    canvas widgets can read it. Errors and non-model results pass through
+    unchanged. Mirrors what the /api/skill/* HTTP endpoints do — without
+    this, agent-driven runs of allocate/tax/montecarlo never reach PlanState."""
+    if isinstance(result, dict) and result.get("error"):
+        return result
+    plan = await get_plan(household_id)
+    if plan is None:
+        return result
+    setattr(plan.computed, field, result)
+    plan.last_updated_at = datetime.now(timezone.utc).isoformat()
+    await save_plan(plan)
+    return result
 
 
 SourceType = Literal[
@@ -131,7 +154,18 @@ async def _risk_assess(**kwargs: Any) -> Any:
     w = kwargs.get("willingness")
     if isinstance(w, BaseModel):
         kwargs["willingness"] = w.model_dump(exclude_none=True)
-    return await risk_skill.assess(kwargs)
+    result = await risk_skill.assess(kwargs)
+    if isinstance(result, dict) and result.get("error"):
+        return result
+    plan = await get_plan(kwargs["household_id"])
+    if plan is not None:
+        plan.computed.risk_profile = result
+        # Risk drives allocation — recompute it eagerly so downstream tools
+        # (tax, montecarlo) and the PDF have a consistent picture.
+        plan.computed.allocation = compute_allocation(plan)
+        plan.last_updated_at = datetime.now(timezone.utc).isoformat()
+        await save_plan(plan)
+    return result
 
 
 # ── allocate / freedom / tax / cashflow ────────────────────────────────────
@@ -142,15 +176,21 @@ class HouseholdOnlyArgs(BaseModel):
 
 
 async def _allocate_recommend(**kwargs: Any) -> Any:
-    return await allocate_skill.recommend(kwargs)
+    return await _persist_computed(
+        kwargs["household_id"], "allocation", await allocate_skill.recommend(kwargs)
+    )
 
 
 async def _freedom_score(**kwargs: Any) -> Any:
-    return await freedom_skill.score(kwargs)
+    return await _persist_computed(
+        kwargs["household_id"], "freedom_score", await freedom_skill.score(kwargs)
+    )
 
 
 async def _tax_harvest(**kwargs: Any) -> Any:
-    return await tax_skill.harvest(kwargs)
+    return await _persist_computed(
+        kwargs["household_id"], "tax", await tax_skill.harvest(kwargs)
+    )
 
 
 class CashflowArgs(BaseModel):
@@ -159,7 +199,16 @@ class CashflowArgs(BaseModel):
 
 
 async def _cashflow_project(**kwargs: Any) -> Any:
-    return await cashflow_skill.project(kwargs)
+    result = await cashflow_skill.project(kwargs)
+    if isinstance(result, dict) and result.get("error"):
+        return result
+    plan = await get_plan(kwargs["household_id"])
+    if plan is not None:
+        plan.computed.cashflow = result
+        plan.computed.cash_flow_table = result.rows
+        plan.last_updated_at = datetime.now(timezone.utc).isoformat()
+        await save_plan(plan)
+    return result
 
 
 # ── scenario_pin / diff / monte carlo ──────────────────────────────────────
@@ -203,7 +252,184 @@ class MonteCarloArgs(BaseModel):
 
 
 async def _montecarlo_run(**kwargs: Any) -> Any:
-    return await scenario_skill.run_monte_carlo(kwargs)
+    return await _persist_computed(
+        kwargs["household_id"],
+        "monte_carlo",
+        await scenario_skill.run_monte_carlo(kwargs),
+    )
+
+
+# ── report_generate ────────────────────────────────────────────────────────
+
+
+class ReportGenerateArgs(BaseModel):
+    household_id: str
+    download: bool = False
+
+
+async def _report_generate(**kwargs: Any) -> Any:
+    """Return a downloadable PDF link for the household's plan + which sections
+    have been computed. Pass `download=true` to also pre-render the PDF
+    server-side (slower; useful only when you want to surface byte_size or
+    catch render errors before the user clicks)."""
+    household_id = kwargs["household_id"]
+    plan = await get_plan(household_id)
+    if plan is None:
+        return {"ok": False, "error": "household_not_found"}
+
+    sections_present = {
+        "risk_profile": plan.computed.risk_profile is not None,
+        "allocation": plan.computed.allocation is not None,
+        "tax": plan.computed.tax is not None,
+        "monte_carlo": plan.computed.monte_carlo is not None,
+        "freedom_score": plan.computed.freedom_score is not None,
+        "cashflow": plan.computed.cashflow is not None,
+    }
+    missing = [k for k, v in sections_present.items() if not v]
+
+    out: dict[str, Any] = {
+        "ok": True,
+        "pdf_url": f"/api/report/{household_id}/pdf",
+        "sections_present": sections_present,
+        "missing_sections": missing,
+    }
+    if kwargs.get("download"):
+        rendered = await render_plan_pdf(household_id)
+        if rendered.get("ok"):
+            out["rendered"] = True
+            out["byte_size"] = len(rendered["bytes"])
+        else:
+            out["rendered"] = False
+            out["fallback"] = "html"
+    return out
+
+
+# ── run_full_analysis (orchestrator) ───────────────────────────────────────
+
+
+class RunFullAnalysisArgs(BaseModel):
+    household_id: str
+    willingness: Optional[WillingnessArgs] = None
+    paths: int = 2000
+
+
+def _alloc_summary(a: Any) -> dict:
+    rec = a.recommended_allocation
+    return {
+        "investor_risk_band": a.investor_risk_band,
+        "recommended": {
+            "equity": rec.equity,
+            "debt": rec.debt,
+            "gold": rec.gold,
+            "cash": rec.cash,
+        },
+        "tactical_regime_label": a.tactical_regime_label,
+        "tactical_regime_score": a.tactical_regime_score,
+        "rebalancing_action_count": len(a.rebalancing_actions),
+    }
+
+
+def _tax_summary(t: Any) -> dict:
+    return {
+        "ltcg_headroom_remaining": t.ltcg_headroom_remaining,
+        "realized_ltcg_fy": t.realized_ltcg_fy,
+        "realized_stcg_fy": t.realized_stcg_fy,
+        "gain_harvest_count": len(t.gain_harvest_suggestions),
+        "loss_harvest_count": len(t.loss_harvest_suggestions),
+        "net_post_tax_delta": t.net_post_tax_delta,
+    }
+
+
+def _mc_summary(m: Any) -> dict:
+    return {
+        "paths_count": m.paths_count,
+        "p10_freedom_age": m.p10_freedom_age,
+        "p50_freedom_age": m.p50_freedom_age,
+        "p90_freedom_age": m.p90_freedom_age,
+        "goal_success_probabilities": [g.model_dump() for g in m.goal_success_probabilities],
+    }
+
+
+async def _run_full_analysis(**kwargs: Any) -> Any:
+    """Run the full advisor workflow end-to-end and persist every output to
+    PlanState so the PDF report includes them: risk → allocation → tax →
+    monte_carlo → report URL. If `willingness` is provided we run risk_assess
+    first; otherwise we expect the household already passed the risk gate."""
+    household_id = kwargs["household_id"]
+    willingness = kwargs.get("willingness")
+    if isinstance(willingness, BaseModel):
+        willingness = willingness.model_dump(exclude_none=True)
+    paths = int(kwargs.get("paths") or 2000)
+
+    plan = await get_plan(household_id)
+    if plan is None:
+        return {"ok": False, "error": "household_not_found"}
+
+    out: dict[str, Any] = {"ok": True, "household_id": household_id, "stages": {}}
+
+    # ── Stage 1: risk ──
+    has_risk = bool(plan.computed.risk_profile and plan.computed.risk_profile.recommended_score)
+    if willingness or not has_risk:
+        if not willingness:
+            return {
+                "ok": False,
+                "stage": "risk",
+                "error": "risk_gate_required",
+                "message": (
+                    "Risk profile not set. Pass `willingness` "
+                    "(volatility_reaction, risk_return_tradeoff, max_tolerable_loss) "
+                    "to run the risk assessment as part of the analysis."
+                ),
+            }
+        risk = await _risk_assess(household_id=household_id, willingness=willingness)
+        if isinstance(risk, dict) and risk.get("error"):
+            return {"ok": False, "stage": "risk", **risk}
+        out["stages"]["risk"] = {
+            "recommended_score": risk.recommended_score,
+            "recommended_profile": risk.recommended_profile,
+        }
+    else:
+        out["stages"]["risk"] = {
+            "reused": True,
+            "recommended_score": plan.computed.risk_profile.recommended_score,
+            "recommended_profile": plan.computed.risk_profile.recommended_profile,
+        }
+
+    # ── Stage 2: allocation ── (always recompute to capture latest tactical signals)
+    alloc = await _allocate_recommend(household_id=household_id)
+    if isinstance(alloc, dict) and alloc.get("error"):
+        return {"ok": False, "stage": "allocation", **alloc}
+    out["stages"]["allocation"] = _alloc_summary(alloc)
+
+    # ── Stage 3: tax ── (non-fatal — empty holdings are valid)
+    tax = await _tax_harvest(household_id=household_id)
+    if isinstance(tax, dict) and tax.get("error"):
+        out["stages"]["tax"] = {"skipped": True, **tax}
+    else:
+        out["stages"]["tax"] = _tax_summary(tax)
+
+    # ── Stage 4: monte carlo ── (uses the recommended allocation set above)
+    mc = await _montecarlo_run(household_id=household_id, paths=paths)
+    if isinstance(mc, dict) and mc.get("error"):
+        out["stages"]["monte_carlo"] = {"skipped": True, **mc}
+    else:
+        out["stages"]["monte_carlo"] = _mc_summary(mc)
+
+    # ── Stage 5: freedom score + cashflow ── (no risk gate; the PDF needs both)
+    fs = await _freedom_score(household_id=household_id)
+    if not (isinstance(fs, dict) and fs.get("error")):
+        out["stages"]["freedom_score"] = {
+            "final_score": fs.final_score,
+            "estimated_freedom_age": fs.estimated_freedom_age,
+        }
+    cf = await _cashflow_project(household_id=household_id, horizon_years=45)
+    if not (isinstance(cf, dict) and cf.get("error")):
+        out["stages"]["cashflow"] = {"horizon_years": 45, "rows": len(cf.rows)}
+
+    # ── Stage 6: report URL ──
+    out["pdf_url"] = f"/api/report/{household_id}/pdf"
+    out["stages"]["report"] = {"pdf_url": out["pdf_url"]}
+    return out
 
 
 # ── knowledge / news ───────────────────────────────────────────────────────
@@ -361,5 +587,31 @@ def make_tools() -> list[StructuredTool]:
             ),
             args_schema=NewsRelevanceArgs,
             coroutine=_news_relevance,
+        ),
+        StructuredTool.from_function(
+            name="report_generate",
+            description=(
+                "Return the downloadable PDF link for the household's plan plus which sections "
+                "are populated and which are still missing. Use this after running risk / "
+                "allocate / tax / montecarlo to hand the user a concrete download URL. "
+                "The link points to the on-demand /api/report/{id}/pdf endpoint — clicking it "
+                "renders the PDF with current PlanState. Set download=true to pre-render and "
+                "report byte_size; otherwise this is a cheap URL handoff."
+            ),
+            args_schema=ReportGenerateArgs,
+            coroutine=_report_generate,
+        ),
+        StructuredTool.from_function(
+            name="run_full_analysis",
+            description=(
+                "Orchestrator: runs the canonical advisor flow — risk_assess → allocate_recommend "
+                "→ tax_harvest → montecarlo_run — and returns one consolidated summary plus the "
+                "PDF link. Every stage's result is persisted to PlanState so the PDF includes them. "
+                "Pass `willingness` if the risk profile has not been set yet; otherwise the "
+                "existing risk profile is reused. Use this whenever the user asks for 'the plan', "
+                "'run the analysis', 'show me the full report', or 'wrap it up'."
+            ),
+            args_schema=RunFullAnalysisArgs,
+            coroutine=_run_full_analysis,
         ),
     ]

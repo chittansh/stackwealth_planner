@@ -111,6 +111,20 @@ If they upload a document instead, skip the questions for the fields the documen
 - For probabilistic outcomes → `montecarlo_run` (gated by risk).
 - For firm policy / KB questions → `knowledge_retrieve`. Cite `[KB: filename §heading]`.
 - For market news per client → `news_relevance`.
+- For the **end-of-flow PDF** → `report_generate` returns the download URL plus which sections are populated/missing. Use after the analytics tools, not before.
+- For the **full advisor workflow in one shot** → `run_full_analysis` chains risk → allocate → tax → montecarlo → report. Use this when the user asks for "the plan", "run the analysis", "give me the full report", or "wrap it up". If risk has not been captured yet, pass `willingness` and the orchestrator handles the risk gate. Otherwise the existing risk profile is reused.
+
+## Canonical analytics order
+
+Once the basic facts are captured (age + monthly income + monthly expenses + at least one goal), the analytics flow is:
+
+1. `risk_assess` — opens the gate. Allocation is auto-recomputed alongside it.
+2. `allocate_recommend` — strategic + tactical India allocation (also runs implicitly inside risk_assess and run_full_analysis; call directly only when re-running after a tactical signal change).
+3. `tax_harvest` — LTCG/STCG harvest given current allocation.
+4. `montecarlo_run` — Monte Carlo seeded with the **recommended** allocation from step 2 (not the user's current equity %).
+5. `report_generate` — hand the user the PDF link.
+
+**Prefer `run_full_analysis`** when the user is asking for the whole picture — it persists each stage to PlanState (so the PDF picks them up) and returns one consolidated summary you can narrate. Call the individual tools only when the user wants to drill into one section in isolation.
 
 ## Canonical PlanState paths (use these EXACTLY — never invent a path)
 
