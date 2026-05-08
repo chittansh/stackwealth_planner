@@ -6,7 +6,7 @@ description: Run end-to-end curl smoke tests against the backend (live or local)
 # smoke-test — Stackwealth Planner
 
 Smoke-tests the full backend API. **Argument** controls target:
-- `live` (default) — `https://stackwealth-backend.fly.dev`
+- `live` (default) — `https://stackwealth-backend-py.fly.dev`
 - `local` — `http://localhost:4000`
 - `<custom-url>` — anything else
 
@@ -15,7 +15,7 @@ Smoke-tests the full backend API. **Argument** controls target:
 Set the base URL once:
 
 ```bash
-BASE=https://stackwealth-backend.fly.dev   # or http://localhost:4000
+BASE=https://stackwealth-backend-py.fly.dev   # or http://localhost:4000
 ```
 
 Then walk through these checks in order. **Stop and report at the first failure** — don't keep poking a broken backend.
@@ -27,7 +27,7 @@ curl -sS -m 10 "$BASE/health"
 # expect: {"ok":true,"ts":"..."}
 ```
 
-If this fails: backend is down. `fly status --app stackwealth-backend` and `fly logs --app stackwealth-backend`.
+If this fails: backend is down. `fly status --app stackwealth-backend-py` and `fly logs --app stackwealth-backend-py`.
 
 ### 2. Create a throwaway household
 
@@ -74,7 +74,7 @@ Expect SSE events in this order:
 - `event: done` `data: ok`
 
 If `event: error` instead → check the message. Common ones:
-- `Anthropic API key is missing` → `fly secrets set --app stackwealth-backend ANTHROPIC_API_KEY=...`
+- `Anthropic API key is missing` → `fly secrets set --app stackwealth-backend-py ANTHROPIC_API_KEY=...`
 - `unexpected tool_use_id found in tool_result blocks` → trim regression in `safeTrim` (see `agent/planner.ts`); reset chat: `curl -X POST "$BASE/api/chat/$HID/reset"`
 - `tools.0.custom.name: String should match pattern` → tool name has a dot; must be `snake_case`
 

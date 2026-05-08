@@ -5,7 +5,7 @@ Both apps are deployed on Fly.io in `bom` (Mumbai).
 | | URL |
 |---|---|
 | **Frontend** (RM workspace) | https://stackwealth-frontend.fly.dev |
-| **Backend** (API) | https://stackwealth-backend.fly.dev |
+| **Backend** (API) | https://stackwealth-backend-py.fly.dev |
 
 ---
 
@@ -76,14 +76,14 @@ Run from anywhere — no auth required.
 ### Backend health
 
 ```bash
-curl https://stackwealth-backend.fly.dev/health
+curl https://stackwealth-backend-py.fly.dev/health
 # → {"ok":true,"ts":"..."}
 ```
 
 ### Create a household via API
 
 ```bash
-curl -X POST https://stackwealth-backend.fly.dev/api/plan \
+curl -X POST https://stackwealth-backend-py.fly.dev/api/plan \
   -H 'content-type: application/json' \
   -d '{"name":"Test Family"}'
 # → {"ok":true,"id":"h_<uuid>","created":true}
@@ -92,19 +92,19 @@ curl -X POST https://stackwealth-backend.fly.dev/api/plan \
 ### Read a household's plan
 
 ```bash
-curl https://stackwealth-backend.fly.dev/api/plan/h_<uuid>
+curl https://stackwealth-backend-py.fly.dev/api/plan/h_<uuid>
 ```
 
 ### List all households (advisor view)
 
 ```bash
-curl https://stackwealth-backend.fly.dev/api/advisor/clients
+curl https://stackwealth-backend-py.fly.dev/api/advisor/clients
 ```
 
 ### Talk to the agent (SSE stream)
 
 ```bash
-curl -N -X POST https://stackwealth-backend.fly.dev/api/chat \
+curl -N -X POST https://stackwealth-backend-py.fly.dev/api/chat \
   -H 'content-type: application/json' \
   -d '{"household_id":"h_<uuid>","message":"hi, lets set up my plan from scratch"}'
 ```
@@ -114,39 +114,39 @@ You'll see SSE events stream back: `status` → one or more `tool_call` + `tool_
 ### Reset a chat (wipe agent convo memory for that thread)
 
 ```bash
-curl -X POST 'https://stackwealth-backend.fly.dev/api/chat/h_<uuid>/reset'
+curl -X POST 'https://stackwealth-backend-py.fly.dev/api/chat/h_<uuid>/reset'
 ```
 
 ### Run a skill directly
 
 ```bash
 # Compute Freedom Score
-curl -X POST https://stackwealth-backend.fly.dev/api/skill/freedom/h_<uuid>
+curl -X POST https://stackwealth-backend-py.fly.dev/api/skill/freedom/h_<uuid>
 
 # Run risk profile (3-question)
-curl -X POST https://stackwealth-backend.fly.dev/api/skill/risk/h_<uuid> \
+curl -X POST https://stackwealth-backend-py.fly.dev/api/skill/risk/h_<uuid> \
   -H 'content-type: application/json' \
   -d '{"willingness":{"volatility_reaction":"hold_steady","risk_return_tradeoff":"C","max_tolerable_loss":"20"}}'
 
 # Recommend allocation (requires risk profile first)
-curl -X POST https://stackwealth-backend.fly.dev/api/skill/allocate/h_<uuid>
+curl -X POST https://stackwealth-backend-py.fly.dev/api/skill/allocate/h_<uuid>
 
 # Tax harvest review (requires risk profile)
-curl -X POST https://stackwealth-backend.fly.dev/api/skill/tax/h_<uuid>
+curl -X POST https://stackwealth-backend-py.fly.dev/api/skill/tax/h_<uuid>
 
 # Cash flow projection
-curl -X POST https://stackwealth-backend.fly.dev/api/skill/cashflow/h_<uuid> \
+curl -X POST https://stackwealth-backend-py.fly.dev/api/skill/cashflow/h_<uuid> \
   -H 'content-type: application/json' \
   -d '{"horizon_years":45}'
 
 # Monte Carlo (requires risk profile)
-curl -X POST https://stackwealth-backend.fly.dev/api/skill/montecarlo/h_<uuid>
+curl -X POST https://stackwealth-backend-py.fly.dev/api/skill/montecarlo/h_<uuid>
 ```
 
 ### Upload a file via API
 
 ```bash
-curl -X POST 'https://stackwealth-backend.fly.dev/api/upload/h_<uuid>' \
+curl -X POST 'https://stackwealth-backend-py.fly.dev/api/upload/h_<uuid>' \
   -F 'file=@/path/to/statement.pdf'
 # → { ok, summaries: [{ filename, parser_used, sections_set, fields_extracted, missing }] }
 ```
@@ -180,7 +180,7 @@ Once you have a client with some data:
 Tail the backend logs:
 
 ```bash
-fly logs --app stackwealth-backend
+fly logs --app stackwealth-backend-py
 ```
 
 Common causes:
@@ -195,17 +195,17 @@ The chat shows a status pill that tells you what happened: *"Extracted N fields"
 ### "I created a client and it disappeared"
 
 The deployment uses an **in-memory store** (no `DATABASE_URL`). Each Fly machine has its own state. With `min_machines_running = 1` and 2 machines actually running for HA, the same client may hit different machines and see different data. To fix:
-- Set `DATABASE_URL` to a Neon Postgres URL: `fly secrets set --app stackwealth-backend DATABASE_URL='postgres://…'`
-- Or scale to 1 machine: `fly scale count 1 --app stackwealth-backend`
+- Set `DATABASE_URL` to a Neon Postgres URL: `fly secrets set --app stackwealth-backend-py DATABASE_URL='postgres://…'`
+- Or scale to 1 machine: `fly scale count 1 --app stackwealth-backend-py`
 
 ### "CORS error in browser console"
 
 The frontend's URL must match the backend's `FRONTEND_ORIGIN`:
 
 ```bash
-fly secrets list --app stackwealth-backend
+fly secrets list --app stackwealth-backend-py
 # verify FRONTEND_ORIGIN=https://stackwealth-frontend.fly.dev
-fly secrets set --app stackwealth-backend FRONTEND_ORIGIN=https://stackwealth-frontend.fly.dev
+fly secrets set --app stackwealth-backend-py FRONTEND_ORIGIN=https://stackwealth-frontend.fly.dev
 ```
 
 ### "Backend changes aren't showing up"
@@ -224,31 +224,31 @@ fly deploy --config frontend/fly.toml --dockerfile frontend/Dockerfile --remote-
 
 ```bash
 # Logs
-fly logs --app stackwealth-backend
+fly logs --app stackwealth-backend-py
 fly logs --app stackwealth-frontend
 
 # Status (machines, regions, image)
-fly status --app stackwealth-backend
+fly status --app stackwealth-backend-py
 fly status --app stackwealth-frontend
 
 # SSH into a machine
-fly ssh console --app stackwealth-backend
+fly ssh console --app stackwealth-backend-py
 
 # Restart machines
-fly machine restart --app stackwealth-backend
+fly machine restart --app stackwealth-backend-py
 
 # Scale
-fly scale count 2 --app stackwealth-backend
-fly scale show --app stackwealth-backend
+fly scale count 2 --app stackwealth-backend-py
+fly scale show --app stackwealth-backend-py
 
 # Manage secrets
-fly secrets list --app stackwealth-backend
-fly secrets set --app stackwealth-backend KEY=value
-fly secrets unset --app stackwealth-backend KEY
+fly secrets list --app stackwealth-backend-py
+fly secrets set --app stackwealth-backend-py KEY=value
+fly secrets unset --app stackwealth-backend-py KEY
 
 # Pause / resume an app to save money
-fly machine stop --app stackwealth-backend
-fly machine start --app stackwealth-backend
+fly machine stop --app stackwealth-backend-py
+fly machine start --app stackwealth-backend-py
 ```
 
 ---
@@ -261,8 +261,8 @@ fly deploy --config backend/fly.toml --dockerfile backend/Dockerfile --remote-on
 
 # Frontend (must re-bake the BACKEND_URL build args)
 fly deploy --config frontend/fly.toml --dockerfile frontend/Dockerfile --remote-only \
-  --build-arg NEXT_PUBLIC_BACKEND_URL=https://stackwealth-backend.fly.dev \
-  --build-arg BACKEND_URL=https://stackwealth-backend.fly.dev
+  --build-arg NEXT_PUBLIC_BACKEND_URL=https://stackwealth-backend-py.fly.dev \
+  --build-arg BACKEND_URL=https://stackwealth-backend-py.fly.dev
 ```
 
 ---

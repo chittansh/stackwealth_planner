@@ -41,9 +41,19 @@ type Msg =
   | AssistantMsg
   | { kind: 'risk_gate' };
 
-// Drop any in-flight "thinking" pills before appending the next event — once
-// a tool_call or assistant message lands, the generic spinner is obsolete.
+// Drop any in-flight "thinking" pills before appending the next event — used
+// when the turn is *finished* (assistant message lands or an error fires).
 const replaceThinking = (m: Msg[], next: Msg): Msg[] => [...m.filter((x) => x.kind !== 'thinking'), next];
+
+// Insert a new message (e.g. a tool card) but KEEP a thinking pill at the
+// bottom — so the user always sees a spinner while tool calls are in flight,
+// not just before the first one. The pill is only removed when the assistant
+// text or an error event lands.
+const insertBeforeThinking = (m: Msg[], next: Msg): Msg[] => [
+  ...m.filter((x) => x.kind !== 'thinking'),
+  next,
+  { kind: 'thinking' },
+];
 
 // Replace any status pill carrying the same `tag` (e.g. drop the in-flight
 // "Reading attachments…" once the terminal "Extracted N fields" lands).
@@ -220,7 +230,7 @@ export function ChatPanel({ householdId }: { householdId: string }) {
           if (ev.event === 'tool_call') {
             const data = ev.data as { id: string; name: string; args: unknown };
             setMessages((m) =>
-              replaceThinking(m, {
+              insertBeforeThinking(m, {
                 kind: 'tool',
                 id: data.id,
                 name: data.name,

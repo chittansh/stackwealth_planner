@@ -1,0 +1,512 @@
+"""
+PlanState — Pydantic v2 mirror of shared/types/plan-state.ts.
+
+The frontend serializes/deserializes by JSON shape, NOT by class — so the
+field names + nullability MUST match the TypeScript types exactly. Use
+`model_dump(mode='json', exclude_none=False)` when sending to the client so
+nulls survive the round-trip.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, Literal, Optional
+from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, Field
+
+# ── Inputs / building blocks ───────────────────────────────────────────────
+
+CityType = Literal["Metro", "Non-metro"]
+ContribFreq = Literal["monthly", "annual"]
+GoalKind = Literal[
+    "child_education",
+    "child_marriage",
+    "retirement",
+    "house_purchase",
+    "foreign_travel",
+    "other",
+]
+Priority = Literal["essential", "important", "aspirational"]
+Instrument = Literal["FD", "RD", "PPF", "EPF", "Bonds", "NPS"]
+LongOrTrade = Literal["long_term", "trading"]
+SourceType = Literal[
+    "user",
+    "transcript",
+    "pdf_aa",
+    "pdf_generic",
+    "xlsx",
+    "csv",
+    "docx",
+    "md",
+    "image",
+    "audio",
+    "inferred",
+    "derived",
+]
+ParserTier = Literal["deterministic", "llm", "manual"]
+AlignmentStatus = Literal[
+    "aligned",
+    "need_below_ceiling",
+    "goal_risk_mismatch",
+    "need_unavailable",
+    "incomplete",
+]
+DurationStance = Literal["shorten", "neutral", "extend"]
+MilestoneType = Literal[
+    "home_purchase", "education", "retirement", "travel", "marriage", "other"
+]
+
+
+class StrictModel(BaseModel):
+    """Default model: allow extra (Pydantic discards unknown fields by default
+    in v2 with extra='ignore'); we permit them so the Python side is forward-
+    compatible with future TS field additions without crashing."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+
+class PersonalDetails(StrictModel):
+    full_name: Optional[str] = None
+    date_of_birth: Optional[str] = None  # DD-MM-YYYY
+    pan: Optional[str] = None
+    email: Optional[str] = None
+    mobile: Optional[str] = None
+    address: Optional[str] = None
+    marital_status: Optional[str] = None
+    spouse_name_and_age: Optional[str] = None
+    number_of_children: Optional[int] = None
+    dependents: Optional[int] = None
+    city_of_residence: Optional[str] = None
+    city_type: Optional[CityType] = None
+    occupation: Optional[str] = None
+    retirement_age_target: Optional[int] = None
+
+
+class IncomeDetails(StrictModel):
+    client_salary_in_hand: Optional[float] = None
+    spouse_salary_in_hand: Optional[float] = None
+    client_business_income: Optional[float] = None
+    spouse_business_income: Optional[float] = None
+    client_rental_income: Optional[float] = None
+    spouse_rental_income: Optional[float] = None
+    client_other_income: Optional[float] = None
+    spouse_other_income: Optional[float] = None
+
+
+class MonthlyExpenses(StrictModel):
+    household_expenses: Optional[float] = None
+    rent_or_emi: Optional[float] = None
+    groceries: Optional[float] = None
+    utilities: Optional[float] = None
+    school_fees: Optional[float] = None
+    insurance_premium: Optional[float] = None
+    medical: Optional[float] = None
+    travel_or_lifestyle: Optional[float] = None
+    sip_investments: Optional[float] = None
+    other_emis: Optional[float] = None
+
+
+class MFHolding(StrictModel):
+    id: str
+    fund_name: Optional[str] = None
+    folio: Optional[str] = None
+    current_value: Optional[float] = None
+    closing_units: Optional[float] = None
+    isin: Optional[str] = None
+    nav: Optional[float] = None
+    nav_date: Optional[str] = None
+    registrar: Optional[str] = None
+    sip_amount: Optional[float] = None
+    source_file: Optional[str] = None
+
+
+class StockHolding(StrictModel):
+    id: str
+    stock_name: Optional[str] = None
+    quantity: Optional[float] = None
+    current_value: Optional[float] = None
+    isin: Optional[str] = None
+    last_traded_price: Optional[float] = None
+    long_term_or_trading: Optional[LongOrTrade] = None
+    source_file: Optional[str] = None
+
+
+class FixedIncomeRow(StrictModel):
+    id: str
+    instrument: Instrument
+    invested_amount: Optional[float] = None
+    current_value: Optional[float] = None
+    maturity_date: Optional[str] = None
+
+
+class MonthlyInvestments(StrictModel):
+    mutual_fund_sip: Optional[float] = None
+    nps: Optional[float] = None
+    ppf: Optional[float] = None
+    rd: Optional[float] = None
+    direct_equity: Optional[float] = None
+    insurance_premium: Optional[float] = None
+    other: Optional[float] = None
+
+
+class LiquidCapital(StrictModel):
+    savings_account_balance: Optional[float] = None
+    idle_cash_for_investment: Optional[float] = None
+    fd_breakable_for_investment: Optional[float] = None
+    bonus_expected_for_investment: Optional[float] = None
+
+
+class EmergencyFund(StrictModel):
+    emergency_fund_available: Optional[bool] = None
+    total_emergency_corpus: Optional[float] = None
+    where_is_it_parked: Optional[str] = None
+    monthly_household_expense_for_calculation: Optional[float] = None
+    months_of_cover_available: Optional[float] = None
+
+
+class LoanBlock(StrictModel):
+    outstanding_amount: Optional[float] = None
+    emi: Optional[float] = None
+    interest_rate: Optional[float] = None  # percent
+    tenure_left: Optional[float] = None  # years
+
+
+class Liabilities(StrictModel):
+    home_loan: Optional[LoanBlock] = None
+    car_loan: Optional[LoanBlock] = None
+    personal_loan: Optional[LoanBlock] = None
+    credit_card_dues: Optional[LoanBlock] = None
+
+
+class InsuranceBlock(StrictModel):
+    company: Optional[str] = None
+    cover_amount: Optional[float] = None
+    annual_premium: Optional[float] = None
+
+
+class InsuranceDetails(StrictModel):
+    term_plan: Optional[InsuranceBlock] = None
+    health_insurance: Optional[InsuranceBlock] = None
+    family_floater: Optional[InsuranceBlock] = None
+    ulip_or_endowment: Optional[InsuranceBlock] = None
+
+
+class Goal(StrictModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    goal_name: str
+    kind: GoalKind
+    target_year: Optional[int] = None
+    today_cost: Optional[float] = None
+    target_amount: Optional[float] = None
+    current_allocated_amount: Optional[float] = None
+    periodic_contribution: Optional[float] = None
+    contribution_frequency: Optional[ContribFreq] = None
+    horizon_years: Optional[int] = None
+    priority: Optional[Priority] = None
+    is_target_in_today_money: Optional[bool] = None
+    inflation_assumed: Optional[float] = None
+    required_return_override: Optional[float] = None
+
+
+class Person(StrictModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    name: str
+    date_of_birth: Optional[str] = None
+    life_expectancy: Optional[int] = None
+    retirement_age: Optional[int] = None
+
+
+class Growth(StrictModel):
+    cash: float = 0.04
+    investment: float = 0.10
+    real_estate: float = 0.06
+    vehicle: float = -0.10
+
+
+class Taxes(StrictModel):
+    federal: float = 0.30
+    state: float = 0.0
+    capital_gains: float = 0.125
+
+
+class Assumptions(StrictModel):
+    persons: list[Person] = Field(default_factory=list)
+    growth: Growth = Field(default_factory=Growth)
+    taxes: Taxes = Field(default_factory=Taxes)
+    inflation: float = 0.06
+
+
+class FreedomScoreInputs(StrictModel):
+    portfolio_current_value: Optional[float] = None
+    liquid_assets_current_value: Optional[float] = None
+    monthly_income: Optional[float] = None
+    monthly_expenses: Optional[float] = None
+    monthly_emi: Optional[float] = None
+    age: Optional[int] = None
+    risk_tolerance: Optional[str] = None
+    equity_allocation_percent: Optional[float] = None
+    number_of_holdings: Optional[int] = None
+
+
+class EvidenceRow(StrictModel):
+    field: str
+    value: Any = None
+    source_file: Optional[str] = None
+    source_type: SourceType
+    parser_tier: ParserTier
+    confidence: float = 1.0
+    evidence_quote: Optional[str] = None
+    page_or_sheet: Optional[str] = None
+    timestamp: str
+
+
+# ── Outputs ───────────────────────────────────────────────────────────────
+
+
+class FreedomPillars(StrictModel):
+    liquidity: float
+    debt: float
+    investment: float
+    discipline: float
+    risk: float
+
+
+class FreedomOutput(StrictModel):
+    raw_weighted_score: float
+    profile_strength_multiplier: float
+    final_score: float
+    pillars: FreedomPillars
+    estimated_freedom_age: float
+    freedom_age_gap: float
+    city_cover_multiplier: float
+    required_life_cover: float
+    required_medical_cover: float
+
+
+class RiskOutput(StrictModel):
+    capacity_score: float
+    capacity_profile: str
+    capacity_binding_cap: str
+    need_score: float
+    need_profile: str
+    need_primary_goal: Optional[str] = None
+    need_driver_goals: list[str] = Field(default_factory=list)
+    willingness_score: float
+    willingness_raw_score: float
+    willingness_profile: str
+    prudent_ceiling: float
+    recommended_score: float
+    recommended_profile: str
+    alignment_status: AlignmentStatus
+    key_warnings: list[str] = Field(default_factory=list)
+    goal_actions: list[str] = Field(default_factory=list)
+
+
+class AllocationBuckets(StrictModel):
+    equity: float
+    debt: float
+    gold: float
+    cash: float
+
+
+class EquitySplit(StrictModel):
+    large: float
+    mid: float
+    small: float
+
+
+class SignalEntry(StrictModel):
+    score: float
+    reason: str
+
+
+class SectorThemeViews(StrictModel):
+    overweight: list[str] = Field(default_factory=list)
+    underweight: list[str] = Field(default_factory=list)
+
+
+class AllocationOutput(StrictModel):
+    investor_risk_band: str
+    strategic_allocation: AllocationBuckets
+    strategic_equity_split: EquitySplit
+    tactical_regime_score: float
+    tactical_regime_label: str
+    signal_breakdown: dict[str, SignalEntry]
+    recommended_allocation: AllocationBuckets
+    recommended_equity_split: EquitySplit
+    debt_duration_stance: DurationStance
+    sector_theme_views: SectorThemeViews
+    rebalancing_actions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class CashFlowRow(StrictModel):
+    year: int
+    age: int
+    assets: float
+    income: float
+    expenses: float
+    taxes: float
+    retirement_contributions: float
+    other: float
+    total_net_worth: float
+
+
+class MonthlyStrip(StrictModel):
+    month: str
+    inflow: float
+    outflow: float
+
+
+class GlidePoint(StrictModel):
+    year: int
+    balance: float
+
+
+class CashFlowProjection(StrictModel):
+    rows: list[CashFlowRow]
+    monthly_strip_next_12mo: list[MonthlyStrip]
+    retirement_glide: list[GlidePoint]
+
+
+class GainHarvest(StrictModel):
+    holding_id: str
+    units: float
+    expected_gain: float
+    tax_saved: float
+
+
+class LossHarvest(StrictModel):
+    holding_id: str
+    units: float
+    expected_loss: float
+    tax_offset: float
+
+
+class TaxView(StrictModel):
+    ltcg_headroom_remaining: float
+    realized_ltcg_fy: float
+    realized_stcg_fy: float
+    gain_harvest_suggestions: list[GainHarvest] = Field(default_factory=list)
+    loss_harvest_suggestions: list[LossHarvest] = Field(default_factory=list)
+    fee_vs_value_warnings: list[str] = Field(default_factory=list)
+    net_post_tax_delta: float
+
+
+class GoalSuccessProb(StrictModel):
+    goal_id: str
+    probability: float
+
+
+class MCResult(StrictModel):
+    paths_count: int
+    p10_freedom_age: float
+    p50_freedom_age: float
+    p90_freedom_age: float
+    goal_success_probabilities: list[GoalSuccessProb] = Field(default_factory=list)
+
+
+class NetWorth(StrictModel):
+    total: float = 0
+    liquid: float = 0
+    non_liquid: float = 0
+    assets_total: float = 0
+    debts_total: float = 0
+
+
+class NetWorthSeriesPoint(StrictModel):
+    year: int
+    value: float
+
+
+class MilestonePin(StrictModel):
+    year: int
+    label: str
+    type: MilestoneType
+    goal_id: Optional[str] = None
+
+
+class ComputedSnapshot(StrictModel):
+    headline_amount_at_horizon: float = 0
+    horizon_years: int = 45
+    net_worth_series: list[NetWorthSeriesPoint] = Field(default_factory=list)
+    cash_flow_table: list[CashFlowRow] = Field(default_factory=list)
+    net_worth: NetWorth = Field(default_factory=NetWorth)
+    risk_profile: Optional[RiskOutput] = None
+    freedom_score: Optional[FreedomOutput] = None
+    allocation: Optional[AllocationOutput] = None
+    cashflow: Optional[CashFlowProjection] = None
+    tax: Optional[TaxView] = None
+    monte_carlo: Optional[MCResult] = None
+    milestone_pins: list[MilestonePin] = Field(default_factory=list)
+
+
+class ScenarioOp(StrictModel):
+    path: str
+    op: Literal["set", "add", "remove"]
+    value: Any = None
+    row: Any = None
+    id: Optional[str] = None
+
+
+class ScenarioMutation(StrictModel):
+    ops: list[ScenarioOp] = Field(default_factory=list)
+
+
+class Scenario(StrictModel):
+    id: str
+    label: str
+    mutation: ScenarioMutation
+    computed: ComputedSnapshot
+
+
+class PlanState(StrictModel):
+    household_id: str
+    personal_details: PersonalDetails = Field(default_factory=PersonalDetails)
+    income_details: IncomeDetails = Field(default_factory=IncomeDetails)
+    monthly_expenses: MonthlyExpenses = Field(default_factory=MonthlyExpenses)
+    mutual_funds: list[MFHolding] = Field(default_factory=list)
+    equity_stocks: list[StockHolding] = Field(default_factory=list)
+    fixed_income: list[FixedIncomeRow] = Field(default_factory=list)
+    monthly_investments: MonthlyInvestments = Field(default_factory=MonthlyInvestments)
+    liquid_capital: LiquidCapital = Field(default_factory=LiquidCapital)
+    emergency_fund: EmergencyFund = Field(default_factory=EmergencyFund)
+    loans_liabilities: Liabilities = Field(default_factory=Liabilities)
+    insurance_details: InsuranceDetails = Field(default_factory=InsuranceDetails)
+    financial_goals: list[Goal] = Field(default_factory=list)
+    freedom_score_inputs: FreedomScoreInputs = Field(default_factory=FreedomScoreInputs)
+    assumptions: Assumptions = Field(default_factory=Assumptions)
+    scenarios: list[Scenario] = Field(default_factory=list)
+    active_scenario_ids: list[str] = Field(default_factory=list)
+    computed: ComputedSnapshot = Field(default_factory=ComputedSnapshot)
+    evidence: list[EvidenceRow] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    last_updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+def empty_plan_state(household_id: str) -> PlanState:
+    return PlanState(household_id=household_id)
+
+
+# Source priority (lower index = higher trust) — mirrors TS SOURCE_PRIORITY.
+SOURCE_PRIORITY: list[SourceType] = [
+    "user",
+    "transcript",
+    "pdf_aa",
+    "xlsx",
+    "docx",
+    "md",
+    "csv",
+    "image",
+    "audio",
+    "pdf_generic",
+    "inferred",
+    "derived",
+]
+
+
+def source_rank(t: SourceType) -> int:
+    try:
+        return SOURCE_PRIORITY.index(t)
+    except ValueError:
+        return len(SOURCE_PRIORITY)

@@ -17,7 +17,7 @@ The skill arg controls scope:
 
 ## Live targets
 
-- **Backend**: `https://stackwealth-backend.fly.dev` (Fly app `stackwealth-backend`, region `bom`)
+- **Backend**: `https://stackwealth-backend-py.fly.dev` (Fly app `stackwealth-backend-py`, region `bom`)
 - **Frontend**: `https://stackwealth-frontend.fly.dev` (Fly app `stackwealth-frontend`)
 
 ## Procedure
@@ -54,7 +54,7 @@ Use `--remote-only` always — Fly's depot builder is faster than the local Dock
 After it completes, health-check:
 
 ```bash
-curl -sS -m 10 https://stackwealth-backend.fly.dev/health
+curl -sS -m 10 https://stackwealth-backend-py.fly.dev/health
 # → {"ok":true,"ts":"..."}
 ```
 
@@ -65,8 +65,8 @@ curl -sS -m 10 https://stackwealth-backend.fly.dev/health
 ```bash
 cd <repo-root>
 fly deploy --config frontend/fly.toml --dockerfile frontend/Dockerfile --remote-only \
-  --build-arg NEXT_PUBLIC_BACKEND_URL=https://stackwealth-backend.fly.dev \
-  --build-arg BACKEND_URL=https://stackwealth-backend.fly.dev
+  --build-arg NEXT_PUBLIC_BACKEND_URL=https://stackwealth-backend-py.fly.dev \
+  --build-arg BACKEND_URL=https://stackwealth-backend-py.fly.dev
 ```
 
 Health-check:
@@ -87,7 +87,7 @@ If backend deploy fails, **stop** and report the error before touching the front
 If the user wants to watch logs after deploy:
 
 ```bash
-fly logs --app stackwealth-backend
+fly logs --app stackwealth-backend-py
 fly logs --app stackwealth-frontend
 ```
 
@@ -95,11 +95,11 @@ fly logs --app stackwealth-frontend
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Backend deploy succeeds, but `/health` times out | Machine still booting (cold-start ~10s) | Wait 15s and re-curl. If still failing, `fly logs --app stackwealth-backend` to see the boot error. |
+| Backend deploy succeeds, but `/health` times out | Machine still booting (cold-start ~10s) | Wait 15s and re-curl. If still failing, `fly logs --app stackwealth-backend-py` to see the boot error. |
 | Frontend deploy fails on health check, but logs show "Ready in Ns" | `next start` takes longer than the 30s grace period | Already fixed — health check points at `/advisor/clients` not `/`. If still failing, bump `grace_period` in `frontend/fly.toml` |
-| API calls work in dev but fail in prod with CORS error | `FRONTEND_ORIGIN` secret on backend doesn't match the deployed frontend URL | `fly secrets set --app stackwealth-backend FRONTEND_ORIGIN=https://<frontend>.fly.dev` |
+| API calls work in dev but fail in prod with CORS error | `FRONTEND_ORIGIN` secret on backend doesn't match the deployed frontend URL | `fly secrets set --app stackwealth-backend-py FRONTEND_ORIGIN=https://<frontend>.fly.dev` |
 | Frontend deployed but it's still hitting localhost | Missed one or both build args | Re-deploy with both `NEXT_PUBLIC_BACKEND_URL` and `BACKEND_URL` |
-| Anthropic 401 / OpenAI 401 in chat | Stale or rotated key | `fly secrets set --app stackwealth-backend ANTHROPIC_API_KEY=...` |
+| Anthropic 401 / OpenAI 401 in chat | Stale or rotated key | `fly secrets set --app stackwealth-backend-py ANTHROPIC_API_KEY=...` |
 | Data resets after a few minutes | `auto_stop_machines = "stop"` + no `DATABASE_URL` → in-memory store wiped on cold start | Either set DATABASE_URL or set `auto_stop_machines = false` in fly.toml |
 | `pnpm-lock.yaml` mismatch in build | Lockfile drifted | Either run `pnpm install` to regenerate, OR the Dockerfile's fallback `|| pnpm install --filter ...` will recover |
 
@@ -108,8 +108,8 @@ fly logs --app stackwealth-frontend
 After a successful deploy, summarize for the user:
 
 ```
-✓ Backend deployed (image: stackwealth-backend:deployment-XYZ)
-  https://stackwealth-backend.fly.dev/health → {"ok":true}
+✓ Backend deployed (image: stackwealth-backend-py:deployment-XYZ)
+  https://stackwealth-backend-py.fly.dev/health → {"ok":true}
 
 ✓ Frontend deployed (image: stackwealth-frontend:deployment-ABC)
   https://stackwealth-frontend.fly.dev → http=200 (1.2s)

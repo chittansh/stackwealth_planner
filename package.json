@@ -3,16 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "workspaces": [
-    "backend",
-    "frontend",
-    "shared"
+    "frontend"
   ],
   "scripts": {
-    "dev:backend": "pnpm --filter backend dev",
+    "dev:backend": "cd backend_py && .venv/bin/uvicorn stackwealth.main:app --reload --host 0.0.0.0 --port 4000",
     "dev:frontend": "pnpm --filter frontend dev",
-    "build": "pnpm --filter backend build && pnpm --filter frontend build",
-    "lint": "pnpm --filter backend lint && pnpm --filter frontend lint",
-    "typecheck": "pnpm --filter backend typecheck && pnpm --filter frontend typecheck"
+    "build": "pnpm --filter frontend build",
+    "lint": "pnpm --filter frontend lint",
+    "typecheck": "pnpm --filter frontend typecheck"
   },
   "engines": {
     "node": ">=20"
