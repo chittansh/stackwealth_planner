@@ -19,6 +19,8 @@ from ..db import get_plan, save_plan
 from ..types import (
     ComputedSnapshot,
     EvidenceRow,
+    Goal,
+    GoalSuccessProb,
     MCResult,
     NetWorth,
     NetWorthSeriesPoint,
@@ -339,6 +341,30 @@ def _rand_normal() -> float:
     return math.sqrt(-2.0 * math.log(u)) * math.cos(2.0 * math.pi * v)
 
 
+def _equity_pct_for_mc(plan: PlanState) -> float:
+    """Prefer the *recommended* equity weight from `plan.computed.allocation`
+    if available — a Monte Carlo of the advisor's plan, not the status quo.
+    Falls back to the user's current `equity_allocation_percent` input."""
+    alloc = plan.computed.allocation
+    if alloc and alloc.recommended_allocation:
+        eq = alloc.recommended_allocation.equity
+        if eq is not None:
+            return float(eq) / 100 if eq > 1 else float(eq)
+    raw = plan.freedom_score_inputs.equity_allocation_percent
+    return (raw or 50) / 100
+
+
+def _goal_horizon_years(g: Goal, fallback: int) -> int:
+    if g.horizon_years and g.horizon_years > 0:
+        return int(g.horizon_years)
+    if g.target_year:
+        from datetime import datetime as _dt
+        delta = g.target_year - _dt.now().year
+        if delta > 0:
+            return delta
+    return fallback
+
+
 async def run_monte_carlo(args: dict[str, Any]) -> dict | MCResult:
     plan = await get_plan(args["household_id"])
     if not plan:
@@ -347,7 +373,8 @@ async def run_monte_carlo(args: dict[str, Any]) -> dict | MCResult:
         return {"error": "risk_gate_required"}
     paths = max(500, min(10_000, int(args.get("paths") or 2000)))
     fsi = plan.freedom_score_inputs
-    equity_pct = (fsi.equity_allocation_percent or 50) / 100
+
+    equity_pct = _equity_pct_for_mc(plan)
     mu = equity_pct * 0.10 + (1 - equity_pct) * 0.07
     sigma = equity_pct * 0.18
     horizon = plan.computed.horizon_years or 45
@@ -356,27 +383,60 @@ async def run_monte_carlo(args: dict[str, Any]) -> dict | MCResult:
     annual_need = (fsi.monthly_expenses or 0) * 12
     target = annual_need * 25
 
+    starting_balance = (fsi.portfolio_current_value or 0) + (fsi.liquid_assets_current_value or 0)
+
+    # Single integrated simulation: each path produces a freedom-age and a
+    # year-indexed balance trajectory we can re-use to score every goal.
+    paths_balances: list[list[float]] = []
     ages: list[int] = []
+    max_horizon = max(
+        horizon,
+        max((_goal_horizon_years(g, horizon) for g in plan.financial_goals), default=horizon),
+    )
+
     for _ in range(paths):
-        bal = (fsi.portfolio_current_value or 0) + (fsi.liquid_assets_current_value or 0)
-        yr = 0
-        while yr < horizon and bal < target:
+        bal = starting_balance
+        bal_series: list[float] = [bal]
+        freedom_yr: int | None = None
+        for yr in range(1, max_horizon + 1):
             ret = mu + sigma * _rand_normal()
             bal = bal * (1 + ret) + max(annual_savings, 0)
-            yr += 1
-        ages.append(start_age + yr)
+            bal_series.append(bal)
+            if freedom_yr is None and bal >= target:
+                freedom_yr = yr
+        if freedom_yr is None:
+            freedom_yr = max_horizon
+        ages.append(start_age + freedom_yr)
+        paths_balances.append(bal_series)
+
     ages.sort()
     n = len(ages)
 
     def pct(p: int) -> float:
         return ages[int((p / 100) * (n - 1))]
 
+    # Per-goal success probability: fraction of paths where the projected
+    # balance at the goal's horizon meets/exceeds the goal target.
+    goal_probs: list[GoalSuccessProb] = []
+    for g in plan.financial_goals:
+        if not g.target_amount or g.target_amount <= 0:
+            continue
+        h = _goal_horizon_years(g, horizon)
+        if h <= 0 or h > max_horizon:
+            continue
+        target_amt = g.target_amount
+        if g.is_target_in_today_money:
+            inflation = g.inflation_assumed or plan.assumptions.inflation or 0.06
+            target_amt = target_amt * ((1 + inflation) ** h)
+        hits = sum(1 for series in paths_balances if series[h] >= target_amt)
+        goal_probs.append(GoalSuccessProb(goal_id=g.id, probability=hits / paths))
+
     return MCResult(
         paths_count=paths,
         p10_freedom_age=pct(10),
         p50_freedom_age=pct(50),
         p90_freedom_age=pct(90),
-        goal_success_probabilities=[],
+        goal_success_probabilities=goal_probs,
     )
 
 
