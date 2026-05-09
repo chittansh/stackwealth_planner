@@ -6,6 +6,20 @@ import remarkGfm from 'remark-gfm';
 import { Sparkles, ThumbsUp, ThumbsDown, Check, X } from 'lucide-react';
 import { submitFeedback } from '@/lib/api';
 
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:4000';
+
+/**
+ * The agent emits PDF/report links as relative `/api/report/...` URLs because
+ * the backend doesn't know its own public hostname. A naked `<a>` would
+ * resolve those against the *frontend* origin and 404. Prefix any
+ * backend-owned `/api/...` path with NEXT_PUBLIC_BACKEND_URL.
+ */
+function resolveAgentHref(href: string | undefined): string | undefined {
+  if (!href) return href;
+  if (href.startsWith('/api/')) return `${BACKEND_URL}${href}`;
+  return href;
+}
+
 /**
  * Assistant messages follow the 3-part contract pinned in the system prompt:
  *   1. Lead sentence
@@ -65,7 +79,7 @@ export function AssistantMessage({
               // Render HRs as breathing room, not a hard divider that reads as a card break.
               hr: () => <div className="h-1.5" aria-hidden />,
               a: ({ href, children }) => (
-                <a href={href} className="text-[color:var(--color-accent)] underline" target="_blank" rel="noreferrer">
+                <a href={resolveAgentHref(href)} className="text-[color:var(--color-accent)] underline" target="_blank" rel="noreferrer">
                   {children}
                 </a>
               ),
