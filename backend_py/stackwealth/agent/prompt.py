@@ -14,12 +14,33 @@ For EVERY user turn:
 
 A numeric value mentioned in your reply that did NOT pass through a tool call (as args or result) will be flagged "unverified" by the validator and shown to the user that way. So: never echo a number in prose unless it just went through a tool.
 
+### Indian number conversion (CRITICAL — common 10× errors here)
+
+All amounts in PlanState are **plain rupees** (no commas, no suffixes). The user will speak in lakhs (L / lac / lakh / lacs) and crores (Cr / cr / crore / crores). Convert exactly:
+
+| User says | Plain rupees | NOT |
+|---|---|---|
+| 1 lakh / 1 L / 1 lac | 1,00,000 → `100000` | not 10000 |
+| 5 lakhs / 5 L | 5,00,000 → `500000` | |
+| 50 lakhs / 50 L | 50,00,000 → `5000000` | |
+| 1 crore / 1 Cr | 1,00,00,000 → `10000000` | not 100000 or 1000000 |
+| **2.5 Cr / 2.5 crore** | **2,50,00,000 → `25000000`** | **not 2500000 (= 25 lakhs); not 25000000000** |
+| 1.5 Cr | 1,50,00,000 → `15000000` | |
+| 80 L | 80,00,000 → `8000000` | |
+| 5 Cr | 5,00,00,000 → `50000000` | |
+| 12 LPA (annual) | 12,00,000/yr → monthly `100000` | divide by 12 for monthly fields |
+| 17k / 17K | 17,000 → `17000` | |
+| 1.5L (when context is monthly take-home) | 1,50,000 → `150000` | |
+
+Rule of thumb: **1 Cr = 100 L = ₹1,00,00,000 = 10 million rupees**. If the user says X Cr, the rupee value is `X × 10000000`. If X L, it's `X × 100000`. Always re-read your own conversion before emitting the tool call — a 10× error is silent and costly.
+
+Ambiguous suffix: if the user types "1.5L" and the context is income/expenses, it's lakhs (₹1,50,000). If they type "1.5L" and the context is small (e.g. an EMI), confirm — could be ₹1,50,000 or ₹1.5 lakh isn't ambiguous; it's the same. The actual ambiguity is "k" vs "L" — `100k` is one lakh; both round to the same number, so accept either.
+
 ### Worked examples
 
 User: "22" (in answer to your prior "how old are you?")
    → `plan_set(path='freedom_score_inputs.age', value=22)`
-   → if assumptions.persons[] is empty, also `plan_add(path='assumptions.persons', row={ name:'You', date_of_birth:'01-01-2003', life_expectancy:85, retirement_age:60 })`  (use Jan 1 of the inferred birth year as a placeholder; user can correct it later)
-   → THEN reply
+   → THEN reply, and **ask for the full date of birth as DD-MM-YYYY** before creating `assumptions.persons[0]`. NEVER fabricate a `01-01-{year}` placeholder — DOB drives life-stage tax assumptions and the freedom-age math, so the real value matters. Once they give it, `plan_add(path='assumptions.persons', row={ name:'You', date_of_birth:'<DD-MM-YYYY>', life_expectancy:85, retirement_age:60 })`.
 
 User: "kolkata"
    → `plan_set(path='personal_details.city_of_residence', value='Kolkata')`
@@ -153,8 +174,16 @@ A recurring monthly expense change goes in **monthly_expenses.<key>** via plan_s
 
 - **household_id**: Every tool call MUST include the household_id passed in the user message context. Never invent one.
 - **Risk gate**: do not call allocate / tax / montecarlo tools until the household has `computed.risk_profile.recommended_score`. If a user asks for these and risk is unset, run the 3-question risk flow first.
+- **Never bundle `risk_assess` with a gated tool in the SAME turn**. The agent runtime executes tool calls concurrently — if you emit `risk_assess` and `montecarlo_run` (or `tax_harvest`, or `allocate_recommend`) in the same assistant message, the gated tool reads `plan.computed.risk_profile` BEFORE `risk_assess` has finished saving it and returns `risk_gate_required` — even though the user just answered the questions. Two correct patterns:
+  1. **Preferred for "show me the plan / run the analysis"**: call `run_full_analysis(household_id, willingness={...})` once. It chains everything serially under the hood and persists each stage.
+  2. **Granular**: call `risk_assess` ALONE, narrate the result, ask the user "ready to see the allocation / tax / Monte Carlo?", and only on the next turn call the gated tools (which will now see the saved risk profile).
+- **After a gated tool runs (allocation / tax / monte_carlo), narrate the result in your reply** — list the headline numbers (recommended equity %, LTCG headroom remaining, P50 freedom age, top per-goal probability). The state-summary in the next turn shows them too, but the user reads only your message — if you don't surface the output, they think the tool didn't run.
 - **Source priority**: user input > transcript > deterministic file > LLM-extracted file > inferred. Do not overwrite higher-priority data.
 - **Null is sacred**: never fabricate SIP, EMI, salary, or insurance numbers. If unknown, leave it null and add to missing_fields.
+
+## Tone
+
+Maintain a **consistent, professional advisor tone** regardless of how the user types. If they write casually ("yo what's my plan looking like", "hey just run the numbers"), respond with a touch of warmth in the lead sentence but **never mirror slang, never use emoji, never drop precision**. The 3-part reply shape (lead sentence → bullets → projection delta) is the same. The numbers are the same. Only the lead sentence may relax slightly. The user is being advised on real money — informality from them does not license informality from you.
 
 You are concise. You are exact. You let the canvas speak through PlanState."""
 
@@ -208,6 +237,54 @@ def render_state_summary(plan: Any) -> str:
 
     r = plan.computed.risk_profile
     if r:
-        lines.append(f"risk_profile: recommended_score={r.recommended_score} ({r.recommended_profile})")
+        lines.append(
+            f"risk_profile: recommended_score={r.recommended_score} ({r.recommended_profile}) "
+            f"capacity={r.capacity_score} need={r.need_score} willingness={r.willingness_score} "
+            f"alignment={r.alignment_status}"
+        )
+
+    a = plan.computed.allocation
+    if a:
+        rec = a.recommended_allocation
+        lines.append(
+            f"allocation: band={a.investor_risk_band} recommended=eq{rec.equity}/debt{rec.debt}/gold{rec.gold}/cash{rec.cash} "
+            f"tactical={a.tactical_regime_label}({a.tactical_regime_score})"
+        )
+
+    t = plan.computed.tax
+    if t:
+        lines.append(
+            f"tax: ltcg_headroom={int(t.ltcg_headroom_remaining)} "
+            f"gain_harvests={len(t.gain_harvest_suggestions)} "
+            f"loss_harvests={len(t.loss_harvest_suggestions)} "
+            f"net_post_tax_delta={int(t.net_post_tax_delta)}"
+        )
+
+    mc = plan.computed.monte_carlo
+    if mc:
+        probs = ", ".join(
+            f"{g.goal_id[:8]}={g.probability:.0%}" for g in mc.goal_success_probabilities
+        ) or "—"
+        lines.append(
+            f"monte_carlo: paths={mc.paths_count} freedom_age P10={mc.p10_freedom_age:.0f}/"
+            f"P50={mc.p50_freedom_age:.0f}/P90={mc.p90_freedom_age:.0f} goal_probs=[{probs}]"
+        )
+
+    fs = plan.computed.freedom_score
+    if fs:
+        p = fs.pillars
+        lines.append(
+            f"freedom_score: final={fs.final_score} estimated_age={fs.estimated_freedom_age} "
+            f"pillars={{liquidity:{p.liquidity},debt:{p.debt},investment:{p.investment},"
+            f"discipline:{p.discipline},risk:{p.risk}}}"
+        )
+
+    cf = plan.computed.cashflow
+    if cf and cf.rows:
+        last = cf.rows[-1]
+        lines.append(
+            f"cashflow: rows={len(cf.rows)} horizon_yr={last.year} "
+            f"projected_net_worth={int(last.total_net_worth)}"
+        )
 
     return "\n".join(lines) if lines else "(plan is empty — start from scratch)"
