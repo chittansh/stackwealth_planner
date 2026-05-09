@@ -26,7 +26,28 @@ from ..skills.allocate import compute_allocation
 from ..skills.report import render_plan_pdf
 
 
-# ── Persistence helper ─────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+
+def _to_plain(value: Any) -> Any:
+    """Recursively convert Pydantic models (and lists/dicts of them) to plain
+    Python dicts/lists/scalars. LangChain's StructuredTool validates inbound
+    args against the args_schema and hands them to the coroutine as **kwargs
+    where nested BaseModel fields stay as model *instances*. Skill functions
+    written before this happened call `.get(...)` on those fields and crash
+    with `'XxxArgs' object has no attribute 'get'`. Run every wrapper's
+    kwargs through `_coerce_kwargs` so the skill layer always sees dicts."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(exclude_none=True)
+    if isinstance(value, list):
+        return [_to_plain(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _to_plain(v) for k, v in value.items()}
+    return value
+
+
+def _coerce_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    return {k: _to_plain(v) for k, v in kwargs.items()}
 
 
 async def _persist_computed(household_id: str, field: str, result: Any) -> Any:
@@ -86,6 +107,7 @@ class IntakeConfirmArgs(BaseModel):
 
 
 async def _intake_confirm(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     return await scenario_skill.confirm_field(kwargs)
 
 
@@ -100,6 +122,7 @@ class PlanSetArgs(BaseModel):
 
 
 async def _plan_set(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     return await scenario_skill.apply_set(kwargs)
 
 
@@ -111,6 +134,7 @@ class PlanAddArgs(BaseModel):
 
 
 async def _plan_add(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     return await scenario_skill.apply_add(kwargs)
 
 
@@ -121,6 +145,7 @@ class PlanRemoveArgs(BaseModel):
 
 
 async def _plan_remove(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     return await scenario_skill.apply_remove(kwargs)
 
 
@@ -131,6 +156,7 @@ class PlanAssumptionArgs(BaseModel):
 
 
 async def _plan_assumption(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     return await scenario_skill.apply_assumption(kwargs)
 
 
@@ -151,9 +177,7 @@ class RiskAssessArgs(BaseModel):
 
 
 async def _risk_assess(**kwargs: Any) -> Any:
-    w = kwargs.get("willingness")
-    if isinstance(w, BaseModel):
-        kwargs["willingness"] = w.model_dump(exclude_none=True)
+    kwargs = _coerce_kwargs(kwargs)
     result = await risk_skill.assess(kwargs)
     if isinstance(result, dict) and result.get("error"):
         return result
@@ -176,18 +200,21 @@ class HouseholdOnlyArgs(BaseModel):
 
 
 async def _allocate_recommend(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     return await _persist_computed(
         kwargs["household_id"], "allocation", await allocate_skill.recommend(kwargs)
     )
 
 
 async def _freedom_score(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     return await _persist_computed(
         kwargs["household_id"], "freedom_score", await freedom_skill.score(kwargs)
     )
 
 
 async def _tax_harvest(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     return await _persist_computed(
         kwargs["household_id"], "tax", await tax_skill.harvest(kwargs)
     )
@@ -199,6 +226,7 @@ class CashflowArgs(BaseModel):
 
 
 async def _cashflow_project(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     result = await cashflow_skill.project(kwargs)
     if isinstance(result, dict) and result.get("error"):
         return result
@@ -233,6 +261,7 @@ class ScenarioPinArgs(BaseModel):
 
 
 async def _scenario_pin(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     return await scenario_skill.pin(kwargs)
 
 
@@ -243,6 +272,7 @@ class ScenarioDiffArgs(BaseModel):
 
 
 async def _scenario_diff(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     return await scenario_skill.diff(kwargs)
 
 
@@ -252,6 +282,7 @@ class MonteCarloArgs(BaseModel):
 
 
 async def _montecarlo_run(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     return await _persist_computed(
         kwargs["household_id"],
         "monte_carlo",
@@ -355,10 +386,9 @@ async def _run_full_analysis(**kwargs: Any) -> Any:
     PlanState so the PDF report includes them: risk → allocation → tax →
     monte_carlo → report URL. If `willingness` is provided we run risk_assess
     first; otherwise we expect the household already passed the risk gate."""
+    kwargs = _coerce_kwargs(kwargs)
     household_id = kwargs["household_id"]
     willingness = kwargs.get("willingness")
-    if isinstance(willingness, BaseModel):
-        willingness = willingness.model_dump(exclude_none=True)
     paths = int(kwargs.get("paths") or 2000)
 
     plan = await get_plan(household_id)
@@ -442,6 +472,7 @@ class KnowledgeRetrieveArgs(BaseModel):
 
 
 async def _knowledge_retrieve(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     return await knowledge_skill.retrieve(kwargs)
 
 
@@ -451,6 +482,7 @@ class NewsRelevanceArgs(BaseModel):
 
 
 async def _news_relevance(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
     return await news_skill.relevance_for_household(kwargs)
 
 
