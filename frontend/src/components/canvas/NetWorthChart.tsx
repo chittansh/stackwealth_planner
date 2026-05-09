@@ -16,12 +16,23 @@ export function NetWorthChart({
   const [pinIdx, setPinIdx] = useState<number | null>(null);
 
   const baseline = plan?.computed.net_worth_series ?? [];
-  const planB = plan?.scenarios.find((s) => plan.active_scenario_ids.includes(s.id));
-  const merged = baseline.map((d, i) => ({
-    year: d.year,
-    baseline: d.value,
-    planB: planB ? planB.computed.net_worth_series[i]?.value ?? null : null,
-  }));
+  // One series per active scenario. The chips already render every active
+  // scenario; the chart needs to do the same instead of picking just the
+  // first via .find() (which is what hid Plan B / Plan C from the canvas).
+  const activeScenarios = (plan?.scenarios ?? []).filter((s) =>
+    (plan?.active_scenario_ids ?? []).includes(s.id),
+  );
+  const merged = baseline.map((d, i) => {
+    const row: Record<string, number | null> = { year: d.year, baseline: d.value };
+    activeScenarios.forEach((s, idx) => {
+      row[`scenario_${idx}`] = s.computed.net_worth_series[i]?.value ?? null;
+    });
+    return row;
+  });
+
+  // Stable palette for up to 4 pinned scenarios. Index 0 is the matcha green
+  // already used as "Plan B" so pre-existing screenshots keep their colour.
+  const SCENARIO_COLOURS = ['#87a17e', '#7e9aa1', '#a18a7e', '#9e7ea1'];
 
   const pins = plan?.computed.milestone_pins ?? [];
   const mc = plan?.computed.monte_carlo;
@@ -44,10 +55,12 @@ export function NetWorthChart({
                 <stop offset="0%" stopColor="#52525b" stopOpacity={0.18} />
                 <stop offset="100%" stopColor="#52525b" stopOpacity={0.02} />
               </linearGradient>
-              <linearGradient id="grad-planb" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#87a17e" stopOpacity={0.32} />
-                <stop offset="100%" stopColor="#87a17e" stopOpacity={0.03} />
-              </linearGradient>
+              {SCENARIO_COLOURS.map((c, idx) => (
+                <linearGradient key={idx} id={`grad-scenario-${idx}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={c} stopOpacity={0.32} />
+                  <stop offset="100%" stopColor={c} stopOpacity={0.03} />
+                </linearGradient>
+              ))}
             </defs>
             <XAxis
               dataKey="year"
@@ -68,7 +81,20 @@ export function NetWorthChart({
               contentStyle={{ borderRadius: 8, border: '1px solid #e4e4e7', fontSize: 12 }}
             />
             <Area type="monotone" dataKey="baseline" stroke="#52525b" strokeWidth={1.5} fill="url(#grad-baseline)" dot={false} />
-            {planB && <Area type="monotone" dataKey="planB" stroke="#87a17e" strokeWidth={1.5} fill="url(#grad-planb)" dot={false} />}
+            {activeScenarios.map((_, idx) => {
+              const colour = SCENARIO_COLOURS[idx % SCENARIO_COLOURS.length];
+              return (
+                <Area
+                  key={idx}
+                  type="monotone"
+                  dataKey={`scenario_${idx}`}
+                  stroke={colour}
+                  strokeWidth={1.5}
+                  fill={`url(#grad-scenario-${idx % SCENARIO_COLOURS.length})`}
+                  dot={false}
+                />
+              );
+            })}
             {pins.map((p, i) => {
               const point = merged.find((m) => m.year === p.year);
               if (!point) return null;

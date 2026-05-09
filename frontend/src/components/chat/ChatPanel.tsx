@@ -450,6 +450,13 @@ function renderMessages(
       out.push(<StatusPill key={i} text={m.text} done={m.done} error={m.error} />);
     else if (m.kind === 'thinking') out.push(<ThinkingDots key={i} />);
     else if (m.kind === 'assistant') {
+      // Skip empty assistant turns. The agent occasionally lands on an
+      // AIMessage with thinking-only / tool-only content and no text block;
+      // rendering it produces an unhelpful blank PLANNER card.
+      if (!m.text || !m.text.trim()) {
+        i++;
+        continue;
+      }
       const idx = i;
       out.push(
         <AssistantMessage

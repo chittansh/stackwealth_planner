@@ -70,10 +70,16 @@ async def chat(request: Request) -> EventSourceResponse:
                     return
 
             validated = validate_assistant_text(final_text or "", seen_numbers)
-            yield {
-                "event": "message",
-                "data": json.dumps({"role": "assistant", "text": validated}),
-            }
+            # Suppress empty assistant messages on the wire. They show up when
+            # the LLM ends a turn with thinking-only / tool-only content and
+            # no text block — the frontend would otherwise render a blank
+            # PLANNER card. The `done` event still fires so the client moves
+            # past the in-flight state.
+            if validated.strip():
+                yield {
+                    "event": "message",
+                    "data": json.dumps({"role": "assistant", "text": validated}),
+                }
             yield {"event": "done", "data": "ok"}
         except Exception as err:
             yield {"event": "error", "data": json.dumps({"message": str(err)})}
