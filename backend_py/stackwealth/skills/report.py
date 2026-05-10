@@ -118,6 +118,7 @@ th { background: #fafafa; font-weight: 600; color: #3f3f46; }
 .headline { background: #f4f4f5; padding: 4mm 5mm; border-left: 3px solid #18181b; margin: 3mm 0 5mm; }
 .headline h1 { font-size: 18pt; }
 .kbox { display: grid; grid-template-columns: 1fr 1fr; gap: 3mm; margin: 3mm 0; }
+.kbox-3 { grid-template-columns: 1fr 1fr 1fr; }
 .kcell { background: #fafafa; padding: 3mm 4mm; border: 1px solid #e4e4e7; border-radius: 1.5mm; }
 .kcell .label { font-size: 9pt; color: #71717a; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 1mm; }
 .kcell .val { font-size: 13pt; font-weight: 600; color: #18181b; }
@@ -128,14 +129,13 @@ th { background: #fafafa; font-weight: 600; color: #3f3f46; }
 .good { color: #15803d; }
 .warn { color: #b45309; }
 /* No in-content footer — Playwright's footer_template handles every page. */
-.cover {
-  display: flex; flex-direction: column; justify-content: center;
-  min-height: 240mm;
-}
-.cover .brand { font-size: 11pt; color: #71717a; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 4mm; }
-.cover h1 { font-size: 30pt; line-height: 1.1; margin-bottom: 2mm; }
-.cover .sub { font-size: 13pt; color: #52525b; margin-bottom: 6mm; }
-.cover .meta { font-size: 10.5pt; color: #3f3f46; }
+/* Cover is now a dense scoreboard, not vertically centred — content fills the page. */
+.cover .brand { font-size: 11pt; color: #71717a; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 3mm; }
+.cover h1 { font-size: 26pt; line-height: 1.1; margin: 0 0 1mm; }
+.cover .sub { font-size: 12pt; color: #52525b; margin-bottom: 4mm; }
+.cover-meta { display: flex; gap: 8mm; flex-wrap: wrap; font-size: 10pt; color: #3f3f46; padding: 2.5mm 0; border-top: 1px solid #e4e4e7; border-bottom: 1px solid #e4e4e7; margin-bottom: 5mm; }
+.cover-section { margin-top: 0; }
+.cover-foot { margin-top: 6mm; font-size: 9.5pt; line-height: 1.5; }
 .disclaimer { font-size: 8.5pt; color: #71717a; line-height: 1.45; margin-top: 5mm; }
 .scorecard td { padding: 1.5mm 3mm; }
 .score-bar { height: 4mm; background: #e4e4e7; border-radius: 1mm; overflow: hidden; }
@@ -151,73 +151,286 @@ def _footer(_page_num: int) -> str:
 
 
 def _cover_page(plan: PlanState) -> str:
-    name = plan.personal_details.full_name or plan.household_id
+    """Page 1: Brand strip + headline scoreboard. No empty whitespace —
+    the user wants the first three pages to be a dense self-contained
+    summary of the entire plan."""
+    pd = plan.personal_details
+    fsi = plan.freedom_score_inputs
+    nw = plan.computed.net_worth
+    fs = plan.computed.freedom_score
+    rp = plan.computed.risk_profile
+    al = plan.computed.allocation
+    headline = plan.computed.headline_amount_at_horizon
+    horizon = plan.computed.horizon_years
+    name = pd.full_name or plan.household_id
     today = datetime.now().strftime("%B %d, %Y")
+
+    monthly_income = fsi.monthly_income or 0
+    monthly_expenses = fsi.monthly_expenses or 0
+    monthly_emi = fsi.monthly_emi or 0
+    surplus = monthly_income - monthly_expenses - monthly_emi
+    surplus_rate = (surplus / monthly_income * 100) if monthly_income else 0
+
+    fs_val = f"{fs.final_score:.0f}/100" if fs else "—"
+    fs_age = f"Estimated freedom age {fs.estimated_freedom_age:.0f}" if fs else "Run freedom_score to populate"
+    rp_val = f"{rp.recommended_score:.0f} · {rp.recommended_profile}" if rp else "—"
+    rp_note = (
+        f"Capacity {rp.capacity_score:.0f} · Need {rp.need_score:.0f} · Willingness {rp.willingness_score:.0f}"
+        if rp
+        else "Risk profile not set"
+    )
+    if al:
+        rec = al.recommended_allocation
+        al_val = f"{rec.equity:.0f}/{rec.debt:.0f}/{rec.gold:.0f}/{rec.cash:.0f}"
+        al_note = f"Equity / Debt / Gold / Cash · {al.tactical_regime_label}"
+    else:
+        al_val = "—"
+        al_note = "Allocation not yet computed"
+
     return f"""<section class="page cover">
   <div class="brand">Stackwealth Research Desk</div>
   <h1>Comprehensive Financial Plan</h1>
   <div class="sub">Institutional-Grade Household Review</div>
-  <div class="meta">
-    <p><strong>Client:</strong> {_h(name)}</p>
-    <p><strong>Household ID:</strong> {_h(plan.household_id)}</p>
-    <p><strong>Date:</strong> {today}</p>
-    <p><strong>Prepared by:</strong> Stackwealth Research Desk</p>
+  <div class="cover-meta">
+    <span><strong>Client:</strong> {_h(name)}</span>
+    <span><strong>Date:</strong> {today}</span>
+    <span><strong>Household ID:</strong> {_h(plan.household_id)}</span>
   </div>
+
+  <h3 class="cover-section">Plan Scoreboard</h3>
+  <div class="kbox kbox-3">
+    <div class="kcell"><div class="label">Net Worth Today</div><div class="val">{_fmt_lakhs(nw.total)}</div><div class="note">Liquid {_fmt_lakhs(nw.liquid)} · Debts {_fmt_lakhs(nw.debts_total)}</div></div>
+    <div class="kcell"><div class="label">Monthly Surplus</div><div class="val">{_fmt_inr(surplus)}</div><div class="note">{_fmt_pct(surplus_rate)} savings rate · Income {_fmt_inr(monthly_income)}</div></div>
+    <div class="kcell"><div class="label">{horizon}-Year Projection</div><div class="val">{_fmt_lakhs(headline)}</div><div class="note">At age {(fsi.age or 30) + horizon}, current trajectory</div></div>
+    <div class="kcell"><div class="label">Freedom Score</div><div class="val">{_h(fs_val)}</div><div class="note">{_h(fs_age)}</div></div>
+    <div class="kcell"><div class="label">Risk Profile</div><div class="val">{_h(rp_val)}</div><div class="note">{_h(rp_note)}</div></div>
+    <div class="kcell"><div class="label">Recommended Allocation</div><div class="val">{_h(al_val)}</div><div class="note">{_h(al_note)}</div></div>
+  </div>
+
+  <p class="muted cover-foot">This report begins with a three-page executive summary covering the household snapshot, allocation, goals, Monte Carlo outlook, and prioritized actions. Subsequent pages drill into income/expenses, holdings, liabilities, insurance, goals, risk profile, allocation, cashflow, tax, and the Freedom scorecard. Every figure is sourced from the canonical PlanState — nothing is inferred without an underlying input.</p>
   {_footer(1)}
 </section>"""
 
 
 def _executive_summary(plan: PlanState, page_num: int) -> str:
+    """Page 2: Plan Summary — household snapshot, full income/expense table,
+    goals with success probabilities, recommended allocation, insurance gaps."""
     pd = plan.personal_details
     fsi = plan.freedom_score_inputs
     fs = plan.computed.freedom_score
-    nw = plan.computed.net_worth
-    headline = plan.computed.headline_amount_at_horizon
-    horizon = plan.computed.horizon_years
-    monthly_income = (fsi.monthly_income or 0)
-    monthly_expenses = (fsi.monthly_expenses or 0)
-    monthly_emi = (fsi.monthly_emi or 0)
+    al = plan.computed.allocation
+    mc = plan.computed.monte_carlo
+    monthly_income = fsi.monthly_income or 0
+    monthly_expenses = fsi.monthly_expenses or 0
+    monthly_emi = fsi.monthly_emi or 0
     surplus = monthly_income - monthly_expenses - monthly_emi
-    surplus_rate = (surplus / monthly_income * 100) if monthly_income else 0
     age = fsi.age or "—"
-    final_score = fs.final_score if fs else None
-    profile = "—"
-    if final_score is not None:
-        profile = "Strong" if final_score >= 70 else "Moderate" if final_score >= 50 else "Needs Attention"
+
+    # Goals + per-goal success probabilities (from MC if present).
+    prob_by_id = {}
+    if mc and mc.goal_success_probabilities:
+        prob_by_id = {g.goal_id: g.probability for g in mc.goal_success_probabilities}
+
+    if plan.financial_goals:
+        goal_rows = "".join(
+            f'<tr><td>{_h(g.goal_name)}</td>'
+            f'<td>{_h((g.kind or "").replace("_", " ").title())}</td>'
+            f'<td class="num">{_h(g.target_year or "—")}</td>'
+            f'<td class="num">{_fmt_lakhs(g.target_amount or 0)}</td>'
+            f'<td>{_h((g.priority or "").title())}</td>'
+            f'<td class="num">{_fmt_pct(prob_by_id.get(g.id, 0) * 100, 0) if g.id in prob_by_id else "—"}</td></tr>'
+            for g in plan.financial_goals
+        )
+    else:
+        goal_rows = '<tr><td colspan="6" class="muted">No goals captured.</td></tr>'
+
+    # Allocation breakdown — strategic + recommended side by side.
+    if al:
+        strat = al.strategic_allocation
+        rec = al.recommended_allocation
+        eq_split = al.recommended_equity_split
+        alloc_html = f"""
+        <table>
+          <tr><th>Bucket</th><th class="num">Strategic</th><th class="num">Recommended</th><th>Notes</th></tr>
+          <tr><td>Equity</td><td class="num">{strat.equity:.0f}%</td><td class="num">{rec.equity:.0f}%</td><td>Large {eq_split.large:.0f}% · Mid {eq_split.mid:.0f}% · Small {eq_split.small:.0f}%</td></tr>
+          <tr><td>Debt</td><td class="num">{strat.debt:.0f}%</td><td class="num">{rec.debt:.0f}%</td><td>Duration: {_h(al.debt_duration_stance)}</td></tr>
+          <tr><td>Gold</td><td class="num">{strat.gold:.0f}%</td><td class="num">{rec.gold:.0f}%</td><td>Inflation hedge</td></tr>
+          <tr><td>Cash</td><td class="num">{strat.cash:.0f}%</td><td class="num">{rec.cash:.0f}%</td><td>Liquidity buffer</td></tr>
+        </table>
+        <p class="muted">Tactical regime: <strong>{_h(al.tactical_regime_label)}</strong> (signal score {al.tactical_regime_score:+.1f}).</p>
+        """
+    else:
+        alloc_html = '<p class="muted">Allocation not yet computed. Run the 3-question risk profile first; allocation auto-computes alongside.</p>'
+
+    # Insurance gap callouts.
+    insurance_lines: list[str] = []
+    if fs:
+        ins = plan.insurance_details
+        life_have = (ins.term_plan and ins.term_plan.cover_amount) or 0
+        med_have = (ins.health_insurance and ins.health_insurance.cover_amount) or 0
+        life_gap = max(0, fs.required_life_cover - life_have)
+        med_gap = max(0, fs.required_medical_cover - med_have)
+        if life_gap > 0:
+            insurance_lines.append(
+                f'<li><span class="bad">Life cover gap:</span> required {_fmt_lakhs(fs.required_life_cover)}, current {_fmt_lakhs(life_have)} — '
+                f'{_fmt_lakhs(life_gap)} short. Top up term plan.</li>'
+            )
+        if med_gap > 0:
+            insurance_lines.append(
+                f'<li><span class="bad">Medical cover gap:</span> required {_fmt_lakhs(fs.required_medical_cover)}, current {_fmt_lakhs(med_have)} — '
+                f'{_fmt_lakhs(med_gap)} short. Add family floater.</li>'
+            )
+        if not insurance_lines:
+            insurance_lines.append('<li><span class="good">Insurance adequately covered against city-adjusted requirements.</span></li>')
+    insurance_html = f'<ul>{"".join(insurance_lines)}</ul>' if insurance_lines else '<p class="muted">Run freedom_score to compute insurance requirements.</p>'
 
     return f"""<section class="page">
-  <div class="headline"><h1>1. Executive Summary</h1></div>
-  <p>This report provides a comprehensive review of <strong>{_h(pd.full_name or plan.household_id)}'s</strong>
-  household financial plan as of {datetime.now().strftime('%B %d, %Y')}. It analyzes income, expenses,
-  holdings, liabilities, insurance coverage, and goals to surface specific gaps and the actions needed to
-  close them. Every numeric figure in this report is sourced from the canonical PlanState; nothing is
-  inferred without the underlying inputs.</p>
+  <div class="headline"><h1>1. Plan Summary</h1></div>
+  <p>Comprehensive snapshot of <strong>{_h(pd.full_name or plan.household_id)}'s</strong> household plan as of {datetime.now().strftime('%B %d, %Y')}.
+  Age {_h(age)} · {_h(pd.city_of_residence or '—')} ({_h(pd.city_type or '—')}) · {_h(pd.marital_status or 'status unknown')} · {_h(pd.dependents or 0)} dependents · retirement target {_h(pd.retirement_age_target or 60)}.</p>
 
-  <h3>Household Snapshot</h3>
-  <div class="kbox">
-    <div class="kcell"><div class="label">Age</div><div class="val">{_h(age)}</div><div class="note">Years</div></div>
-    <div class="kcell"><div class="label">City</div><div class="val">{_h(pd.city_of_residence or '—')}</div><div class="note">{_h(pd.city_type or '—')}</div></div>
-    <div class="kcell"><div class="label">Marital Status</div><div class="val">{_h(pd.marital_status or '—')}</div><div class="note">Dependents: {_h(pd.dependents or 0)}</div></div>
-    <div class="kcell"><div class="label">Retirement Target</div><div class="val">{_h(pd.retirement_age_target or '—')}</div><div class="note">Years</div></div>
-  </div>
-
-  <h3>Key Financial Metrics</h3>
+  <h3>Cashflow Position (Monthly)</h3>
   <table>
-    <tr><th>Metric</th><th class="num">Value</th><th>Insight</th></tr>
-    <tr><td>Monthly Take-home</td><td class="num">{_fmt_inr(monthly_income)}</td><td>Total household inflow</td></tr>
-    <tr><td>Monthly Fixed Expenses</td><td class="num">{_fmt_inr(monthly_expenses)}</td><td>{_fmt_pct((monthly_expenses / monthly_income * 100) if monthly_income else 0)} of income</td></tr>
-    <tr><td>Monthly EMI Burden</td><td class="num">{_fmt_inr(monthly_emi)}</td><td>{_fmt_pct((monthly_emi / monthly_income * 100) if monthly_income else 0)} of income</td></tr>
-    <tr><td>Monthly Surplus</td><td class="num">{_fmt_inr(surplus)}</td><td>{_fmt_pct(surplus_rate)} savings rate</td></tr>
-    <tr><td>Net Worth (Today)</td><td class="num">{_fmt_lakhs(nw.total)}</td><td>Assets minus liabilities</td></tr>
-    <tr><td>Liquid Assets</td><td class="num">{_fmt_lakhs(nw.liquid)}</td><td>Cash + breakable FDs</td></tr>
-    <tr><td>Investment Portfolio</td><td class="num">{_fmt_lakhs(fsi.portfolio_current_value or 0)}</td><td>MFs + equities + FI</td></tr>
-    <tr><td>Total Debt Outstanding</td><td class="num">{_fmt_lakhs(nw.debts_total)}</td><td>Home + auto + personal + credit</td></tr>
-    <tr><td>Freedom Score</td><td class="num">{_fmt_pct(final_score, 1) if final_score is not None else '—'}</td><td>{_h(profile)} (out of 100)</td></tr>
-    <tr><td>{horizon}-yr Projection</td><td class="num">{_fmt_lakhs(headline)}</td><td>Net worth at age {(fsi.age or 30) + horizon}</td></tr>
+    <tr><th>Stream</th><th class="num">Amount</th><th>Share of Income</th></tr>
+    <tr><td>Take-home (all sources)</td><td class="num">{_fmt_inr(monthly_income)}</td><td>—</td></tr>
+    <tr><td>Fixed expenses</td><td class="num">{_fmt_inr(monthly_expenses)}</td><td>{_fmt_pct((monthly_expenses / monthly_income * 100) if monthly_income else 0)}</td></tr>
+    <tr><td>EMI burden</td><td class="num">{_fmt_inr(monthly_emi)}</td><td>{_fmt_pct((monthly_emi / monthly_income * 100) if monthly_income else 0)}</td></tr>
+    <tr><td><strong>Surplus available for SIP / goals</strong></td><td class="num"><strong>{_fmt_inr(surplus)}</strong></td><td><strong>{_fmt_pct((surplus / monthly_income * 100) if monthly_income else 0)}</strong></td></tr>
   </table>
 
-  <h3>Top Recommendations</h3>
-  {_top_recommendations(plan)}
+  <h3>Goals at a Glance</h3>
+  <table>
+    <tr><th>Goal</th><th>Kind</th><th class="num">Year</th><th class="num">Target</th><th>Priority</th><th class="num">Success Prob.</th></tr>
+    {goal_rows}
+  </table>
+  <p class="muted">Success probability is the fraction of {mc.paths_count if mc else 0} Monte Carlo paths that meet the inflation-adjusted target by the goal's horizon. Run montecarlo_run to populate.</p>
+
+  <h3>Recommended Allocation</h3>
+  {alloc_html}
+
+  <h3>Insurance Gaps</h3>
+  {insurance_html}
+  {_footer(page_num)}
+</section>"""
+
+
+def _outlook_actions(plan: PlanState, page_num: int) -> str:
+    """Page 3: Outlook + Top Actions — Monte Carlo, key cashflow milestones,
+    prioritized recommendations, critical flags."""
+    fsi = plan.freedom_score_inputs
+    mc = plan.computed.monte_carlo
+    rp = plan.computed.risk_profile
+    fs = plan.computed.freedom_score
+    cf = plan.computed.cashflow
+    headline = plan.computed.headline_amount_at_horizon
+    horizon = plan.computed.horizon_years
+    age = fsi.age or 30
+    retirement_age = plan.personal_details.retirement_age_target or 60
+
+    # Monte Carlo block
+    if mc:
+        mc_html = f"""
+        <table>
+          <tr><th>Percentile</th><th class="num">Freedom Age</th><th>Reading</th></tr>
+          <tr><td>P10 (lucky)</td><td class="num">{mc.p10_freedom_age:.0f}</td><td>10% of paths reach 25× expenses by this age or earlier</td></tr>
+          <tr><td>P50 (median)</td><td class="num">{mc.p50_freedom_age:.0f}</td><td>Half of paths reach financial freedom by this age</td></tr>
+          <tr><td>P90 (unlucky)</td><td class="num">{mc.p90_freedom_age:.0f}</td><td>90% of paths reach freedom by this age</td></tr>
+        </table>
+        <p class="muted">Monte Carlo simulation across {mc.paths_count} paths using the recommended allocation's blended return and equity-driven volatility.</p>
+        """
+    else:
+        mc_html = '<p class="muted">Monte Carlo not yet run. Use montecarlo_run after risk_assess to populate.</p>'
+
+    # Cashflow milestones
+    milestones_html = '<p class="muted">Cashflow projection not yet computed.</p>'
+    if cf and cf.rows:
+        def _row_at_age(target_age: int):
+            for r in cf.rows:
+                if r.age >= target_age:
+                    return r
+            return cf.rows[-1] if cf.rows else None
+        ages = [age, age + 5, age + 15, retirement_age, age + horizon]
+        seen = set()
+        rows_html = []
+        for a in ages:
+            r = _row_at_age(a)
+            if not r or r.year in seen:
+                continue
+            seen.add(r.year)
+            label = f"Age {r.age}"
+            if r.age == retirement_age:
+                label += " (retirement)"
+            rows_html.append(
+                f'<tr><td>{label}</td><td class="num">{r.year}</td>'
+                f'<td class="num">{_fmt_lakhs(r.income)}</td>'
+                f'<td class="num">{_fmt_lakhs(r.expenses)}</td>'
+                f'<td class="num">{_fmt_lakhs(r.total_net_worth)}</td></tr>'
+            )
+        milestones_html = f"""
+        <table>
+          <tr><th>Milestone</th><th class="num">Year</th><th class="num">Annual Income</th><th class="num">Annual Expenses</th><th class="num">Net Worth</th></tr>
+          {''.join(rows_html)}
+        </table>
+        """
+
+    # Top Actions — keyed off pillar gaps + risk alignment.
+    actions: list[str] = []
+    if rp:
+        if rp.alignment_status == "goal_risk_mismatch":
+            actions.append(
+                f'<li class="bad"><strong>Goal-risk mismatch.</strong> Goals demand more risk than is prudent. '
+                f'Pick one: increase periodic contribution, extend horizon, reduce target, or split into essential + aspirational.</li>'
+            )
+        if "Emergency fund covers less than 3 months" in (rp.key_warnings or []):
+            actions.append(
+                '<li class="warn"><strong>Build emergency fund.</strong> Park 6 months of expenses in a high-yield savings or sweep-FD before adding portfolio risk.</li>'
+            )
+    if fs:
+        ranked = sorted(
+            [
+                ("Liquidity", fs.pillars.liquidity, "Build emergency fund equal to 6 months of expenses; park in high-yield savings or sweep-FD."),
+                ("Debt", fs.pillars.debt, "Reduce EMI exposure below 35% of monthly income; prepay highest-interest loans first."),
+                ("Investment", fs.pillars.investment, "Ramp up SIP to align portfolio with annual income × 5; tilt to equity per recommended allocation."),
+                ("Discipline", fs.pillars.discipline, "Automate SIPs and lock in savings rate ≥ 30%; review every quarter against the cash-flow plan."),
+                ("Risk", fs.pillars.risk, "Top up term cover to 10× annual income (city-adjusted); ensure family floater covers all dependents."),
+            ],
+            key=lambda x: x[1],
+        )
+        for name, score, action in ranked[:3]:
+            actions.append(f'<li><strong>{name} pillar at {score:.0f}/100:</strong> {action}</li>')
+    if not actions:
+        actions.append("<li>Plan is in good shape — continue reviewing quarterly.</li>")
+    actions_html = f'<ol>{"".join(actions)}</ol>'
+
+    # Critical flags strip
+    flags: list[str] = []
+    if rp and rp.alignment_status == "goal_risk_mismatch":
+        flags.append('<li class="bad">Goal-risk mismatch active</li>')
+    if fs and fs.pillars.investment < 30:
+        flags.append('<li class="warn">Investment pillar critically low (no/low SIP)</li>')
+    if fs and fs.pillars.risk < 50:
+        flags.append('<li class="warn">Underinsured for city × dependent profile</li>')
+    if fs and fs.pillars.liquidity < 50:
+        flags.append('<li class="warn">Emergency fund below 3 months of expenses</li>')
+    if not flags:
+        flags.append('<li class="good">No critical flags.</li>')
+    flags_html = f'<ul>{"".join(flags)}</ul>'
+
+    return f"""<section class="page">
+  <div class="headline"><h1>2. Outlook &amp; Top Actions</h1></div>
+
+  <h3>Monte Carlo Outlook (Freedom Age)</h3>
+  {mc_html}
+
+  <h3>Projection Milestones</h3>
+  {milestones_html}
+  <p class="muted">{horizon}-year projection lands at <strong>{_fmt_lakhs(headline)}</strong> at age {age + horizon} on the current trajectory.</p>
+
+  <h3>Top Actions — Ranked by Impact</h3>
+  {actions_html}
+
+  <h3>Critical Flags</h3>
+  {flags_html}
   {_footer(page_num)}
 </section>"""
 
@@ -768,16 +981,19 @@ def _recommendations_disclaimer(plan: PlanState, page_num: int) -> str:
 
 def _build_html(plan: PlanState) -> str:
     sections = [
+        # Pages 1-3: dense executive summary self-contained.
         _cover_page(plan),
         _executive_summary(plan, 2),
-        _profile_income_expenses(plan, 3),
-        _net_worth_holdings(plan, 4),
-        _insurance_liabilities(plan, 5),
-        _goals(plan, 6),
-        _risk_allocation(plan, 7),
-        _cashflow(plan, 8),
-        _tax_freedom_scorecard(plan, 9),
-        _recommendations_disclaimer(plan, 10),
+        _outlook_actions(plan, 3),
+        # Pages 4+: drill-down detail.
+        _profile_income_expenses(plan, 4),
+        _net_worth_holdings(plan, 5),
+        _insurance_liabilities(plan, 6),
+        _goals(plan, 7),
+        _risk_allocation(plan, 8),
+        _cashflow(plan, 9),
+        _tax_freedom_scorecard(plan, 10),
+        _recommendations_disclaimer(plan, 11),
     ]
     return f"""<!doctype html>
 <html lang="en"><head>
