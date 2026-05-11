@@ -18,6 +18,7 @@ Design notes:
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
@@ -27,6 +28,13 @@ from typing import Any, Awaitable, Callable, Literal, Optional, Protocol
 
 from ..db import get_plan, save_plan
 from ..types import PlanState
+
+
+# Per-turn wall-clock budget. The Anthropic SDK can silently hang on a
+# dropped TCP read for ~10 minutes — without this guard a single bad
+# connection wastes most of an eval run. 240s is generous for a multi-tool
+# turn but kills a stuck call before it dominates the budget.
+DEFAULT_TURN_TIMEOUT_SECONDS = float(os.environ.get("EVAL_TURN_TIMEOUT", "240"))
 
 
 Layer = Literal[1, 2, 3, 4]
@@ -208,13 +216,21 @@ class Runner:
     iterating the planner turn's async generator (the same shape `api/chat`
     consumes in prod)."""
 
-    def __init__(self, *, model: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        *,
+        model: Optional[str] = None,
+        turn_timeout: float = DEFAULT_TURN_TIMEOUT_SECONDS,
+        on_progress: Optional[Callable[[RunResult, int, int], None]] = None,
+    ) -> None:
         # Silence Langfuse during evals — no need to pollute the prod trace
         # tree with synthetic test traffic.
         os.environ.setdefault("LANGFUSE_DISABLED_FOR_EVALS", "1")
         os.environ.pop("LANGFUSE_PUBLIC_KEY", None)
         os.environ.pop("LANGFUSE_SECRET_KEY", None)
         self.model = model or os.environ.get("PLANNER_MODEL") or "claude-sonnet-4-6"
+        self.turn_timeout = turn_timeout
+        self.on_progress = on_progress
 
     async def run_one(self, case: Case) -> RunResult:
         # Each case gets a fresh household so there's no cross-case contamination.
@@ -267,9 +283,17 @@ class Runner:
     async def run_many(self, cases: list[Case]) -> EvalRun:
         started = datetime.now(timezone.utc)
         results: list[RunResult] = []
-        for case in cases:
+        total = len(cases)
+        for idx, case in enumerate(cases, 1):
             result = await self.run_one(case)
             results.append(result)
+            if self.on_progress is not None:
+                try:
+                    self.on_progress(result, idx, total)
+                except Exception:
+                    # Progress callbacks are advisory — never let one fail
+                    # the run.
+                    pass
         finished = datetime.now(timezone.utc)
         return EvalRun(
             started_at=started, finished_at=finished, model=self.model, results=results
@@ -319,7 +343,8 @@ class Runner:
             kind="user",
             duration_seconds=0,
         )
-        try:
+
+        async def _drain() -> None:
             async for ev in run_planner_turn(
                 household_id=household_id, chat_id="eval", message=step.text
             ):
@@ -345,6 +370,13 @@ class Runner:
                     record.assistant_text = data or ""
                 elif kind == "error":
                     record.error = (data or {}).get("message", "error")
+
+        try:
+            await asyncio.wait_for(_drain(), timeout=self.turn_timeout)
+            record.duration_seconds = time.perf_counter() - t0
+            return record
+        except asyncio.TimeoutError:
+            record.error = f"turn timed out after {self.turn_timeout:.0f}s"
             record.duration_seconds = time.perf_counter() - t0
             return record
         except Exception as e:

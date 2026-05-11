@@ -94,9 +94,25 @@ async def _run(args: argparse.Namespace) -> int:
         return 2
 
     sys.stdout.write(f"Running {len(cases)} case(s)...\n")
-    runner = Runner(model=args.model)
+    sys.stdout.flush()
+
+    def _on_progress(result, idx: int, total: int) -> None:
+        mark = "✓" if result.passed else "✗"
+        c = result.case
+        line = (
+            f"  [{idx:>2}/{total}] L{c.layer} [{mark}] "
+            f"{c.id:<46} {result.duration_seconds:>6.2f}s"
+        )
+        if not result.passed:
+            failed = ", ".join(jr.judge_name for jr in result.failed_judges) or (result.error or "—")
+            line += f"  ↳ {failed[:80]}"
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+
+    runner = Runner(model=args.model, on_progress=_on_progress)
     run = await runner.run_many(cases)
 
+    sys.stdout.write("\n")
     _print_table(run)
 
     if not args.no_pdf:
