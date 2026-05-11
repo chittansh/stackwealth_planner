@@ -34,6 +34,18 @@ from ..judges import (
     PlanFieldSet,
     ProseDoesNotContain,
     ToolCalled,
+    ToolCalledOrSubsumed,
+)
+
+
+# Use this in place of bare `ToolCalled("risk_assess")` for multi-turn cases
+# where the agent might legitimately reach risk via the `run_full_analysis`
+# orchestrator instead of emitting `risk_assess` directly. The orchestrator
+# chains risk → allocation → tax → MC under the hood; from the user's
+# perspective both paths satisfy "risk profile was computed".
+_RISK_ASSESSED = ToolCalledOrSubsumed(
+    tool_name="risk_assess",
+    subsumers=["run_full_analysis"],
 )
 
 
@@ -145,7 +157,7 @@ _C2 = Case(
                    predicate_label="House goal at ₹80L"),
         ToolCalled(tool_name="plan_add", arg_predicate=_goal_amount(50000000),
                    predicate_label="Retirement goal at ₹5 Cr"),
-        ToolCalled(tool_name="risk_assess"),
+        _RISK_ASSESSED,
         ComputedPresent(field="risk_profile"),
         NoToolError(),
         _NO_UNVERIFIED,
@@ -257,7 +269,7 @@ _C5 = Case(
         PlanFieldSet(path="freedom_score_inputs.monthly_emi"),
         ToolCalled(tool_name="plan_add", arg_predicate=_goal_amount(60000000),
                    predicate_label="Retirement goal at ₹6 Cr"),
-        ToolCalled(tool_name="risk_assess"),
+        _RISK_ASSESSED,
         ComputedPresent(field="risk_profile"),
         NoToolError(),
         _NO_UNVERIFIED,
@@ -296,7 +308,7 @@ _C6 = Case(
         UserMessage("can you give me the PDF link?"),
     ],
     judges=[
-        ToolCalled(tool_name="risk_assess"),
+        _RISK_ASSESSED,
         ToolCalled(tool_name="run_full_analysis"),
         ComputedPresent(field="risk_profile"),
         ComputedPresent(field="allocation"),
@@ -442,7 +454,7 @@ _C10 = Case(
         UserMessage("send the PDF"),
     ],
     judges=[
-        ToolCalled(tool_name="risk_assess"),
+        _RISK_ASSESSED,
         ToolCalled(tool_name="plan_set"),
         ComputedPresent(field="risk_profile"),
         NoToolError(),
@@ -533,7 +545,7 @@ _C12 = Case(
             forbidden=["yo ", "bro ", "lol", "chillin", "😊", "👍", "🚀", "💰"],
             description_override="Agent must not mirror slang/emoji",
         ),
-        ToolCalled(tool_name="risk_assess"),
+        _RISK_ASSESSED,
         ComputedPresent(field="risk_profile"),
         NoToolError(),
         _NO_UNVERIFIED,
@@ -568,7 +580,7 @@ _C13 = Case(
         UserMessage("now show me the MC outcome"),
     ],
     judges=[
-        ToolCalled(tool_name="risk_assess"),
+        _RISK_ASSESSED,
         ComputedPresent(field="risk_profile"),
         ComputedPresent(field="monte_carlo"),
         NoToolError(),
@@ -607,7 +619,7 @@ _C14 = Case(
     judges=[
         ToolCalled(tool_name="plan_add", arg_predicate=_goal_amount(30000000),
                    predicate_label="Coorg house ₹3 Cr → 30,000,000"),
-        ToolCalled(tool_name="risk_assess"),
+        _RISK_ASSESSED,
         ComputedPresent(field="risk_profile"),
         NoToolError(),
         _NO_UNVERIFIED,

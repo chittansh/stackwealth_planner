@@ -85,6 +85,66 @@ class ToolCalled:
 
 
 @dataclass
+class ToolCalledOrSubsumed:
+    """Like ToolCalled, but also passes when an orchestrator tool that
+    subsumes `tool_name` was called instead. Use this whenever an
+    orchestrator (e.g. `run_full_analysis`) chains the subordinate tool
+    internally — the agent gets credit for either direct emission or the
+    orchestrated path.
+
+    By default the subsumer must satisfy the same arg_predicate the
+    subordinate tool would (e.g. `willingness` present on
+    run_full_analysis). Override via `subsumer_arg_predicate` for tools
+    whose orchestrator args differ from the subordinate's args."""
+    tool_name: str
+    subsumers: list[str]
+    arg_predicate: Optional[Callable[[dict[str, Any]], bool]] = None
+    subsumer_arg_predicate: Optional[Callable[[dict[str, Any]], bool]] = None
+    predicate_label: str = ""
+
+    @property
+    def name(self) -> str:
+        return f"ToolCalledOrSubsumed({self.tool_name}|{'/'.join(self.subsumers)})"
+
+    def check(self, ctx: RunContext) -> JudgeResult:
+        # Direct path: the named tool was emitted with matching args.
+        direct = [c for c in ctx.tool_calls if c.name == self.tool_name]
+        for c in direct:
+            if self.arg_predicate is None or self.arg_predicate(c.args):
+                return JudgeResult(
+                    ok=True,
+                    judge_name=self.name,
+                    description=f"`{self.tool_name}` was called directly",
+                    expected=self.tool_name,
+                    actual=c.args if self.arg_predicate else c.name,
+                )
+        # Subsumer path: any orchestrator that wraps it was emitted.
+        sub_pred = self.subsumer_arg_predicate or self.arg_predicate
+        subsumer_hits = [c for c in ctx.tool_calls if c.name in self.subsumers]
+        for c in subsumer_hits:
+            if sub_pred is None or sub_pred(c.args):
+                return JudgeResult(
+                    ok=True,
+                    judge_name=self.name,
+                    description=f"`{self.tool_name}` reached via subsumer `{c.name}`",
+                    expected=self.tool_name,
+                    actual=c.name,
+                )
+        return JudgeResult(
+            ok=False,
+            judge_name=self.name,
+            description=(
+                f"`{self.tool_name}` must be called (directly) or reached via "
+                f"one of: {', '.join(self.subsumers)}"
+                + (f" (predicate: {self.predicate_label})" if self.predicate_label else "")
+            ),
+            expected=f"{self.tool_name} or one of {self.subsumers}",
+            actual=[c.name for c in ctx.tool_calls] or "(no tool calls)",
+            message="Neither the direct tool nor a subsumer was called with matching args.",
+        )
+
+
+@dataclass
 class ToolNotCalled:
     """Asserts a specific tool was NEVER called."""
     tool_name: str
@@ -107,25 +167,60 @@ class ToolNotCalled:
 
 @dataclass
 class NoToolError:
-    """Asserts no tool returned an `error` field."""
+    """Asserts no tool returned an `error` field — RECOVERY-AWARE.
+
+    An error is forgiven if a *later* call to the same tool succeeded
+    (i.e. `tool_results` contains a non-error result for the same
+    `tool.name` at a later index). Mirrors how a real agent recovers
+    from a transient error mid-conversation. Set `strict=True` to fail
+    on any error regardless of recovery."""
+    strict: bool = False
 
     @property
     def name(self) -> str:
-        return "NoToolError"
+        return "NoToolError" + ("(strict)" if self.strict else "")
 
     def check(self, ctx: RunContext) -> JudgeResult:
-        errors = [
-            (r.name, r.result)
-            for r in ctx.tool_results
+        results = ctx.tool_results
+        # First pass: locate every error event.
+        error_events = [
+            (idx, r) for idx, r in enumerate(results)
             if isinstance(r.result, dict) and r.result.get("error")
         ]
+        if self.strict:
+            unforgiven = error_events
+        else:
+            # Forgiven iff some LATER result for the same tool succeeded.
+            unforgiven = []
+            for idx, err in error_events:
+                later_success = any(
+                    r.name == err.name
+                    and not (isinstance(r.result, dict) and r.result.get("error"))
+                    for r in results[idx + 1 :]
+                )
+                if not later_success:
+                    unforgiven.append((idx, err))
+
+        actual = [
+            {"tool": err.name, "result": err.result, "idx": idx}
+            for idx, err in unforgiven
+        ] or "(no unrecovered tool errors)"
+
         return JudgeResult(
-            ok=not errors,
+            ok=not unforgiven,
             judge_name=self.name,
-            description="No tool_result carried an `error` field",
-            expected="(no tool errors)",
-            actual=errors or "(no tool errors)",
-            message=f"{len(errors)} tool error(s) surfaced." if errors else "",
+            description=(
+                "No tool errors (strict)"
+                if self.strict
+                else "No unrecovered tool errors — errors followed by a successful retry of the same tool are forgiven"
+            ),
+            expected="(no unrecovered tool errors)",
+            actual=actual,
+            message=(
+                f"{len(unforgiven)} unrecovered tool error(s)."
+                if unforgiven
+                else (f"{len(error_events)} error(s) recovered." if error_events else "")
+            ),
         )
 
 

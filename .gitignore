@@ -42,6 +42,11 @@ pnpm-debug.log*
 # tests
 coverage/
 
+# eval artifacts (run-local PDFs / HTML / logs)
+eval_report*.pdf
+eval_report*.html
+sw_evals_*.pdf
+
 # tmp
 tmp/
 .tmp/
