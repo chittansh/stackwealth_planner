@@ -65,7 +65,17 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
     monthly_expenses = fsi.monthly_expenses or 0
     monthly_emi = fsi.monthly_emi or 0
     equity_pct = (fsi.equity_allocation_percent or 50) / 100
-    expected_return = equity_pct * 0.10 + (1 - equity_pct) * 0.07
+    # Equity-return assumption comes from `assumptions.growth.investment` so
+    # the scenarios card's "equity drawdown shock" slider (which mutates that
+    # field) actually moves the projection. Default 0.10 matches the prior
+    # hardcoded value, so households that haven't touched assumptions stay on
+    # the same curve.
+    equity_growth = plan.assumptions.growth.investment if plan.assumptions.growth.investment > 0 else 0.10
+    debt_return = 0.07
+    expected_return = equity_pct * equity_growth + (1 - equity_pct) * debt_return
+    # Cash earns ~4% (assumptions.growth.cash); used for the un-invested cash
+    # bucket when an explicit SIP is set.
+    cash_return = plan.assumptions.growth.cash if plan.assumptions.growth.cash > 0 else 0.04
     inflation = plan.assumptions.inflation
     taxes = (
         plan.assumptions.taxes.federal
@@ -73,7 +83,24 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
         + plan.assumptions.taxes.capital_gains
     )
     retirement_age = plan.personal_details.retirement_age_target or 60
-    assets = (fsi.portfolio_current_value or 0) + (fsi.liquid_assets_current_value or 0)
+
+    # Two-pool model so scenario sliders that change SIP move the projection:
+    #   portfolio — grows at expected_return (equity-blended)
+    #   liquid    — grows at cash_return (cash/FD rate)
+    # If the user has set explicit `monthly_investments.mutual_fund_sip` (and
+    # related SIPs), the cashflow treats that as the amount invested per year;
+    # the remaining surplus accumulates in the liquid pool. If the user has
+    # NOT specified any SIP, we fall back to the historical "all surplus
+    # invested" model so existing households don't see regressions.
+    portfolio = fsi.portfolio_current_value or 0
+    liquid = fsi.liquid_assets_current_value or 0
+    mi = plan.monthly_investments
+    monthly_sip_total = 0.0
+    for attr in ("mutual_fund_sip", "nps", "ppf", "rd", "direct_equity"):
+        v = getattr(mi, attr, None) if mi else None
+        if isinstance(v, (int, float)) and v > 0:
+            monthly_sip_total += v
+    sip_explicit = monthly_sip_total > 0
     rows: list[CashFlowRow] = []
 
     # Pre-bucket goals by their target_year so each iteration is O(goals/year),
@@ -100,12 +127,25 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
         annual_emi = monthly_emi * 12 if earning else 0
         annual_tax = annual_income * (taxes * 0.4)  # simplified effective tax
         retirement_contrib = max(0.0, annual_income * 0.20) if earning else 0
-        net = annual_income - annual_expenses - annual_emi - annual_tax
-        assets = assets * (1 + expected_return) + max(net, 0)
+        surplus = annual_income - annual_expenses - annual_emi - annual_tax
 
-        # Goal drawdowns happen AFTER the year's growth + savings — same as
-        # paying a large expense in December. Inflation-adjust each goal
-        # forward from today to its target year.
+        # Allocate surplus between portfolio (investments) and liquid (cash).
+        if sip_explicit and earning:
+            # SIP scales with income (half-inflation, same as income drift).
+            annual_sip = monthly_sip_total * 12 * ((1 + inflation * 0.5) ** i)
+            invested_this_year = max(0.0, min(annual_sip, surplus))
+            cash_added_this_year = max(0.0, surplus - invested_this_year)
+        else:
+            # Legacy "all surplus invested" path — no regression for
+            # households that haven't told us a specific SIP.
+            invested_this_year = max(0.0, surplus)
+            cash_added_this_year = 0.0
+
+        portfolio = portfolio * (1 + expected_return) + invested_this_year
+        liquid = liquid * (1 + cash_return) + cash_added_this_year
+
+        # Goal drawdowns: tap liquid first (rational household behavior — use
+        # cash before redeeming investments), then portfolio for any shortfall.
         breakdown: list[CashFlowGoalOutflow] = []
         goal_outflow_total = 0.0
         for g in goals_by_year.get(year, []):
@@ -116,10 +156,14 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
                 CashFlowGoalOutflow(goal_id=g.id, goal_name=g.goal_name, amount=round(amt))
             )
             goal_outflow_total += amt
-        # Clamp at zero — a real household can't go below liquid==0 here.
-        # The shortfall is implicit when the projection flattens at 0; the
-        # canvas can call it out separately if needed.
-        assets = max(0.0, assets - goal_outflow_total)
+        remaining = goal_outflow_total
+        from_liquid = min(liquid, remaining)
+        liquid -= from_liquid
+        remaining -= from_liquid
+        from_portfolio = min(portfolio, remaining)
+        portfolio -= from_portfolio
+
+        assets = portfolio + liquid
 
         rows.append(
             CashFlowRow(
