@@ -20,6 +20,16 @@ export function Scenarios({ householdId, plan }: { householdId: string; plan: Pl
 
   const personId = plan?.assumptions.persons[0]?.id;
 
+  // Current baseline values the sliders are deltas against. Surfaced beside
+  // each slider so a "+₹32k SIP delta" reads as "₹0 → ₹32k", not just
+  // "+₹32k against nothing".
+  const currentSip = plan?.monthly_investments.mutual_fund_sip ?? 0;
+  const currentRetireAge =
+    plan?.assumptions.persons[0]?.retirement_age ??
+    plan?.personal_details.retirement_age_target ??
+    60;
+  const currentEquityGrowth = plan?.assumptions.growth.investment ?? 0.10;
+
   const pinScenario = async () => {
     if (!plan) return;
     setBusy(true);
@@ -130,16 +140,24 @@ export function Scenarios({ householdId, plan }: { householdId: string; plan: Pl
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
         <Slider
-          label="Monthly SIP delta"
+          label="Monthly SIP"
+          baseline={`${formatINR(currentSip, { compact: true })}/mo`}
+          targetLabel={
+            sip !== 0
+              ? `→ ${formatINR(Math.max(0, currentSip + sip), { compact: true })}/mo`
+              : null
+          }
           value={sip}
-          min={-50_000}
+          min={-Math.min(50_000, currentSip || 0)}
           max={50_000}
           step={1_000}
           format={(n) => `${n >= 0 ? '+' : ''}${formatINR(n, { compact: true })}/mo`}
           onChange={setSip}
         />
         <Slider
-          label="Retirement age delta"
+          label="Retirement age"
+          baseline={`age ${currentRetireAge}`}
+          targetLabel={retire !== 0 ? `→ age ${currentRetireAge + retire}` : null}
           value={retire}
           min={-10}
           max={10}
@@ -149,6 +167,12 @@ export function Scenarios({ householdId, plan }: { householdId: string; plan: Pl
         />
         <Slider
           label="Equity drawdown shock"
+          baseline={`growth ${(currentEquityGrowth * 100).toFixed(0)}%/yr`}
+          targetLabel={
+            shock !== 0
+              ? `→ ${Math.max(0, currentEquityGrowth * 100 - shock / 5).toFixed(1)}%/yr`
+              : null
+          }
           value={shock}
           min={0}
           max={40}
@@ -171,6 +195,8 @@ function labelFor({ sip, retire, shock }: { sip: number; retire: number; shock: 
 
 function Slider({
   label,
+  baseline,
+  targetLabel,
   value,
   min,
   max,
@@ -179,6 +205,8 @@ function Slider({
   onChange,
 }: {
   label: string;
+  baseline: string;
+  targetLabel: string | null;
   value: number;
   min: number;
   max: number;
@@ -201,6 +229,10 @@ function Slider({
         onChange={(e) => onChange(Number(e.target.value))}
         className="w-full accent-[color:var(--color-accent)]"
       />
+      <div className="mt-1 flex items-center justify-between text-[10px] text-zinc-400 tabular-nums">
+        <span>now: {baseline}</span>
+        {targetLabel && <span className="text-zinc-700">{targetLabel}</span>}
+      </div>
     </div>
   );
 }
