@@ -48,7 +48,7 @@ _load_dotenv()
 
 from .cases import ALL_CASES  # noqa: E402 — dotenv must load before config import
 from .core import Case, EvalRun, Runner  # noqa: E402
-from .report import render_run_pdf  # noqa: E402
+from .report import render_run_pdf, render_run_summary_pdf  # noqa: E402
 
 
 def _filter_cases(args: argparse.Namespace) -> list[Case]:
@@ -116,11 +116,17 @@ async def _run(args: argparse.Namespace) -> int:
     _print_table(run)
 
     if not args.no_pdf:
-        out_pdf = args.output_pdf or f"/tmp/sw_evals_{run.started_at.strftime('%Y%m%dT%H%M%SZ')}.pdf"
-        rendered = await render_run_pdf(run)
+        style = getattr(args, "style", "detailed")
+        suffix = "" if style == "detailed" else f"_{style}"
+        out_pdf = (
+            args.output_pdf
+            or f"/tmp/sw_evals_{run.started_at.strftime('%Y%m%dT%H%M%SZ')}{suffix}.pdf"
+        )
+        renderer = render_run_summary_pdf if style == "summary" else render_run_pdf
+        rendered = await renderer(run)
         if rendered.get("ok"):
             Path(out_pdf).write_bytes(rendered["bytes"])
-            sys.stdout.write(f"\nPDF: {out_pdf}\n")
+            sys.stdout.write(f"\nPDF ({style}): {out_pdf}\n")
         else:
             reason = rendered.get("reason", "unknown")
             sys.stdout.write(f"\nPDF render failed ({reason}); writing HTML fallback.\n")
@@ -144,6 +150,17 @@ def main() -> int:
     run_parser.add_argument("--output-pdf", default=None)
     run_parser.add_argument("--output-html", default=None)
     run_parser.add_argument("--no-pdf", action="store_true")
+    run_parser.add_argument(
+        "--style",
+        choices=["detailed", "summary"],
+        default="detailed",
+        help=(
+            "PDF layout. `detailed` (default) is the full per-case report with "
+            "tool-call traces and assistant text — best for debugging. "
+            "`summary` is a compact 3-page cover + all-cases table + failures "
+            "deep-dive — best for sharing with stakeholders."
+        ),
+    )
     run_parser.add_argument(
         "--model",
         default=os.environ.get("PLANNER_MODEL", "claude-sonnet-4-6"),
