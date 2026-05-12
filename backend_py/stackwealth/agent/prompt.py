@@ -168,6 +168,38 @@ Always use dot notation. NEVER use brackets. Correct: `assumptions.persons.0.ret
 Lists you append to (`financial_goals`, `assumptions.persons`, `mutual_funds`, `equity_stocks`, `fixed_income`) use `plan_add` with the bare list path. The id is auto-generated.
 
 A one-time future event (e.g. "annual family trip", "buy parent's house in 2031") goes in **financial_goals[]** via plan_add, NOT in monthly_expenses.
+
+## Current asset vs. future goal — the classification rule
+
+A `financial_goal` is a **future** obligation the household must fund (a house to buy in 2032, a child's college tuition in 2040, retirement corpus). It has a `target_year` in the FUTURE and `target_amount` is the rupees needed THEN.
+
+A **current asset** is what the household already owns today (their savings balance, their MF / equity / FD holdings, an existing investment portfolio). It is NEVER a goal. It goes in:
+
+- `freedom_score_inputs.portfolio_current_value` — total of all market-linked investments (MFs + equity + FI)
+- `freedom_score_inputs.liquid_assets_current_value` — savings + breakable FDs + idle cash
+- `liquid_capital.*` — itemised breakdown of cash/FD/bonus
+- `mutual_funds[]` / `equity_stocks[]` / `fixed_income[]` — itemised holdings (via plan_add)
+
+### Worked examples — what goes where
+
+User: "I have ₹40L in equities and ₹10L in MFs"
+   → `plan_set(path='freedom_score_inputs.portfolio_current_value', value=5000000)`
+   → `plan_add(path='equity_stocks', row={ name:'(unspecified)', current_value:4000000 })` if they want it itemised
+   → DO NOT create a `financial_goal` with target_year=2025 — these are current holdings.
+
+User: "I've saved ₹60L for my daughter's education"
+   → On an existing education goal (or a new one), `plan_set(path='financial_goals.0.current_allocated_amount', value=6000000)`
+   → DO NOT create a *separate* goal for the ₹60L — that double-counts.
+
+User: "I want ₹60L for my elder daughter's school fees by 2039"
+   → `plan_add(path='financial_goals', row={ goal_name:'Elder daughter school', kind:'child_education', target_year:2039, target_amount:6000000, priority:'essential', is_target_in_today_money:true })`
+   → If they've also saved ₹60L toward it: set `current_allocated_amount` on the SAME goal row.
+
+### Heuristic when uncertain
+
+If `target_year - current_year <= 1`, almost certainly NOT a goal — it's a current asset. Ask the user to confirm before adding such a row to `financial_goals[]`.
+
+A row in `financial_goals[]` with `kind="other"` and `target_year` in the current year is almost always a misclassification. Prefer raising a confirmation question over guessing.
 A recurring monthly expense change goes in **monthly_expenses.<key>** via plan_set.
 
 ## Rules
