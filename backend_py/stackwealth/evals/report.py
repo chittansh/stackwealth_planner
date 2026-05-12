@@ -361,7 +361,155 @@ def _build_html(run: EvalRun) -> str:
 async def render_run_pdf(run: EvalRun) -> dict[str, Any]:
     """Render the eval run as a PDF (Playwright Chromium). On failure,
     returns the raw HTML so callers can fall back to browser print."""
-    report_html = _build_html(run)
+    return await _render_html_to_pdf(_build_html(run), run.started_at)
+
+
+# ── Summary report ─────────────────────────────────────────────────────────
+
+
+def _summary_cover(run: EvalRun) -> str:
+    """Compact cover — same scoreboard, no reading guide."""
+    by_layer = run.by_layer()
+    layer_rows = []
+    for layer in (1, 2, 3, 4):
+        results = by_layer.get(layer, [])
+        if not results:
+            continue
+        passed = sum(1 for r in results if r.passed)
+        layer_rows.append(
+            f'<div class="layer-row">'
+            f'<div class="lbl"><span class="pill pill-layer">L{layer}</span>'
+            f'{_layer_label(layer)}</div>'
+            f'<div>{_bar(passed, len(results), kind="pass" if passed == len(results) else "fail")}</div>'
+            f'</div>'
+        )
+    return f"""<section class="page">
+  <div class="headline">
+    <div class="brand">StackWealth Planner · Agent Eval · Summary</div>
+    <h1>Run Report</h1>
+    <div class="sub">{run.passed} passed · {run.failed} failed · {run.pass_rate * 100:.0f}% pass rate</div>
+  </div>
+  <p class="cover-meta">
+    <strong>Started:</strong> {run.started_at.strftime('%Y-%m-%d %H:%M:%S %Z')}
+    &nbsp;·&nbsp; <strong>Duration:</strong> {run.duration_seconds:.1f}s
+    &nbsp;·&nbsp; <strong>Model:</strong> {_h(run.model)}
+    &nbsp;·&nbsp; <strong>Cases:</strong> {run.total}
+  </p>
+
+  <h2>Pass Rate by Layer</h2>
+  {''.join(layer_rows)}
+
+  <p class="muted">This summary shows every case on one table (next page) and short failure notes (if any). For full per-case detail with tool-call traces, run with <code>--style detailed</code>.</p>
+</section>"""
+
+
+def _summary_all_cases_table(run: EvalRun) -> str:
+    """Every case on one page — one row per case, no per-case detail pages."""
+    rows = []
+    for r in run.results:
+        case = r.case
+        pill = (
+            '<span class="pill pill-pass">pass</span>'
+            if r.passed
+            else '<span class="pill pill-fail">fail</span>'
+        )
+        notes = ""
+        if not r.passed:
+            failed = ", ".join(jr.judge_name for jr in r.failed_judges)
+            notes = _h(failed[:80]) if failed else _h(r.error or "—")
+        rows.append(
+            f'<tr>'
+            f'<td>{pill}</td>'
+            f'<td><span class="pill pill-layer">L{case.layer}</span></td>'
+            f'<td><code>{_h(case.id)}</code></td>'
+            f'<td>{_h(case.name)}</td>'
+            f'<td class="num">{r.duration_seconds:.1f}s</td>'
+            f'<td>{notes}</td>'
+            f'</tr>'
+        )
+    return f"""<section class="page">
+  <h2>All cases</h2>
+  <table class="dense">
+    <tr><th>Status</th><th>Layer</th><th>Case ID</th><th>Name</th><th class="num">Time</th><th>Notes</th></tr>
+    {''.join(rows)}
+  </table>
+</section>"""
+
+
+def _summary_failure_deepdive(run: EvalRun) -> str:
+    """One short block per failure — no tool traces, no assistant text. Just
+    name + description + which judges failed + the human-readable reason."""
+    failures = [r for r in run.results if not r.passed]
+    if not failures:
+        return f"""<section class="page">
+  <h2>Failures</h2>
+  <p class="muted">No failures — all {run.total} cases passed.</p>
+</section>"""
+    blocks = []
+    for r in failures:
+        case = r.case
+        judge_lines = []
+        for jr in r.failed_judges:
+            judge_lines.append(
+                f'<li><strong>{_h(jr.judge_name)}</strong>'
+                f' — {_h(jr.message or jr.description)}</li>'
+            )
+        error_line = (
+            f'<p class="muted"><strong>Runtime error:</strong> {_h(r.error)}</p>'
+            if r.error
+            else ""
+        )
+        blocks.append(
+            f'<div class="failure-block">'
+            f'  <h3><span class="pill pill-layer">L{case.layer}</span> '
+            f'<span class="pill pill-fail">fail</span> '
+            f'<code>{_h(case.id)}</code> — {_h(case.name)}</h3>'
+            f'  <p class="muted">{_h(case.description)}</p>'
+            f'  {error_line}'
+            f'  <p><strong>Failed judges:</strong></p>'
+            f'  <ul>{"".join(judge_lines) if judge_lines else "<li>(none — runtime error)</li>"}</ul>'
+            f'</div>'
+        )
+    return f"""<section class="page">
+  <h2>Failure deep-dive</h2>
+  {''.join(blocks)}
+</section>"""
+
+
+def _build_summary_html(run: EvalRun) -> str:
+    sections = [
+        _summary_cover(run),
+        _summary_all_cases_table(run),
+        _summary_failure_deepdive(run),
+    ]
+    extra_css = """
+.dense th, .dense td { padding: 1mm 2mm; font-size: 9pt; }
+.dense code { font-size: 8.5pt; }
+.failure-block { margin-bottom: 5mm; padding: 3mm 4mm; background: #fafafa; border-left: 3px solid #dc2626; border-radius: 1.5mm; }
+.failure-block h3 { margin-top: 0; text-transform: none; letter-spacing: 0; }
+.failure-block ul { margin: 1mm 0 0 4mm; }
+"""
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<title>StackWealth Planner — Agent Eval Report (Summary)</title>
+<style>{CSS}{extra_css}</style>
+</head><body>
+{''.join(sections)}
+</body></html>"""
+
+
+async def render_run_summary_pdf(run: EvalRun) -> dict[str, Any]:
+    """Render a compact 3-page summary PDF (cover · all cases on one table ·
+    failure deep-dive). For full per-case detail including tool-call traces
+    and assistant text, use render_run_pdf instead."""
+    return await _render_html_to_pdf(_build_summary_html(run), run.started_at)
+
+
+# ── Shared PDF render ──────────────────────────────────────────────────────
+
+
+async def _render_html_to_pdf(report_html: str, started_at) -> dict[str, Any]:
     try:
         from playwright.async_api import async_playwright  # type: ignore
     except Exception:
@@ -377,7 +525,7 @@ async def render_run_pdf(run: EvalRun) -> dict[str, Any]:
                     '<div style="font-size:8pt;color:#71717a;width:100%;'
                     'padding:0 14mm;display:flex;justify-content:space-between;'
                     'border-top:1px solid #e4e4e7;padding-top:2mm;">'
-                    f'<span>StackWealth Eval — {run.started_at.strftime("%Y-%m-%d %H:%M")}</span>'
+                    f'<span>StackWealth Eval — {started_at.strftime("%Y-%m-%d %H:%M")}</span>'
                     '<span>Page <span class="pageNumber"></span>'
                     ' / <span class="totalPages"></span></span>'
                     '</div>'
