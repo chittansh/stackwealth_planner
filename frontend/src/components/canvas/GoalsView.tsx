@@ -42,7 +42,7 @@ export function GoalsView({ plan }: { plan: PlanState | null }) {
                     </span>
                   </div>
                   <div className="text-[11px] text-zinc-400">
-                    {yr} · priority {g.priority ?? 'important'} · req. return ~{(estReqReturn(g) * 100).toFixed(1)}%
+                    {yr} · priority {g.priority ?? 'important'} · req. return {formatReqReturn(estReqReturn(g))}
                   </div>
                 </div>
               </li>
@@ -67,6 +67,20 @@ function goalStatus(g: Goal, recommendedScore: number): { label: string; tone: '
   if (need <= recommendedScore - 10) return { label: 'on track', tone: 'matcha' };
   if (need <= recommendedScore + 5) return { label: 'at risk', tone: 'muted' };
   return { label: 'unrealistic', tone: 'dark' };
+}
+
+// The bisect ceiling above which the goal is mathematically unreachable
+// — see `_bisect_required_return` in backend_py/stackwealth/skills/risk.py.
+// Mirror it here so a value at the cap can be flagged ">=30%" instead of
+// looking like a real number.
+const REQ_RETURN_CEILING = 0.30;
+
+function formatReqReturn(r: number): string {
+  // Show fully-funded goals as a flat 0% rather than "0.0%" which read as
+  // floating-point precision artifact.
+  if (r <= 0.0005) return '0% (fully funded)';
+  if (r >= REQ_RETURN_CEILING - 0.001) return '≥30%/yr (unreachable)';
+  return `~${(r * 100).toFixed(1)}%`;
 }
 
 function estReqReturn(g: Goal): number {

@@ -340,6 +340,13 @@ class AllocationOutput(StrictModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class CashFlowGoalOutflow(StrictModel):
+    """A single goal expense paid out of `assets` during the cashflow year."""
+    goal_id: str
+    goal_name: str
+    amount: float
+
+
 class CashFlowRow(StrictModel):
     year: int
     age: int
@@ -350,6 +357,11 @@ class CashFlowRow(StrictModel):
     retirement_contributions: float
     other: float
     total_net_worth: float
+    # Total goal-driven outflow this year (inflation-adjusted target amounts
+    # for goals whose target_year == this row's year).
+    goal_outflow: float = 0
+    # Per-goal breakdown for the canvas/PDF — empty when no goal hits this year.
+    goal_outflow_breakdown: list[CashFlowGoalOutflow] = Field(default_factory=list)
 
 
 class MonthlyStrip(StrictModel):
