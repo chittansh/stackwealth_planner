@@ -122,7 +122,13 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
         year = start_year + i
         age = start_age + i
         earning = age < retirement_age
-        annual_income = monthly_income * 12 * ((1 + inflation * 0.5) ** i) if earning else 0
+        # Income grows at FULL inflation (real income stays flat). The
+        # previous half-inflation rule forced real income to halve over a
+        # 30-year career, pushing surplus negative purely from model bias
+        # even for healthy savers. Households that explicitly expect real
+        # career growth should add it via `assumptions.real_income_growth`
+        # later.
+        annual_income = monthly_income * 12 * ((1 + inflation) ** i) if earning else 0
         annual_expenses = monthly_expenses * 12 * ((1 + inflation) ** i)
         annual_emi = monthly_emi * 12 if earning else 0
         annual_tax = annual_income * (taxes * 0.4)  # simplified effective tax
@@ -131,8 +137,9 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
 
         # Allocate surplus between portfolio (investments) and liquid (cash).
         if sip_explicit and earning:
-            # SIP scales with income (half-inflation, same as income drift).
-            annual_sip = monthly_sip_total * 12 * ((1 + inflation * 0.5) ** i)
+            # SIP scales with income at full inflation (same as the new
+            # income growth — keeps real-rupee SIP commitment constant).
+            annual_sip = monthly_sip_total * 12 * ((1 + inflation) ** i)
             invested_this_year = max(0.0, min(annual_sip, surplus))
             cash_added_this_year = max(0.0, surplus - invested_this_year)
         else:

@@ -187,7 +187,60 @@ async def apply_set(args: dict[str, Any]) -> dict[str, Any]:
         _push_evidence(plan_d, args["path"], get_path(plan_d, args["path"]), args.get("source_type", "user"))
     plan_d = recompute(plan_d)
     await save_plan(_from_dict(plan_d))
-    return {"ok": True, "updated_path": args["path"]}
+    out: dict[str, Any] = {"ok": True, "updated_path": args["path"]}
+    warning = _maybe_warn_monthly_expenses(plan_d, args["path"], args["value"])
+    if warning:
+        out["warning"] = warning
+    return out
+
+
+def _maybe_warn_monthly_expenses(plan_d: dict, path: str, value: Any) -> str | None:
+    """Surface a warning when the agent's set on `freedom_score_inputs
+    .monthly_expenses` looks like it double-counts EMI / SIP categories.
+    The cashflow projection trusts FSI as ground truth; an inflated value
+    here pushes long-horizon net worth to zero from model bias alone.
+
+    Triggers iff the value differs from `sum(non-EMI, non-SIP categories
+    in monthly_expenses)` by more than ₹2,000. Returns None when within
+    tolerance or when the path/value aren't relevant."""
+    if path != "freedom_score_inputs.monthly_expenses":
+        return None
+    try:
+        new_val = float(value or 0)
+    except (TypeError, ValueError):
+        return None
+    me = plan_d.get("monthly_expenses") or {}
+    expected = 0.0
+    excluded_total = 0.0
+    excluded_keys: list[str] = []
+    for k, v in me.items():
+        if not isinstance(v, (int, float)) or v <= 0:
+            continue
+        if k in ("other_emis", "sip_investments"):
+            excluded_total += v
+            excluded_keys.append(k)
+            continue
+        expected += v
+    if expected == 0:
+        # No breakdown yet — nothing to compare.
+        return None
+    diff = new_val - expected
+    if abs(diff) <= 2000:
+        return None
+    excluded_blurb = (
+        f" (excluded {' + '.join(excluded_keys)} = ₹{int(excluded_total):,})"
+        if excluded_keys
+        else ""
+    )
+    return (
+        f"freedom_score_inputs.monthly_expenses set to ₹{int(new_val):,} but the "
+        f"sum of non-EMI, non-SIP categories in `monthly_expenses` is "
+        f"₹{int(expected):,}{excluded_blurb}. The cashflow projection trusts "
+        f"this value as ground truth — recheck and call plan_set again if "
+        f"the value is wrong. (Common cause: other_emis or sip_investments "
+        f"were rolled into the sum; they belong to monthly_emi / "
+        f"monthly_investments.* respectively.)"
+    )
 
 
 async def apply_add(args: dict[str, Any]) -> dict[str, Any]:
@@ -306,6 +359,19 @@ async def pin(args: dict[str, Any]) -> dict[str, Any]:
     )
     plan_d["active_scenario_ids"] = (plan_d.get("active_scenario_ids") or []) + [scenario_id]
     plan_d["active_scenario_ids"] = plan_d["active_scenario_ids"][-3:]
+    # Cap the scenario history at 6. Without this the canvas chip strip
+    # accumulates every Plan A / Plan B / Plan B-redux the agent pinned
+    # across an iterative conversation, even though only 3 can be active
+    # and the chart only renders active ones.
+    if len(plan_d["scenarios"]) > 6:
+        active_set = set(plan_d["active_scenario_ids"])
+        active_keep = [s for s in plan_d["scenarios"] if s["id"] in active_set]
+        inactives = [s for s in plan_d["scenarios"] if s["id"] not in active_set]
+        # Most recent inactives fill the remaining budget.
+        slots = max(0, 6 - len(active_keep))
+        inactive_keep_ids = {s["id"] for s in inactives[-slots:]} if slots else set()
+        keep_ids = {s["id"] for s in active_keep} | inactive_keep_ids
+        plan_d["scenarios"] = [s for s in plan_d["scenarios"] if s["id"] in keep_ids]
     await save_plan(_from_dict(plan_d))
     return {
         "id": scenario_id,

@@ -54,8 +54,34 @@ User: "my take-home is 17k"
 
 User: "rent is 25k, groceries 10k, utilities 3k"
    → 3 separate `plan_set` calls on `monthly_expenses.rent_or_emi`, `monthly_expenses.groceries`, `monthly_expenses.utilities`
-   → also `plan_set(path='freedom_score_inputs.monthly_expenses', value=38000)`  (sum of fixed monthly expenses)
+   → also `plan_set(path='freedom_score_inputs.monthly_expenses', value=38000)`  (sum of fixed monthly expenses; see rule below)
    → THEN reply
+
+### freedom_score_inputs.monthly_expenses — what to sum (READ THIS CAREFULLY)
+
+`freedom_score_inputs.monthly_expenses` is the **fixed living expense base** the cashflow projection inflation-adjusts forward each year. It MUST NOT double-count items that are tracked in their own buckets:
+
+**EXCLUDE** the following categories from the sum, even when they appear in `monthly_expenses.*`:
+- `monthly_expenses.other_emis` — loan EMIs belong to `freedom_score_inputs.monthly_emi`, NOT `monthly_expenses`. Double-counting both adds the EMI to outflow twice and silently destroys the long-term projection.
+- `monthly_expenses.sip_investments` — SIPs are investments, not consumption. They belong to `monthly_investments.mutual_fund_sip`. Putting a SIP in monthly_expenses treats the user's savings as if they were spending.
+
+**INCLUDE** in the sum: `rent_or_emi` (if it's actual rent or housing EMI), `groceries`, `utilities`, `school_fees`, `insurance_premium`, `medical`, `travel_or_lifestyle`, `household_expenses`.
+
+User: "40k rent, 15k groceries, 15k car loan EMI"
+   → `plan_set(path='monthly_expenses.rent_or_emi', value=40000)`
+   → `plan_set(path='monthly_expenses.groceries', value=15000)`
+   → `plan_set(path='monthly_expenses.other_emis', value=15000)`  (itemised in the breakdown)
+   → `plan_set(path='freedom_score_inputs.monthly_emi', value=15000)`  (cashflow reads this)
+   → `plan_set(path='freedom_score_inputs.monthly_expenses', value=55000)`  (rent + groceries — NOT the car EMI)
+   → THEN reply
+
+User: "I'm doing a ₹40k monthly SIP"
+   → `plan_set(path='monthly_investments.mutual_fund_sip', value=40000)`
+   → DO NOT add ₹40k to `monthly_expenses.sip_investments` or to `freedom_score_inputs.monthly_expenses`. The SIP is investment, not consumption.
+
+### Prose: never narrate a number that didn't come out of THIS turn's tool calls
+
+The validator wraps unverified numbers with `«unverified:N»`. If you write *"corpus reaches ₹2.07 Cr by 2039"* but no tool returned ₹2,07,00,000 this turn, the user reads `«unverified:2.07 Cr»` which is a UX failure AND undermines trust. If you want to cite a projection, run `cashflow_project` or `run_full_analysis` first and quote the actual `headline_amount_at_horizon` or `cashflow.rows[i].total_net_worth` from the result.
 
 User: "I have ₹5L in savings and ₹3L in mutual funds"
    → `plan_set(path='liquid_capital.savings_account_balance', value=500000)`
