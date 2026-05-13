@@ -278,7 +278,39 @@ export type NetWorth = {
   liquid: number;
   non_liquid: number;
   assets_total: number;
-  debts_total: number;
+  debts_total: number;      // unsecured only (personal_loan + credit_card_dues)
+  secured_debts?: number;   // home_loan + car_loan — informational, not counted in `total`
+};
+
+export type DebtAmortRow = {
+  year: number;
+  opening_balance: number;
+  annual_emi: number;
+  annual_interest: number;
+  annual_principal: number;
+  closing_balance: number;
+};
+
+export type DebtSchedule = {
+  loan_type: 'home_loan' | 'car_loan' | 'personal_loan' | 'credit_card_dues';
+  outstanding_amount: number;
+  emi: number;
+  interest_rate: number;
+  tenure_left_years: number;
+  rows: DebtAmortRow[];
+  total_interest_paid: number;
+  total_principal_paid: number;
+  final_year: number;
+};
+
+export type DebtPaydownOutput = {
+  schedules: DebtSchedule[];
+  total_outstanding_today: number;
+  total_emi_monthly: number;
+  total_interest_over_term: number;
+  aggregate_yearly: DebtAmortRow[];
+  last_emi_year: number;
+  note?: string;
 };
 
 export type MilestonePin = {
@@ -300,6 +332,7 @@ export type ComputedSnapshot = {
   cashflow?: CashFlowProjection;
   tax?: TaxView;
   monte_carlo?: MCResult;
+  debt_paydown?: DebtPaydownOutput;
   milestone_pins: MilestonePin[];
 };
 

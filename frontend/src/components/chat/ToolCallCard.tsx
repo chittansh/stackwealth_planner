@@ -20,6 +20,7 @@ const FRIENDLY: Record<string, string> = {
   scenario_pin: 'pinning scenario',
   scenario_diff: 'comparing',
   montecarlo_run: 'monte carlo',
+  debt_paydown: 'debt paydown',
   knowledge_retrieve: 'knowledge base',
   news_relevance: 'news',
 };

@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from ..db import get_plan, save_plan
 from ..skills import allocate as allocate_skill
 from ..skills import cashflow as cashflow_skill
+from ..skills import debt as debt_skill
 from ..skills import freedom as freedom_skill
 from ..skills import intake as intake_skill
 from ..skills import knowledge as knowledge_skill
@@ -217,6 +218,13 @@ async def _tax_harvest(**kwargs: Any) -> Any:
     kwargs = _coerce_kwargs(kwargs)
     return await _persist_computed(
         kwargs["household_id"], "tax", await tax_skill.harvest(kwargs)
+    )
+
+
+async def _debt_paydown(**kwargs: Any) -> Any:
+    kwargs = _coerce_kwargs(kwargs)
+    return await _persist_computed(
+        kwargs["household_id"], "debt_paydown", await debt_skill.paydown(kwargs)
     )
 
 
@@ -571,6 +579,17 @@ def make_tools() -> list[StructuredTool]:
             ),
             args_schema=HouseholdOnlyArgs,
             coroutine=_tax_harvest,
+        ),
+        StructuredTool.from_function(
+            name="debt_paydown",
+            description=(
+                "Per-loan amortization schedules + aggregate year-by-year EMI / interest / "
+                "principal breakdown across every entry in `loans_liabilities`. Use this when "
+                "the user asks 'when does my car loan end', 'how much interest am I paying on "
+                "my home loan', or 'what if I prepay'. Fills `plan.computed.debt_paydown`."
+            ),
+            args_schema=HouseholdOnlyArgs,
+            coroutine=_debt_paydown,
         ),
         StructuredTool.from_function(
             name="cashflow_project",

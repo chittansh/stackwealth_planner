@@ -11,6 +11,7 @@ from ..db import get_plan, save_plan
 from ..skills.allocate import compute_allocation
 from ..skills.allocate import recommend as allocate_recommend
 from ..skills.cashflow import project as cashflow_project
+from ..skills.debt import paydown as debt_paydown
 from ..skills.freedom import score as freedom_score
 from ..skills.risk import assess as risk_assess
 from ..skills.scenario import run_monte_carlo
@@ -93,6 +94,17 @@ async def montecarlo(id: str, request: Request) -> JSONResponse:
     plan = await get_plan(id)
     if plan and not isinstance(r, dict):
         plan.computed.monte_carlo = r
+        plan.last_updated_at = datetime.now(timezone.utc).isoformat()
+        await save_plan(plan)
+    return _json(r)
+
+
+@router.post("/debt/{id}")
+async def debt(id: str) -> JSONResponse:
+    r = await debt_paydown({"household_id": id})
+    plan = await get_plan(id)
+    if plan and not isinstance(r, dict):
+        plan.computed.debt_paydown = r
         plan.last_updated_at = datetime.now(timezone.utc).isoformat()
         await save_plan(plan)
     return _json(r)

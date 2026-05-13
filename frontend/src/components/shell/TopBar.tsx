@@ -16,6 +16,8 @@ const VIEWS = [
   { value: 'goals', label: 'Goals' },
   { value: 'insurance', label: 'Insurance' },
   { value: 'tax', label: 'Tax' },
+  { value: 'debt', label: 'Debt Paydown' },
+  { value: 'retirement', label: 'Retirement Glide' },
 ] as const;
 
 const HORIZONS = [
