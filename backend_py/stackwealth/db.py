@@ -62,52 +62,80 @@ def _database_url() -> Optional[str]:
     return url
 
 
+_pool_init_failed = False
+
+
 async def _get_pool() -> Any | None:
-    """Lazy pool. Returns None when DATABASE_URL is unset (in-memory mode)."""
-    global _pool
+    """Lazy pool. Returns None when DATABASE_URL is unset OR when a prior
+    connection attempt failed (we don't keep retrying on every request —
+    falling back to in-memory is better than blocking)."""
+    global _pool, _pool_init_failed
     if _pool is not None:
         return _pool
+    if _pool_init_failed:
+        return None
     url = _database_url()
     if not url:
         return None
     import asyncpg  # type: ignore
 
-    _pool = await asyncpg.create_pool(
-        dsn=url,
-        min_size=1,
-        max_size=5,
-        command_timeout=10,
-    )
+    try:
+        # Short connect timeout — Fly's proxy gives up on the machine after
+        # ~10s if it can't reach port 4000, so we have to fail fast or fall
+        # back to in-memory rather than hang FastAPI startup. 8s is enough
+        # for a healthy Fly internal network round-trip plus pool warmup.
+        _pool = await asyncpg.create_pool(
+            dsn=url,
+            min_size=1,
+            max_size=5,
+            command_timeout=10,
+            timeout=8.0,  # per-connection acquire timeout
+        )
+    except Exception as e:
+        print(f"[db] Postgres unreachable, falling back to in-memory: {e}")
+        _pool_init_failed = True
+        return None
     return _pool
 
 
 async def init_db() -> None:
     """Bootstrap the schema. Idempotent — safe to call on every startup.
-    No-op when DATABASE_URL is unset."""
-    pool = await _get_pool()
+    No-op when DATABASE_URL is unset. **Non-fatal**: if Postgres is
+    unreachable at startup the app still serves requests (degraded to
+    in-memory) rather than crashing. The asyncpg pool will retry on the
+    next request indirectly through the `_pool_init_failed` flag being
+    cleared between processes."""
+    try:
+        pool = await _get_pool()
+    except Exception as e:
+        print(f"[db] init_db pool failed: {e}")
+        return
     if pool is None:
         return
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS households (
-                id          TEXT        PRIMARY KEY,
-                plan        JSONB       NOT NULL,
-                updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                id            BIGSERIAL   PRIMARY KEY,
-                household_id  TEXT        NOT NULL,
-                chat_id       TEXT        NOT NULL DEFAULT 'main',
-                role          TEXT        NOT NULL,
-                text          TEXT        NOT NULL,
-                turn          INTEGER,
-                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            CREATE INDEX IF NOT EXISTS chat_messages_lookup
-                ON chat_messages (household_id, chat_id, id);
-            """
-        )
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS households (
+                    id          TEXT        PRIMARY KEY,
+                    plan        JSONB       NOT NULL,
+                    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id            BIGSERIAL   PRIMARY KEY,
+                    household_id  TEXT        NOT NULL,
+                    chat_id       TEXT        NOT NULL DEFAULT 'main',
+                    role          TEXT        NOT NULL,
+                    text          TEXT        NOT NULL,
+                    turn          INTEGER,
+                    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS chat_messages_lookup
+                    ON chat_messages (household_id, chat_id, id);
+                """
+            )
+    except Exception as e:
+        print(f"[db] schema bootstrap failed: {e}")
 
 
 async def close_db() -> None:
