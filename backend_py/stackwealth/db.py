@@ -45,8 +45,10 @@ _memory: dict[str, PlanState] = {}
 # ── Postgres pool (lazy) ──────────────────────────────────────────────────
 
 
+import asyncio
+
 _pool: Any | None = None  # asyncpg.Pool when initialized
-_pool_lock_inited = False
+_pool_lock: asyncio.Lock | None = None  # serializes the first create_pool
 
 
 def _database_url() -> Optional[str]:
@@ -67,9 +69,10 @@ _pool_init_failed = False
 
 async def _get_pool() -> Any | None:
     """Lazy pool. Returns None when DATABASE_URL is unset OR when a prior
-    connection attempt failed (we don't keep retrying on every request —
-    falling back to in-memory is better than blocking)."""
-    global _pool, _pool_init_failed
+    connection attempt failed. Serialized by `_pool_lock` so concurrent
+    callers from the FastAPI startup task + request handlers don't all
+    race to create their own pool."""
+    global _pool, _pool_init_failed, _pool_lock
     if _pool is not None:
         return _pool
     if _pool_init_failed:
@@ -77,24 +80,36 @@ async def _get_pool() -> Any | None:
     url = _database_url()
     if not url:
         return None
-    import asyncpg  # type: ignore
 
-    try:
-        # Short connect timeout — Fly's proxy gives up on the machine after
-        # ~10s if it can't reach port 4000, so we have to fail fast or fall
-        # back to in-memory rather than hang FastAPI startup. 8s is enough
-        # for a healthy Fly internal network round-trip plus pool warmup.
-        _pool = await asyncpg.create_pool(
-            dsn=url,
-            min_size=1,
-            max_size=5,
-            command_timeout=10,
-            timeout=8.0,  # per-connection acquire timeout
-        )
-    except Exception as e:
-        print(f"[db] Postgres unreachable, falling back to in-memory: {e}")
-        _pool_init_failed = True
-        return None
+    if _pool_lock is None:
+        _pool_lock = asyncio.Lock()
+    async with _pool_lock:
+        # Re-check under the lock — another coroutine may have just finished.
+        if _pool is not None:
+            return _pool
+        if _pool_init_failed:
+            return None
+        import asyncpg  # type: ignore
+        try:
+            # Fly's internal `.flycast` DNS + IPv6 negotiation can take
+            # 5-15s on the FIRST attempt after a cold deploy. 30s gives the
+            # cold path room; the FastAPI startup hook calls this in a
+            # fire-and-forget task so uvicorn opens port 4000 immediately
+            # rather than waiting on Postgres.
+            _pool = await asyncpg.create_pool(
+                dsn=url,
+                min_size=1,
+                max_size=5,
+                command_timeout=10,
+                timeout=30.0,
+            )
+        except Exception as e:
+            print(
+                f"[db] Postgres unreachable, falling back to in-memory. "
+                f"err={type(e).__name__}: {e!r}"
+            )
+            _pool_init_failed = True
+            return None
     return _pool
 
 

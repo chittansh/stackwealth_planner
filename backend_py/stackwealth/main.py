@@ -29,7 +29,12 @@ app = FastAPI(title="stackwealth-planner-backend", version="0.1.0")
 async def _on_startup() -> None:
     # Bootstrap the Postgres schema if DATABASE_URL is set. Safe to call
     # on every restart — every CREATE TABLE is IF NOT EXISTS.
-    await init_db()
+    # **Fire-and-forget** so a slow first-time Postgres connection (5-15s
+    # for `.flycast` DNS + IPv6 negotiation) doesn't delay uvicorn opening
+    # port 4000. Fly's proxy gives up on the machine after ~10s of port
+    # 4000 being unreachable, so blocking startup on Postgres = 503s.
+    import asyncio
+    asyncio.create_task(init_db())
 
 
 @app.on_event("shutdown")
