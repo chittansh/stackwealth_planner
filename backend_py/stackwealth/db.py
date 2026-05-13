@@ -61,6 +61,12 @@ def _database_url() -> Optional[str]:
     # already a private mesh.
     if "?sslmode=" in url:
         url = url.split("?sslmode=", 1)[0]
+    # Fly's `.flycast` haproxy routes Postgres through a TLS-terminating
+    # load balancer that sometimes RST's plain TCP asyncpg handshakes
+    # (the haproxy expects a TLS ClientHello). For app-to-Postgres in
+    # the same Fly org, the direct WireGuard 6PN hostname `.internal`
+    # is reliable and avoids the haproxy entirely. Swap the host.
+    url = url.replace(".flycast:", ".internal:")
     return url
 
 
