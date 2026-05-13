@@ -213,16 +213,29 @@ def _maybe_warn_monthly_expenses(plan_d: dict, path: str, value: Any) -> str | N
     expected = 0.0
     excluded_total = 0.0
     excluded_keys: list[str] = []
+    populated_keys = 0
     for k, v in me.items():
         if not isinstance(v, (int, float)) or v <= 0:
             continue
+        populated_keys += 1
         if k in ("other_emis", "sip_investments"):
             excluded_total += v
             excluded_keys.append(k)
             continue
         expected += v
+    if populated_keys == 0 and new_val > 0:
+        # Agent set the FSI aggregate but left the breakdown empty entirely.
+        # The frontend's ExpensesCard shows a fallback aggregate row but the
+        # detail view + the report PDF can't itemise without the breakdown.
+        return (
+            f"freedom_score_inputs.monthly_expenses set to ₹{int(new_val):,} but "
+            f"`monthly_expenses.*` breakdown is empty — the canvas Expenses card "
+            f"and the PDF report can't itemise without category-level plan_set "
+            f"calls. Run plan_set on `monthly_expenses.rent_or_emi`, "
+            f"`monthly_expenses.groceries`, etc. for each non-loan, non-SIP "
+            f"category the user mentioned."
+        )
     if expected == 0:
-        # No breakdown yet — nothing to compare.
         return None
     diff = new_val - expected
     if abs(diff) <= 2000:

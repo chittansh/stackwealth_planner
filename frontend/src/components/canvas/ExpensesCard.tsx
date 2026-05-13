@@ -21,9 +21,36 @@ const FIELDS: { key: keyof NonNullable<PlanState['monthly_expenses']>; label: st
 
 export function ExpensesCard({ plan }: { plan: PlanState }) {
   const e = plan.monthly_expenses ?? {};
-  const rows = FIELDS.map((f) => ({ ...f, amount: ((e[f.key] as number | null | undefined) ?? 0) * 12 })).filter(
-    (r) => r.amount > 0,
-  );
+  let rows: { key: string; label: string; meta?: string; amount: number }[] = FIELDS.map((f) => ({
+    ...f,
+    key: f.key as string,
+    amount: ((e[f.key] as number | null | undefined) ?? 0) * 12,
+  })).filter((r) => r.amount > 0);
+
+  // Defensive fallback: when the agent has only set `freedom_score_inputs
+  // .monthly_expenses` (aggregate) without writing the breakdown, surface
+  // a single aggregate row + the EMI separately so the card reflects the
+  // data the projection is actually using. Same data, just unsplit.
+  if (rows.length === 0) {
+    const aggExp = plan.freedom_score_inputs.monthly_expenses ?? 0;
+    const aggEmi = plan.freedom_score_inputs.monthly_emi ?? 0;
+    if (aggExp > 0) {
+      rows.push({
+        key: 'fsi_aggregate_expenses',
+        label: 'Fixed living expenses',
+        meta: 'aggregate · breakdown unset',
+        amount: aggExp * 12,
+      });
+    }
+    if (aggEmi > 0) {
+      rows.push({
+        key: 'fsi_aggregate_emi',
+        label: 'Loan EMIs',
+        meta: 'aggregate of all EMIs',
+        amount: aggEmi * 12,
+      });
+    }
+  }
 
   return (
     <div className="rounded-xl border border-zinc-200 bg-white p-4">

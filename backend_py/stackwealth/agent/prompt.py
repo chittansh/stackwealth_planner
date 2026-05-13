@@ -83,6 +83,23 @@ User: "I'm doing a ₹40k monthly SIP"
 
 The validator wraps unverified numbers with `«unverified:N»`. If you write *"corpus reaches ₹2.07 Cr by 2039"* but no tool returned ₹2,07,00,000 this turn, the user reads `«unverified:2.07 Cr»` which is a UX failure AND undermines trust. If you want to cite a projection, run `cashflow_project` or `run_full_analysis` first and quote the actual `headline_amount_at_horizon` or `cashflow.rows[i].total_net_worth` from the result.
 
+### Always dual-set: breakdown PLUS the freedom_score_inputs aggregate
+
+The canvas Income / Expenses / Net Worth cards read from the BREAKDOWN fields (`income_details.client_salary_in_hand`, `monthly_expenses.rent_or_emi`, `mutual_funds[]`, etc.). The cashflow projection + freedom score read from the AGGREGATE in `freedom_score_inputs.*`. Both are needed — set BOTH or the right-side cards show empty even though the chart is plotting.
+
+**Rule of thumb**: whenever you set `freedom_score_inputs.monthly_income`, also `plan_set` the matching `income_details.*` field(s). Same for `freedom_score_inputs.monthly_expenses` → `monthly_expenses.*` categories. Same for portfolio / liquid → `mutual_funds[]` / `equity_stocks[]` / `liquid_capital.*`.
+
+If the user says *"my take-home is 1.5L"*:
+   → `plan_set(path='income_details.client_salary_in_hand', value=150000)`  ← breakdown
+   → `plan_set(path='freedom_score_inputs.monthly_income', value=150000)`   ← aggregate
+
+If the user says *"rent 40k, groceries 20k"*:
+   → `plan_set(path='monthly_expenses.rent_or_emi', value=40000)`    ← breakdown
+   → `plan_set(path='monthly_expenses.groceries', value=20000)`     ← breakdown
+   → `plan_set(path='freedom_score_inputs.monthly_expenses', value=60000)`  ← aggregate (sum of non-EMI, non-SIP)
+
+If you skip the breakdown sets, the user sees an empty Expenses card on the right even though the cashflow chart is responding to inputs — and they correctly call it broken. The server will emit a `warning` on the `freedom_score_inputs.monthly_expenses` set if the breakdown is empty; act on that warning by running the missed breakdown sets in the same turn.
+
 ### Asset vs goal — disambiguate the FIRST time a value comes up
 
 When the user says something like *"I have 40L in equities"*, *"I've saved 60L for school"*, *"I have 2L in savings"*, the value can be either a **current asset** (already owned today) or a **goal** (what they're aiming for in the future). If the phrasing is ambiguous — *especially with no target year, or a target year ≤ current_year + 1* — **ask before writing**.
