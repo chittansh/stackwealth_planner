@@ -88,6 +88,13 @@ def _build_graph(llm_with_tools: Any) -> Any:
 
 
 _convo: dict[str, list[BaseMessage]] = {}
+# A second dict tracking which conversations have already been hydrated
+# from the DB in this process lifetime — without it we'd re-read the
+# DB on every turn instead of just the first.
+_hydrated_from_db: set[str] = set()
+# Track whether a per-message DB persist is even possible (DATABASE_URL
+# set). Computed lazily on first turn.
+_db_persist_enabled: Optional[bool] = None
 MAX_HISTORY_MESSAGES = 60
 
 
@@ -96,9 +103,24 @@ def _key(household_id: str, chat_id: Optional[str]) -> str:
 
 
 def clear_convo(household_id: str, chat_id: Optional[str] = None) -> None:
+    """Synchronous wipe of in-memory state. The HTTP reset endpoint should
+    additionally call `clear_convo_db` (async) to wipe the persisted chat
+    history."""
     k = _key(household_id, chat_id)
     _convo.pop(k, None)
+    _hydrated_from_db.discard(k)
     reset_trace(k)
+
+
+async def clear_convo_db(household_id: str, chat_id: Optional[str] = None) -> None:
+    """Wipe both in-memory and persisted chat history."""
+    from ..db import clear_chat_history
+
+    clear_convo(household_id, chat_id)
+    try:
+        await clear_chat_history(household_id=household_id, chat_id=chat_id or "main")
+    except Exception as e:
+        print(f"[chat] DB clear failed: {e}")
 
 
 def get_convo(household_id: str, chat_id: Optional[str] = None) -> list[BaseMessage]:
@@ -121,7 +143,44 @@ def hydrate_convo(
             msgs.append(AIMessage(content=text))
     k = _key(household_id, chat_id)
     _convo[k] = msgs
+    _hydrated_from_db.add(k)  # client explicitly hydrated — don't override from DB
     reset_trace(k)
+
+
+async def _ensure_db_hydrated(household_id: str, chat_id: Optional[str]) -> list[BaseMessage]:
+    """First-touch DB hydration for a conversation. If the in-memory `_convo`
+    has no entry for this household/chat (e.g. fresh process after a deploy),
+    pull the persisted chat history from Postgres and rebuild
+    HumanMessage/AIMessage entries. Runs at most once per (household,chat)
+    per process — subsequent turns hit the in-memory cache."""
+    from ..db import load_chat_history
+
+    k = _key(household_id, chat_id)
+    if k in _hydrated_from_db or k in _convo:
+        _hydrated_from_db.add(k)
+        return _convo.get(k, [])
+    try:
+        rows = await load_chat_history(
+            household_id=household_id,
+            chat_id=chat_id or "main",
+            limit=MAX_HISTORY_MESSAGES,
+        )
+    except Exception as e:
+        print(f"[chat] DB hydration failed for {k}: {e}")
+        rows = []
+    msgs: list[BaseMessage] = []
+    for r in rows:
+        text = (r.get("text") or "").strip()
+        if not text:
+            continue
+        role = r.get("role")
+        if role == "user":
+            msgs.append(HumanMessage(content=f"[household_id={household_id}]\n\n{text}"))
+        elif role == "assistant":
+            msgs.append(AIMessage(content=text))
+    _convo[k] = msgs
+    _hydrated_from_db.add(k)
+    return msgs
 
 
 def _safe_trim(messages: list[BaseMessage], cap: int) -> list[BaseMessage]:
@@ -163,6 +222,9 @@ async def run_planner_turn(
     """
     user_text = (message or "").strip() or "(empty user turn — read state and ask a clarifying question)"
     k = _key(household_id, chat_id)
+    # First-touch DB hydration so a deploy + cold start doesn't drop the
+    # session's history. After this the in-memory `_convo` is the cache.
+    await _ensure_db_hydrated(household_id, chat_id)
     history = _safe_trim(_convo.get(k, []), MAX_HISTORY_MESSAGES)
     user_msg = HumanMessage(content=f"[household_id={household_id}]\n\n{user_text}")
 
@@ -305,6 +367,32 @@ async def run_planner_turn(
         # ── Persist conversation memory ────────────────────────────────────
         merged = list(history) + [user_msg] + fresh_messages
         _convo[k] = _safe_trim(merged, MAX_HISTORY_MESSAGES)
+
+        # Also persist the user message + final assistant text to Postgres
+        # (when DATABASE_URL is set). The DB store is the source of truth
+        # for "did this conversation happen?" after a deploy. We skip the
+        # intermediate tool_call / tool_result events — the agent doesn't
+        # need to replay those when it rehydrates, and the frontend
+        # already shows them only for the current session.
+        try:
+            from ..db import save_chat_message
+            await save_chat_message(
+                household_id=household_id,
+                chat_id=chat_id or "main",
+                role="user",
+                text=user_text,
+                turn=turn,
+            )
+            if final_text and final_text.strip():
+                await save_chat_message(
+                    household_id=household_id,
+                    chat_id=chat_id or "main",
+                    role="assistant",
+                    text=final_text,
+                    turn=turn,
+                )
+        except Exception as e:
+            print(f"[chat] DB persist failed: {e}")
 
         # ── Emit trace pointers + final message ────────────────────────────
         if trace is not None:
