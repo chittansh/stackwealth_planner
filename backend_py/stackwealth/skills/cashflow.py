@@ -137,9 +137,12 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
 
         # Allocate surplus between portfolio (investments) and liquid (cash).
         if sip_explicit and earning:
-            # SIP scales with income at full inflation (same as the new
-            # income growth — keeps real-rupee SIP commitment constant).
-            annual_sip = monthly_sip_total * 12 * ((1 + inflation) ** i)
+            # SIP scales at inflation + an optional step-up rate. Step-up
+            # captures the "I'll bump my SIP by 10%/yr as my income grows"
+            # commitment that goes beyond inflation-matching. Defaults to 0
+            # so an unspecified household keeps the inflation-only path.
+            step_up = plan.assumptions.sip_annual_step_up_pct or 0.0
+            annual_sip = monthly_sip_total * 12 * ((1 + inflation + step_up) ** i)
             invested_this_year = max(0.0, min(annual_sip, surplus))
             cash_added_this_year = max(0.0, surplus - invested_this_year)
         else:
