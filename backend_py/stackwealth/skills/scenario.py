@@ -530,18 +530,29 @@ def _derive_net_worth(plan_d: dict) -> dict:
 
     assets_total = liquid + investments
     l = plan_d.get("loans_liabilities") or {}
-    debts_total = (
-        ((l.get("home_loan") or {}).get("outstanding_amount") or 0)
-        + ((l.get("car_loan") or {}).get("outstanding_amount") or 0)
-        + ((l.get("personal_loan") or {}).get("outstanding_amount") or 0)
+    # Net-worth excludes SECURED loans (home, car) because we don't track
+    # the underlying asset's value separately — counting only the debt
+    # half of "₹9L car loan against a ₹9L car" makes a 22-year-old look
+    # ₹9L underwater on paper despite the car offsetting it. Unsecured
+    # debts (personal loan, credit-card dues) ARE net negatives and stay
+    # in `debts_total`. The full cashflow projection still handles the
+    # secured-loan EMIs via `monthly_emi` — only the today-snapshot
+    # net-worth math is corrected here.
+    unsecured_debts = (
+        ((l.get("personal_loan") or {}).get("outstanding_amount") or 0)
         + ((l.get("credit_card_dues") or {}).get("outstanding_amount") or 0)
     )
+    secured_debts = (
+        ((l.get("home_loan") or {}).get("outstanding_amount") or 0)
+        + ((l.get("car_loan") or {}).get("outstanding_amount") or 0)
+    )
     return {
-        "total": assets_total - debts_total,
+        "total": assets_total - unsecured_debts,
         "liquid": liquid,
         "non_liquid": max(0, assets_total - liquid),
         "assets_total": assets_total,
-        "debts_total": debts_total,
+        "debts_total": unsecured_debts,
+        "secured_debts": secured_debts,
     }
 
 

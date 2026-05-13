@@ -234,6 +234,14 @@ class Assumptions(StrictModel):
     growth: Growth = Field(default_factory=Growth)
     taxes: Taxes = Field(default_factory=Taxes)
     inflation: float = 0.06
+    # Annual SIP step-up *over and above* inflation. 0.0 means SIP scales
+    # with inflation only (real SIP rupees flat). 0.10 means SIP grows by
+    # inflation + 10 percentage points each year — i.e. the household
+    # commits to raising their SIP faster than inflation as income grows.
+    # Used by `compute_cashflow` to scale `monthly_investments.* SIPs`
+    # forward. Scenarios card / agent mutations target this field to model
+    # "Plan B with 10%/yr step-up".
+    sip_annual_step_up_pct: float = 0.0
 
 
 class FreedomScoreInputs(StrictModel):
@@ -419,11 +427,16 @@ class MCResult(StrictModel):
 
 
 class NetWorth(StrictModel):
-    total: float = 0
+    total: float = 0           # assets_total - unsecured debts
     liquid: float = 0
     non_liquid: float = 0
     assets_total: float = 0
-    debts_total: float = 0
+    debts_total: float = 0     # UNSECURED only (personal loan + credit-card dues)
+    # Secured debts (home_loan, car_loan) — surfaced separately because the
+    # underlying asset offsets the liability and isn't tracked in
+    # `assets_total`. Counting these as net debt makes early-career
+    # households appear underwater on paper despite owning the car/house.
+    secured_debts: float = 0
 
 
 class NetWorthSeriesPoint(StrictModel):
