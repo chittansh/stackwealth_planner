@@ -403,6 +403,40 @@ class LossHarvest(StrictModel):
     tax_offset: float
 
 
+class DebtAmortRow(StrictModel):
+    """One year of amortization on a single loan."""
+    year: int
+    opening_balance: float
+    annual_emi: float
+    annual_interest: float
+    annual_principal: float
+    closing_balance: float
+
+
+class DebtSchedule(StrictModel):
+    """Amortization output for a single loan from `loans_liabilities.*`."""
+    loan_type: str               # home_loan | car_loan | personal_loan | credit_card_dues
+    outstanding_amount: float
+    emi: float
+    interest_rate: float          # percent
+    tenure_left_years: float
+    rows: list[DebtAmortRow] = Field(default_factory=list)
+    total_interest_paid: float = 0
+    total_principal_paid: float = 0
+    final_year: int = 0           # the year the loan ends
+
+
+class DebtPaydownOutput(StrictModel):
+    """Aggregate paydown view across every loan in `loans_liabilities`."""
+    schedules: list[DebtSchedule] = Field(default_factory=list)
+    total_outstanding_today: float = 0
+    total_emi_monthly: float = 0
+    total_interest_over_term: float = 0
+    aggregate_yearly: list["DebtAmortRow"] = Field(default_factory=list)
+    last_emi_year: int = 0
+    note: Optional[str] = None    # e.g. warnings when interest_rate is missing
+
+
 class TaxView(StrictModel):
     ltcg_headroom_remaining: float
     realized_ltcg_fy: float
@@ -463,6 +497,7 @@ class ComputedSnapshot(StrictModel):
     cashflow: Optional[CashFlowProjection] = None
     tax: Optional[TaxView] = None
     monte_carlo: Optional[MCResult] = None
+    debt_paydown: Optional[DebtPaydownOutput] = None
     milestone_pins: list[MilestonePin] = Field(default_factory=list)
 
 

@@ -11,6 +11,8 @@ import { AllocationView } from './AllocationView';
 import { TaxView } from './TaxView';
 import { GoalsView } from './GoalsView';
 import { InsuranceView } from './InsuranceView';
+import { DebtPaydownView } from './DebtPaydownView';
+import { RetirementGlideView } from './RetirementGlideView';
 import { PlanBlocks } from './PlanBlocks';
 import { Scenarios } from './Scenarios';
 import { ScenarioChips } from './ScenarioChips';
@@ -22,7 +24,7 @@ export function CanvasRouter({
   horizon,
 }: {
   householdId: string;
-  view: 'net-worth' | 'cash-flow' | 'allocation' | 'goals' | 'insurance' | 'tax';
+  view: 'net-worth' | 'cash-flow' | 'allocation' | 'goals' | 'insurance' | 'tax' | 'debt' | 'retirement';
   horizon: number;
 }) {
   void horizon; // sourced from server (plan.computed.horizon_years)
@@ -108,6 +110,16 @@ export function CanvasRouter({
       {view === 'insurance' && (
         <div className="mt-6">
           <InsuranceView plan={plan} />
+        </div>
+      )}
+      {view === 'debt' && (
+        <div className="mt-6">
+          <DebtPaydownView householdId={householdId} plan={plan} />
+        </div>
+      )}
+      {view === 'retirement' && (
+        <div className="mt-6">
+          <RetirementGlideView plan={plan} />
         </div>
       )}
 
