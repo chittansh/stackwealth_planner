@@ -28,28 +28,49 @@ export function CanvasRouter({
   void horizon; // sourced from server (plan.computed.horizon_years)
   const [plan, setPlan] = useState<PlanState | null>(null);
   const cancelledRef = useRef(false);
+  const inFlightRef = useRef(false);
+  const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refetch = useCallback(() => {
+    if (inFlightRef.current) return;   // collapse overlapping fetches
+    inFlightRef.current = true;
     fetchPlan(householdId)
-      .then((p) => !cancelledRef.current && setPlan(p))
-      .catch(() => undefined);
+      .then((p) => {
+        if (!cancelledRef.current) setPlan(p);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        inFlightRef.current = false;
+      });
   }, [householdId]);
+
+  // Debounced refetch — coalesces the burst of `sw:plan-changed` events that
+  // a single agent turn fires (one per tool_result + one on done) into a
+  // single network round-trip ~250ms after the LAST event in the burst.
+  const debouncedRefetch = useCallback(() => {
+    if (pendingTimerRef.current !== null) clearTimeout(pendingTimerRef.current);
+    pendingTimerRef.current = setTimeout(() => {
+      pendingTimerRef.current = null;
+      refetch();
+    }, 250);
+  }, [refetch]);
 
   useEffect(() => {
     cancelledRef.current = false;
     refetch();
-    // Slow background poll as a safety net (catches agent-driven mutations
-    // that didn't fire sw:plan-changed for any reason).
-    const id = setInterval(refetch, 2000);
-    // Instant refresh on any explicit mutation event.
-    const onChanged = () => refetch();
-    window.addEventListener('sw:plan-changed', onChanged);
+    // Background safety-net poll only — catches agent-driven mutations that
+    // didn't fire `sw:plan-changed`. Aggressive polling (was 2s) thrashed
+    // the right panel; 30s is plenty since explicit mutation events drive
+    // the immediate-refresh path.
+    const id = setInterval(refetch, 30_000);
+    window.addEventListener('sw:plan-changed', debouncedRefetch);
     return () => {
       cancelledRef.current = true;
       clearInterval(id);
-      window.removeEventListener('sw:plan-changed', onChanged);
+      if (pendingTimerRef.current !== null) clearTimeout(pendingTimerRef.current);
+      window.removeEventListener('sw:plan-changed', debouncedRefetch);
     };
-  }, [householdId, refetch]);
+  }, [householdId, refetch, debouncedRefetch]);
 
   return (
     <div className="flex flex-col">

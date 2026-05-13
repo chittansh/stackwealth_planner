@@ -20,8 +20,21 @@ from .api import (
     skill,
     upload,
 )
+from .db import close_db, init_db
 
 app = FastAPI(title="stackwealth-planner-backend", version="0.1.0")
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    # Bootstrap the Postgres schema if DATABASE_URL is set. Safe to call
+    # on every restart — every CREATE TABLE is IF NOT EXISTS.
+    await init_db()
+
+
+@app.on_event("shutdown")
+async def _on_shutdown() -> None:
+    await close_db()
 
 # CORS — allow the Next.js frontend (and the deployed prod origin via env).
 app.add_middleware(

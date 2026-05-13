@@ -14,7 +14,7 @@ from typing import AsyncIterator, Optional
 from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse
 
-from ..agent.planner import clear_convo, hydrate_convo, run_planner_turn
+from ..agent.planner import clear_convo_db, hydrate_convo, run_planner_turn
 from ..db import get_plan
 from ..validator import collect_numbers, validate_assistant_text
 
@@ -23,7 +23,7 @@ router = APIRouter()
 
 @router.post("/{id}/reset")
 async def reset(id: str, chat_id: Optional[str] = None) -> dict:
-    clear_convo(id, chat_id)
+    await clear_convo_db(id, chat_id)
     return {"ok": True}
 
 
