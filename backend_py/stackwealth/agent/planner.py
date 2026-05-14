@@ -298,6 +298,21 @@ async def run_planner_turn(
     fresh_messages: list[BaseMessage] = []
     tool_spans: dict[str, Any] = {}
 
+    # Persist the user message eagerly so it survives even if the agent loop
+    # later raises. Otherwise crashed turns vanish from history and the user
+    # ends up staring at a chat panel that's missing the question they typed.
+    try:
+        from ..db import save_chat_message as _save_chat_message_eager
+        await _save_chat_message_eager(
+            household_id=household_id,
+            chat_id=chat_id or "main",
+            role="user",
+            text=user_text,
+            turn=turn,
+        )
+    except Exception as e:
+        print(f"[chat] eager user persist failed: {e}")
+
     try:
         async for event in graph.astream({"messages": initial}, stream_mode="updates"):
             for node_name, payload in event.items():
@@ -374,16 +389,11 @@ async def run_planner_turn(
         # intermediate tool_call / tool_result events — the agent doesn't
         # need to replay those when it rehydrates, and the frontend
         # already shows them only for the current session.
-        try:
-            from ..db import save_chat_message
-            await save_chat_message(
-                household_id=household_id,
-                chat_id=chat_id or "main",
-                role="user",
-                text=user_text,
-                turn=turn,
-            )
-            if final_text and final_text.strip():
+        # User message was persisted eagerly before the agent loop ran. Here we
+        # only need to record the final assistant text.
+        if final_text and final_text.strip():
+            try:
+                from ..db import save_chat_message
                 await save_chat_message(
                     household_id=household_id,
                     chat_id=chat_id or "main",
@@ -391,8 +401,8 @@ async def run_planner_turn(
                     text=final_text,
                     turn=turn,
                 )
-        except Exception as e:
-            print(f"[chat] DB persist failed: {e}")
+            except Exception as e:
+                print(f"[chat] DB persist (assistant) failed: {e}")
 
         # ── Emit trace pointers + final message ────────────────────────────
         if trace is not None:
