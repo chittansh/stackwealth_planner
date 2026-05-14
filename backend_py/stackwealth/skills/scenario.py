@@ -71,25 +71,41 @@ def get_path(o: Any, path: str) -> Any:
     return acc
 
 
-def set_path(o: Any, path: str, value: Any) -> None:
+def set_path(o: Any, path: str, value: Any) -> bool:
+    """Write `value` into `o` at dotted `path`.
+
+    Returns True on success, False when the path is unreachable (e.g. an index
+    points past the end of a list, or a parent segment hits a scalar). The
+    caller can surface a clean error to the agent instead of bubbling an
+    IndexError up the SSE stream as a generic "Something went wrong".
+    """
     parts = path.split(".")
     cur: Any = o
     for i in range(len(parts) - 1):
         k = parts[i]
         next_k = parts[i + 1]
         if isinstance(cur, list) and _is_index(k):
-            cur = cur[int(k)]
+            idx = int(k)
+            if not (0 <= idx < len(cur)):
+                return False
+            cur = cur[idx]
         else:
             if not isinstance(cur, dict):
-                return  # path not navigable
+                return False
             if cur.get(k) is None:
                 cur[k] = [] if _is_index(next_k) else {}
             cur = cur[k]
     last = parts[-1]
     if isinstance(cur, list) and _is_index(last):
-        cur[int(last)] = value
-    elif isinstance(cur, dict):
+        idx = int(last)
+        if not (0 <= idx < len(cur)):
+            return False
+        cur[idx] = value
+        return True
+    if isinstance(cur, dict):
         cur[last] = value
+        return True
+    return False
 
 
 # ── duplicate detection (mirrors TS findDuplicate) ─────────────────────────
@@ -182,16 +198,90 @@ async def apply_set(args: dict[str, Any]) -> dict[str, Any]:
     if not plan:
         return {"ok": False, "updated_path": args["path"]}
     plan_d = _to_dict(plan)
+    write_ok = True
     if _enforce_source_priority(plan_d, args["path"], args.get("source_type", "user")):
-        set_path(plan_d, args["path"], args["value"])
-        _push_evidence(plan_d, args["path"], get_path(plan_d, args["path"]), args.get("source_type", "user"))
+        write_ok = set_path(plan_d, args["path"], args["value"])
+        if write_ok:
+            _push_evidence(plan_d, args["path"], get_path(plan_d, args["path"]), args.get("source_type", "user"))
+    if not write_ok:
+        return {
+            "ok": False,
+            "updated_path": args["path"],
+            "error": f"could not navigate path '{args['path']}' on plan",
+        }
+    derived = _sync_fsi_from_breakdown(plan_d, args["path"])
     plan_d = recompute(plan_d)
     await save_plan(_from_dict(plan_d))
     out: dict[str, Any] = {"ok": True, "updated_path": args["path"]}
+    if derived:
+        out["derived"] = derived
     warning = _maybe_warn_monthly_expenses(plan_d, args["path"], args["value"])
     if warning:
         out["warning"] = warning
     return out
+
+
+# ── FSI auto-sync ──────────────────────────────────────────────────────────
+
+
+_INCOME_KEYS = (
+    "client_salary_in_hand",
+    "spouse_salary_in_hand",
+    "client_business_income",
+    "spouse_business_income",
+    "client_rental_income",
+    "spouse_rental_income",
+    "client_other_income",
+    "spouse_other_income",
+)
+
+# Categories that belong in `freedom_score_inputs.monthly_expenses` (the
+# cashflow's "expenses" line). EMI and SIP live in their own FSI buckets so
+# they aren't double-counted in the projection.
+_EXPENSE_KEYS = (
+    "household_expenses",
+    "rent_or_emi",
+    "groceries",
+    "utilities",
+    "school_fees",
+    "insurance_premium",
+    "medical",
+    "travel_or_lifestyle",
+)
+_EMI_KEYS = ("other_emis",)
+
+
+def _sync_fsi_from_breakdown(plan_d: dict, written_path: str) -> dict[str, float] | None:
+    """The cashflow projection reads `freedom_score_inputs.{monthly_income,
+    monthly_expenses, monthly_emi}` as ground truth. Historically the agent
+    had to dual-write the breakdown AND the FSI aggregate; in practice it
+    often forgot, leaving the projection at zero. Here we derive the FSI
+    aggregate from the just-written breakdown whenever the agent touches a
+    relevant category, so consistency holds without depending on the LLM.
+
+    Only fires for paths under `income_details.*` / `monthly_expenses.*`.
+    Returns a dict of FSI keys that were updated (for the tool result), or
+    None if no derivation applied.
+    """
+    fsi = plan_d.setdefault("freedom_score_inputs", {})
+    derived: dict[str, float] = {}
+
+    if written_path.startswith("income_details."):
+        income = plan_d.get("income_details") or {}
+        total = sum(float(income.get(k) or 0) for k in _INCOME_KEYS)
+        fsi["monthly_income"] = total
+        derived["freedom_score_inputs.monthly_income"] = total
+
+    if written_path.startswith("monthly_expenses."):
+        me = plan_d.get("monthly_expenses") or {}
+        exp_total = sum(float(me.get(k) or 0) for k in _EXPENSE_KEYS)
+        emi_total = sum(float(me.get(k) or 0) for k in _EMI_KEYS)
+        fsi["monthly_expenses"] = exp_total
+        fsi["monthly_emi"] = emi_total
+        derived["freedom_score_inputs.monthly_expenses"] = exp_total
+        derived["freedom_score_inputs.monthly_emi"] = emi_total
+
+    return derived or None
 
 
 def _maybe_warn_monthly_expenses(plan_d: dict, path: str, value: Any) -> str | None:
@@ -296,12 +386,25 @@ async def apply_remove(args: dict[str, Any]) -> dict[str, Any]:
 async def apply_assumption(args: dict[str, Any]) -> dict[str, Any]:
     plan = await get_plan(args["household_id"])
     if not plan:
-        return {"ok": False, "updated_path": args["path"]}
+        return {"ok": False, "updated_path": args["path"], "error": "household_not_found"}
     plan_d = _to_dict(plan)
-    set_path(plan_d, args["path"], args["value"])
+    # The agent sometimes drops the `assumptions.` prefix (e.g. asks to set
+    # `persons.0.retirement_age` or `sip_annual_step_up_pct`). Every assumption
+    # path lives under `plan.assumptions`, so normalise here rather than letting
+    # set_path crash on an empty top-level list.
+    path = args["path"]
+    if not path.startswith("assumptions."):
+        path = f"assumptions.{path}"
+    ok = set_path(plan_d, path, args["value"])
+    if not ok:
+        return {
+            "ok": False,
+            "updated_path": path,
+            "error": f"could not navigate path '{path}' on plan",
+        }
     plan_d = recompute(plan_d)
     await save_plan(_from_dict(plan_d))
-    return {"ok": True, "updated_path": args["path"]}
+    return {"ok": True, "updated_path": path}
 
 
 async def confirm_field(args: dict[str, Any]) -> dict[str, Any]:
