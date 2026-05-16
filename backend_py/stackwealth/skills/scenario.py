@@ -8,6 +8,7 @@ recompute                                                 — refresh derived st
 """
 from __future__ import annotations
 
+import asyncio
 import math
 import random
 import re
@@ -16,6 +17,25 @@ from typing import Any
 from uuid import uuid4
 
 from ..db import get_plan, save_plan
+
+
+# ── per-household mutation lock ────────────────────────────────────────────
+
+
+# LangGraph's ToolNode runs the AIMessage's tool_calls concurrently — when the
+# agent emits 5 plan_set's in one turn, they all start with the SAME `get_plan`
+# read, each modifies its own copy, then race-saves. Only the last save wins,
+# silently dropping 4 of the 5 writes. We serialize mutations per household to
+# prevent this read-modify-write race.
+_household_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(household_id: str) -> asyncio.Lock:
+    lock = _household_locks.get(household_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _household_locks[household_id] = lock
+    return lock
 from ..types import (
     ComputedSnapshot,
     EvidenceRow,
@@ -246,6 +266,11 @@ def _coerce_scalar_for_path(value: Any) -> Any:
 
 
 async def apply_set(args: dict[str, Any]) -> dict[str, Any]:
+    async with _lock_for(args["household_id"]):
+        return await _apply_set_locked(args)
+
+
+async def _apply_set_locked(args: dict[str, Any]) -> dict[str, Any]:
     plan = await get_plan(args["household_id"])
     if not plan:
         return {"ok": False, "updated_path": args["path"]}
@@ -354,26 +379,27 @@ async def force_fsi_sync(household_id: str) -> dict[str, float]:
     """Recompute all FSI aggregates from the current breakdown and persist.
     Used at the end of an upload pass so the LLM's direct FSI emission can't
     leave a stale or double-counted aggregate behind."""
-    plan = await get_plan(household_id)
-    if not plan:
-        return {}
-    plan_d = _to_dict(plan)
-    income = plan_d.get("income_details") or {}
-    me = plan_d.get("monthly_expenses") or {}
-    fsi = plan_d.setdefault("freedom_score_inputs", {})
-    fsi["monthly_income"] = sum(float(income.get(k) or 0) for k in _INCOME_KEYS)
-    fsi["monthly_expenses"] = sum(float(me.get(k) or 0) for k in _EXPENSE_KEYS)
-    fsi["monthly_emi"] = sum(float(me.get(k) or 0) for k in _EMI_KEYS)
-    try:
-        plan_d = recompute(plan_d)
-        await save_plan(_from_dict(plan_d))
-    except ValidationError:
-        return {}
-    return {
-        "freedom_score_inputs.monthly_income": fsi["monthly_income"],
-        "freedom_score_inputs.monthly_expenses": fsi["monthly_expenses"],
-        "freedom_score_inputs.monthly_emi": fsi["monthly_emi"],
-    }
+    async with _lock_for(household_id):
+        plan = await get_plan(household_id)
+        if not plan:
+            return {}
+        plan_d = _to_dict(plan)
+        income = plan_d.get("income_details") or {}
+        me = plan_d.get("monthly_expenses") or {}
+        fsi = plan_d.setdefault("freedom_score_inputs", {})
+        fsi["monthly_income"] = sum(float(income.get(k) or 0) for k in _INCOME_KEYS)
+        fsi["monthly_expenses"] = sum(float(me.get(k) or 0) for k in _EXPENSE_KEYS)
+        fsi["monthly_emi"] = sum(float(me.get(k) or 0) for k in _EMI_KEYS)
+        try:
+            plan_d = recompute(plan_d)
+            await save_plan(_from_dict(plan_d))
+        except ValidationError:
+            return {}
+        return {
+            "freedom_score_inputs.monthly_income": fsi["monthly_income"],
+            "freedom_score_inputs.monthly_expenses": fsi["monthly_expenses"],
+            "freedom_score_inputs.monthly_emi": fsi["monthly_emi"],
+        }
 
 
 def _maybe_warn_monthly_expenses(plan_d: dict, path: str, value: Any) -> str | None:
@@ -439,6 +465,11 @@ def _maybe_warn_monthly_expenses(plan_d: dict, path: str, value: Any) -> str | N
 
 
 async def apply_add(args: dict[str, Any]) -> dict[str, Any]:
+    async with _lock_for(args["household_id"]):
+        return await _apply_add_locked(args)
+
+
+async def _apply_add_locked(args: dict[str, Any]) -> dict[str, Any]:
     plan = await get_plan(args["household_id"])
     if not plan:
         return {"ok": False, "id": ""}
@@ -475,6 +506,11 @@ async def apply_add(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def apply_remove(args: dict[str, Any]) -> dict[str, Any]:
+    async with _lock_for(args["household_id"]):
+        return await _apply_remove_locked(args)
+
+
+async def _apply_remove_locked(args: dict[str, Any]) -> dict[str, Any]:
     plan = await get_plan(args["household_id"])
     if not plan:
         return {"ok": False}
@@ -487,6 +523,11 @@ async def apply_remove(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def apply_assumption(args: dict[str, Any]) -> dict[str, Any]:
+    async with _lock_for(args["household_id"]):
+        return await _apply_assumption_locked(args)
+
+
+async def _apply_assumption_locked(args: dict[str, Any]) -> dict[str, Any]:
     plan = await get_plan(args["household_id"])
     if not plan:
         return {"ok": False, "updated_path": args["path"], "error": "household_not_found"}

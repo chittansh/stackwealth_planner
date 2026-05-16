@@ -68,12 +68,11 @@ def _database_url() -> Optional[str]:
 
 
 async def _get_pool() -> Any | None:
-    """Lazy pool. Per-request `acquire()` from this pool was repeatedly handing
-    out dead sockets on Fly's `.internal` mesh (the connections were RST'd
-    between init and first command and surfaced as
-    `ConnectionDoesNotExistError`). We now use per-request `asyncpg.connect()`
-    in `_acquire_conn` instead — slower but reliable. This function is kept
-    only for `init_db`, which only needs a single one-shot connection.
+    """Lazy pool. Per-request `asyncpg.connect()` was too slow (each fresh
+    connect on Fly's `.internal` mesh adds 100-500ms, and a single chat turn
+    does many apply_set→get_plan+save_plan pairs, stacking into multi-second
+    overhead). Back to a real pool — but with aggressive recycling and an
+    on-acquire ping so stale sockets are evicted before the caller sees them.
     """
     global _pool, _pool_lock
     if _pool is not None:
@@ -91,57 +90,57 @@ async def _get_pool() -> Any | None:
         try:
             _pool = await asyncpg.create_pool(
                 dsn=url,
-                min_size=1,
-                max_size=3,
+                min_size=0,
+                max_size=10,
                 command_timeout=10,
-                timeout=30.0,
-                max_inactive_connection_lifetime=60.0,
+                timeout=15.0,
+                # Aggressive recycling — drop any idle connection after 30s so
+                # we don't acquire a silently-dead socket. Fly's `.internal`
+                # mesh RST's idle TCP connections without warning.
+                max_inactive_connection_lifetime=30.0,
                 ssl=False,
             )
         except Exception as e:
             print(
-                f"[db] Postgres unreachable this attempt, falling back to "
-                f"in-memory for THIS request. err={type(e).__name__}: {e!r}"
+                f"[db] Postgres unreachable this attempt. err={type(e).__name__}: {e!r}"
             )
             return None
     return _pool
 
 
 class _PgConn:
-    """Async-context-manager that opens a fresh asyncpg connection per use.
-
-    Bypasses pooling entirely, which on Fly's `.internal` mesh was the source
-    of `ConnectionDoesNotExistError` (the pool would hand out already-dead
-    sockets). The cost is ~50-100ms per request to establish the connection;
-    everything still completes well within Fly's edge timeout.
-
-    Returns None inside `__aenter__` when Postgres is unreachable — caller
-    must check and fall back to the in-memory store.
+    """Acquires a connection from the shared pool and yields it. Falls back to
+    `None` (in-memory mode) when the pool is unavailable. On a transient
+    connection error during acquire, the caller's retry loop will try again
+    against a freshly-rebuilt pool.
     """
 
     def __init__(self) -> None:
         self.conn: Any = None
+        self._cm: Any = None
 
     async def __aenter__(self) -> Any | None:
-        url = _database_url()
-        if not url:
+        pool = await _get_pool()
+        if pool is None:
             return None
-        import asyncpg  # type: ignore
         try:
-            self.conn = await asyncpg.connect(dsn=url, ssl=False, timeout=15.0)
+            self._cm = pool.acquire(timeout=15.0)
+            self.conn = await self._cm.__aenter__()
             return self.conn
         except Exception as e:
-            print(f"[db] direct connect failed: {type(e).__name__}: {e!r}")
+            print(f"[db] pool acquire failed: {type(e).__name__}: {e!r}")
             self.conn = None
+            self._cm = None
             return None
 
-    async def __aexit__(self, *exc) -> None:
-        if self.conn is not None:
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._cm is not None:
             try:
-                await self.conn.close(timeout=5.0)
+                await self._cm.__aexit__(exc_type, exc_val, exc_tb)
             except Exception:
                 pass
         self.conn = None
+        self._cm = None
 
 
 def _acquire_conn() -> _PgConn:
@@ -225,37 +224,66 @@ async def _reset_pool() -> None:
 # tears down the pool and rebuilds from scratch — Fly's `.internal` mesh
 # sometimes hands out connections that die during init, and a single retry
 # isn't always enough.
-_MAX_PG_RETRIES = 3
+# Retry budget per DB op. Each retry tears the pool's stale connection out via
+# `_reset_pool` and tries fresh. Keep this tight — 2 retries × 100ms backoff =
+# at most 200ms added per failing op, well under user-visible latency.
+_MAX_PG_RETRIES = 2
 
 
 async def get_plan(household_id: str) -> Optional[PlanState]:
     """Auto-creates an empty plan if missing — same behaviour the TS port
     relied on. The first call from a fresh household ID materialises a
-    blank PlanState rather than 404'ing."""
-    async with _acquire_conn() as conn:
-        if conn is None:
-            if household_id not in _memory:
-                _memory[household_id] = empty_plan_state(household_id)
-            return _memory[household_id]
-        row = await conn.fetchrow(
-            "SELECT plan FROM households WHERE id = $1", household_id
-        )
-        if row is None:
-            blank = empty_plan_state(household_id)
-            await _save_plan_via_conn(conn, blank)
-            return blank
-        data = row["plan"]
-        if isinstance(data, str):
-            data = json.loads(data)
-        return PlanState.model_validate(data)
+    blank PlanState rather than 404'ing.
+
+    Wrapped in a retry loop because Fly's `.internal` mesh occasionally
+    RST's a live asyncpg connection mid-query (surfaces as
+    `ConnectionDoesNotExistError: connection was closed in the middle of
+    operation`). Each retry opens a fresh connection from scratch.
+    """
+    for attempt in range(_MAX_PG_RETRIES + 1):
+        try:
+            async with _acquire_conn() as conn:
+                if conn is None:
+                    if household_id not in _memory:
+                        _memory[household_id] = empty_plan_state(household_id)
+                    return _memory[household_id]
+                row = await conn.fetchrow(
+                    "SELECT plan FROM households WHERE id = $1", household_id
+                )
+                if row is None:
+                    blank = empty_plan_state(household_id)
+                    await _save_plan_via_conn(conn, blank)
+                    return blank
+                data = row["plan"]
+                if isinstance(data, str):
+                    data = json.loads(data)
+                return PlanState.model_validate(data)
+        except Exception as e:
+            if attempt < _MAX_PG_RETRIES and _is_transient_pg_error(e):
+                print(f"[db] transient pg err in get_plan (attempt {attempt+1}/{_MAX_PG_RETRIES+1}): {type(e).__name__}")
+                await _reset_pool()
+                await asyncio.sleep(0.1)
+                continue
+            raise
+    return None  # unreachable
 
 
 async def save_plan(plan: PlanState) -> None:
-    async with _acquire_conn() as conn:
-        if conn is None:
-            _memory[plan.household_id] = plan
-            return
-        await _save_plan_via_conn(conn, plan)
+    for attempt in range(_MAX_PG_RETRIES + 1):
+        try:
+            async with _acquire_conn() as conn:
+                if conn is None:
+                    _memory[plan.household_id] = plan
+                    return
+                await _save_plan_via_conn(conn, plan)
+                return
+        except Exception as e:
+            if attempt < _MAX_PG_RETRIES and _is_transient_pg_error(e):
+                print(f"[db] transient pg err in save_plan (attempt {attempt+1}/{_MAX_PG_RETRIES+1}): {type(e).__name__}")
+                await _reset_pool()
+                await asyncio.sleep(0.1)
+                continue
+            raise
 
 
 async def _save_plan_via_conn(conn: Any, plan: PlanState) -> None:
@@ -301,20 +329,30 @@ async def save_chat_message(
     a no-op — the frontend already stores transcripts in localStorage and
     hydrates the in-process `_convo` via `/api/chat/{id}/hydrate`. The DB
     path is what makes the server-side history survive a deploy."""
-    async with _acquire_conn() as conn:
-        if conn is None:
+    for attempt in range(_MAX_PG_RETRIES + 1):
+        try:
+            async with _acquire_conn() as conn:
+                if conn is None:
+                    return
+                await conn.execute(
+                    """
+                    INSERT INTO chat_messages (household_id, chat_id, role, text, turn)
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    household_id,
+                    chat_id or "main",
+                    role,
+                    text,
+                    turn,
+                )
+                return
+        except Exception as e:
+            if attempt < _MAX_PG_RETRIES and _is_transient_pg_error(e):
+                await _reset_pool()
+                await asyncio.sleep(0.1)
+                continue
+            print(f"[db] save_chat_message dropped: {type(e).__name__}: {e}")
             return
-        await conn.execute(
-            """
-            INSERT INTO chat_messages (household_id, chat_id, role, text, turn)
-            VALUES ($1, $2, $3, $4, $5)
-            """,
-            household_id,
-            chat_id or "main",
-            role,
-            text,
-            turn,
-        )
 
 
 async def load_chat_history(
