@@ -47,7 +47,8 @@ EXTRACTION_INSTRUCTIONS = """You are an Indian household financial-plan extracto
   "partial_state": {
     "personal_details": { "full_name"?, "date_of_birth"?, "city_of_residence"?, "city_type"? ("Metro" | "Non-metro"), "occupation"?, "retirement_age_target"?, "dependents"? (int OR descriptive string like "Mother (78)"), "marital_status"?, "spouse_name_and_age"?, "number_of_children"? },
     "income_details":   { "client_salary_in_hand"?, "spouse_salary_in_hand"?, "client_business_income"?, "spouse_business_income"?, "client_rental_income"?, "spouse_rental_income"?, "client_other_income"?, "spouse_other_income"?  (all monthly INR — populate every non-zero field; business owners often have 0 salary but non-zero business_income) },
-    "monthly_expenses": { "household_expenses"?, "rent_or_emi"?, "groceries"?, "utilities"?, "school_fees"?, "medical"?, "insurance_premium"?, "travel_or_lifestyle"?, "sip_investments"?, "other_emis"? },
+    "monthly_expenses": { "household_expenses"?, "rent_or_emi"?, "groceries"?, "utilities"?, "school_fees"?, "medical"?, "insurance_premium"?, "travel_or_lifestyle"?, "other_emis"? (loan EMIs only — NOT a SIP) },
+    "monthly_investments": { "mutual_fund_sip"?, "nps"?, "ppf"?, "rd"?, "direct_equity"?, "insurance_premium"?, "other"? },
     "liquid_capital":   { "savings_account_balance"?, "idle_cash_for_investment"?, "fd_breakable_for_investment"? },
     "loans_liabilities": { "home_loan"? { outstanding_amount, emi, interest_rate, tenure_left }, "car_loan"?, "personal_loan"?, "credit_card_dues"? },
     "insurance_details": { "term_plan"? { "company"?, "cover_amount"?, "annual_premium"? }, "health_insurance"? { "company"?, "cover_amount"?, "annual_premium"? }, "family_floater"? { "company"?, "cover_amount"?, "annual_premium"? }, "ulip_or_endowment"? { "company"?, "cover_amount"?, "annual_premium"? } },
@@ -62,14 +63,37 @@ EXTRACTION_INSTRUCTIONS = """You are an Indian household financial-plan extracto
 }
 
 Rules:
-- All monetary values are monthly INR unless they're in goals / portfolios (then absolute INR).
-- DOB format: DD-MM-YYYY (re-format if the source uses DD-MMM-YYYY like "15-Aug-1997" → "15-08-1997").
+- The document may be structured (template xlsx, bank statement, form) OR completely unstructured (a paragraph someone wrote, a screenshot, a voice transcript, a WhatsApp chat). Extract EVERY financial fact you can identify, regardless of formatting.
+- All monetary values are monthly INR unless they're in goals / portfolios / loans (then absolute INR).
+- Indian number conversion (CRITICAL — get this wrong and the entire plan is off by 10x):
+    * 1 thousand / 1k = 1000
+    * 1 lakh / 1 L / 1 lac = 100000 (one hundred thousand, i.e. ₹1,00,000)
+    * 1 crore / 1 Cr = 10000000 (ten million, i.e. ₹1,00,00,000 — exactly 100 lakhs)
+    * Worked examples — VERIFY each before emitting:
+        - "2.5L" → 250000 (NOT 2500000)
+        - "12L" → 1200000 (NOT 12000000)
+        - "50 lakh" → 5000000
+        - "1.5 Cr" → 15000000 (NOT 150000000)
+        - "2.5 Cr" → 25000000 (NOT 2500000)
+        - "80k" → 80000
+        - "12 LPA" annual → 100000 per month (divide by 12 if the schema field is monthly)
+    * Sanity check: 1 Cr is 100x of 1 L. If your output has 8 digits for a "lakh" value, it's WRONG. If your output has 9 digits for a "crore" value, it's WRONG by 10x.
+- DOB format: DD-MM-YYYY (re-format "15-Aug-1997" → "15-08-1997"). If only an age is mentioned ("im 32"), set `freedom_score_inputs.age` to that integer. Don't fabricate a DOB.
+- Age: ALWAYS emit `freedom_score_inputs.age` when an age is mentioned in any form ("32 years old", "age 45", "im 28", "I'm in my 40s" → 40).
 - City type: Mumbai/Delhi/Kolkata/Chennai/Bengaluru/Hyderabad/Pune/Ahmedabad = "Metro"; else "Non-metro".
-- Income: write every non-zero subfield individually. If the document shows "Business Income: 5,00,000" with salary 0, set `client_business_income: 500000` (not client_salary_in_hand). For each income line in the document, decide whose it is (client vs spouse) and which kind (salary / business / rental / other).
-- Loan tenure_left: numeric YEARS only. Convert "12 years" → 12, "3 years 6 months" → 3.5. If credit card is paid in full each month, set `tenure_left` to 0 (not the string "Pay in full this month").
+- Income: write every non-zero subfield individually. Business owners often have 0 salary but non-zero business_income. For each income line decide whose it is (client vs spouse) and which kind (salary / business / rental / other). Spouse only mentioned by name with no income? Don't invent zero — omit.
+- Expenses vs Investments — THE BUCKET MATTERS:
+    - SIP / PPF / NPS / RD / direct-equity contributions → `monthly_investments.*` (these are wealth-building, not consumption)
+    - Loan EMI of any kind → `monthly_expenses.other_emis` AND describe the loan under `loans_liabilities.*`
+    - Rent, groceries, utilities, school, insurance premium, medical, travel/lifestyle → `monthly_expenses.*`
+    - NEVER put a SIP under monthly_expenses — that double-counts savings as spending.
+- Portfolio aggregation: if the user mentions a portfolio total ("my portfolio is around 12L", "I have 50L in equities"), set `freedom_score_inputs.portfolio_current_value` to that absolute INR value. If they list individual MFs/stocks, also populate the `mutual_funds[]` / `equity_stocks[]` arrays.
+- Liquid: cash in savings / current accounts → `liquid_capital.savings_account_balance` AND `freedom_score_inputs.liquid_assets_current_value` (same total).
+- Loan tenure_left: numeric YEARS only. "12 years" → 12, "3 years 6 months" → 3.5. If credit card is paid in full each month, set `tenure_left` to 0 (not a string).
+- Goals: extract intent like "want to buy a 1.5cr home by 2030" → `{goal_name: "Home Purchase", kind: "house_purchase", target_year: 2030, target_amount: 15000000}`. Goal `kind` MUST be one of: child_education | child_marriage | retirement | house_purchase | foreign_travel | other.
 - Goal priority: use `essential | important | aspirational` only. Map "High" → "essential", "Medium" → "important", "Low" → "aspirational".
 - Don't invent values. If a field isn't clearly present, OMIT it from partial_state and add its dotted path to "missing".
-- Every field in partial_state MUST have a matching evidence row with a verbatim quote.
+- Every field in partial_state SHOULD have a matching evidence row with a verbatim quote when possible. For derived/inferred values (e.g. FSI aggregates summed from breakdown), confidence may be lower but still emit the value.
 - Output JSON only. No prose, no code fences."""
 
 
