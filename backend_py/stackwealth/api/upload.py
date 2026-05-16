@@ -9,6 +9,41 @@ from fastapi import APIRouter, File, Request, UploadFile
 from ..skills.intake import ingest
 from ..skills.scenario import apply_add, apply_set, confirm_field, force_fsi_sync
 
+
+def _normalize_partial_state(ps: dict[str, Any]) -> dict[str, Any]:
+    """Fix common LLM mis-categorizations before they reach apply_set:
+
+    - `monthly_expenses.sip_investments` → `monthly_investments.mutual_fund_sip`
+      (LLMs treat the legacy `sip_investments` key as the right home for SIPs;
+      it's actually a deprecated bucket. SIPs are investments, not consumption.)
+    - Mirror `liquid_capital.savings_account_balance` into
+      `freedom_score_inputs.liquid_assets_current_value` when the LLM only
+      set the breakdown.
+
+    Mutates and returns the same dict.
+    """
+    if not isinstance(ps, dict):
+        return ps
+    me = ps.get("monthly_expenses")
+    mi = ps.setdefault("monthly_investments", {}) if isinstance(ps.get("monthly_investments"), dict) or "monthly_investments" not in ps else ps["monthly_investments"]
+    if isinstance(me, dict) and me.get("sip_investments"):
+        sip = me.pop("sip_investments")
+        if isinstance(mi, dict):
+            mi["mutual_fund_sip"] = (mi.get("mutual_fund_sip") or 0) + sip
+        else:
+            ps["monthly_investments"] = {"mutual_fund_sip": sip}
+
+    fsi = ps.get("freedom_score_inputs")
+    lc = ps.get("liquid_capital")
+    if isinstance(fsi, dict) and isinstance(lc, dict) and not fsi.get("liquid_assets_current_value"):
+        total_liquid = sum(
+            float(lc.get(k) or 0)
+            for k in ("savings_account_balance", "idle_cash_for_investment", "fd_breakable_for_investment")
+        )
+        if total_liquid > 0:
+            fsi["liquid_assets_current_value"] = total_liquid
+    return ps
+
 router = APIRouter()
 
 
@@ -97,7 +132,8 @@ async def upload_files(
             else:
                 await _write_leaf(path, value)
 
-        for path, value in (result.get("partial_state") or {}).items():
+        partial_state = _normalize_partial_state(result.get("partial_state") or {})
+        for path, value in partial_state.items():
             await _write(path, value)
             sections_set.append(path)
 
