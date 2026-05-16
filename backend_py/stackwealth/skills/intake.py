@@ -45,12 +45,12 @@ EXTRACTION_INSTRUCTIONS = """You are an Indian household financial-plan extracto
 
 {
   "partial_state": {
-    "personal_details": { "full_name"?, "date_of_birth"?, "city_of_residence"?, "city_type"? ("Metro" | "Non-metro"), "occupation"?, "retirement_age_target"?, "dependents"?, "marital_status"? },
-    "income_details":   { "client_salary_in_hand"?, "spouse_salary_in_hand"?, ... (monthly INR) },
-    "monthly_expenses": { "rent_or_emi"?, "groceries"?, "utilities"?, "school_fees"?, "medical"?, "insurance_premium"?, "travel_or_lifestyle"?, "sip_investments"?, "other_emis"? },
+    "personal_details": { "full_name"?, "date_of_birth"?, "city_of_residence"?, "city_type"? ("Metro" | "Non-metro"), "occupation"?, "retirement_age_target"?, "dependents"? (int OR descriptive string like "Mother (78)"), "marital_status"?, "spouse_name_and_age"?, "number_of_children"? },
+    "income_details":   { "client_salary_in_hand"?, "spouse_salary_in_hand"?, "client_business_income"?, "spouse_business_income"?, "client_rental_income"?, "spouse_rental_income"?, "client_other_income"?, "spouse_other_income"?  (all monthly INR — populate every non-zero field; business owners often have 0 salary but non-zero business_income) },
+    "monthly_expenses": { "household_expenses"?, "rent_or_emi"?, "groceries"?, "utilities"?, "school_fees"?, "medical"?, "insurance_premium"?, "travel_or_lifestyle"?, "sip_investments"?, "other_emis"? },
     "liquid_capital":   { "savings_account_balance"?, "idle_cash_for_investment"?, "fd_breakable_for_investment"? },
     "loans_liabilities": { "home_loan"? { outstanding_amount, emi, interest_rate, tenure_left }, "car_loan"?, "personal_loan"?, "credit_card_dues"? },
-    "insurance_details": { "term_plan"? { company, cover_amount, annual_premium }, "health_insurance"?, "family_floater"?, "ulip_or_endowment"? },
+    "insurance_details": { "term_plan"? { "company"?, "cover_amount"?, "annual_premium"? }, "health_insurance"? { "company"?, "cover_amount"?, "annual_premium"? }, "family_floater"? { "company"?, "cover_amount"?, "annual_premium"? }, "ulip_or_endowment"? { "company"?, "cover_amount"?, "annual_premium"? } },
     "financial_goals": [ { "goal_name", "kind" ("child_education" | "child_marriage" | "retirement" | "house_purchase" | "foreign_travel" | "other"), "target_year"?, "target_amount"?, "current_allocated_amount"?, "periodic_contribution"?, "contribution_frequency"? ("monthly" | "annual"), "priority"? } ],
     "mutual_funds":   [ { "fund_name", "current_value", "isin"?, "folio"? } ],
     "equity_stocks":  [ { "stock_name", "current_value", "quantity"?, "isin"? } ],
@@ -63,9 +63,12 @@ EXTRACTION_INSTRUCTIONS = """You are an Indian household financial-plan extracto
 
 Rules:
 - All monetary values are monthly INR unless they're in goals / portfolios (then absolute INR).
-- DOB format: DD-MM-YYYY.
+- DOB format: DD-MM-YYYY (re-format if the source uses DD-MMM-YYYY like "15-Aug-1997" → "15-08-1997").
 - City type: Mumbai/Delhi/Kolkata/Chennai/Bengaluru/Hyderabad/Pune/Ahmedabad = "Metro"; else "Non-metro".
-- Don't invent values. If a field isn't clearly present, OMIT it from partial_state and add it to "missing".
+- Income: write every non-zero subfield individually. If the document shows "Business Income: 5,00,000" with salary 0, set `client_business_income: 500000` (not client_salary_in_hand). For each income line in the document, decide whose it is (client vs spouse) and which kind (salary / business / rental / other).
+- Loan tenure_left: numeric YEARS only. Convert "12 years" → 12, "3 years 6 months" → 3.5. If credit card is paid in full each month, set `tenure_left` to 0 (not the string "Pay in full this month").
+- Goal priority: use `essential | important | aspirational` only. Map "High" → "essential", "Medium" → "important", "Low" → "aspirational".
+- Don't invent values. If a field isn't clearly present, OMIT it from partial_state and add its dotted path to "missing".
 - Every field in partial_state MUST have a matching evidence row with a verbatim quote.
 - Output JSON only. No prose, no code fences."""
 
@@ -184,7 +187,7 @@ async def _llm_extract(
                     }
                 )
             resp = claude.messages.create(
-                model=config.PLANNER_MODEL or "claude-sonnet-4-6",
+                model=config.INTAKE_MODEL or "claude-haiku-4-5-20251001",
                 max_tokens=4096,
                 temperature=0,
                 messages=[{"role": "user", "content": blocks}],

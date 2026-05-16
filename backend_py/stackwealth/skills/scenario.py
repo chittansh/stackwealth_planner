@@ -30,6 +30,8 @@ from ..types import (
     SourceType,
     source_rank,
 )
+from pydantic import ValidationError
+
 from .cashflow import compute_cashflow
 from .freedom import compute_freedom
 
@@ -193,14 +195,65 @@ def _push_evidence(plan_d: dict, path: str, value: Any, source_type: SourceType)
     )
 
 
+_NUMERIC_PREFIX_RE = re.compile(r"^[-+]?\d+(?:\.\d+)?")
+
+# Common enum aliases the LLM uses interchangeably. Coerced before write so
+# `priority: "High"` lands as `"essential"` instead of being rejected.
+_ENUM_ALIASES: dict[str, str] = {
+    "high": "essential",
+    "medium": "important",
+    "med": "important",
+    "low": "aspirational",
+    "must": "essential",
+    "must-have": "essential",
+    "must have": "essential",
+    "nice-to-have": "aspirational",
+    "nice to have": "aspirational",
+    "optional": "aspirational",
+}
+
+
+def _coerce_scalar_for_path(value: Any) -> Any:
+    """Best-effort coerce LLM-extracted strings to schema-friendly values:
+
+    - "12 years" / "5 lakh" / "3 months" → numeric prefix
+    - "High" / "Medium" / "Low" → canonical priority enum
+    - Anything else → unchanged (Pydantic decides whether it passes)
+    """
+    if not isinstance(value, str):
+        return value
+    s = value.strip()
+
+    # 1. Enum aliases (priority, etc.)
+    alias = _ENUM_ALIASES.get(s.lower())
+    if alias is not None:
+        return alias
+
+    # 2. Numeric-with-unit prefix
+    m = _NUMERIC_PREFIX_RE.match(s)
+    if not m:
+        return value
+    num_str = m.group(0)
+    rest = s[len(num_str):].strip().lower()
+    unit_words = {"yr", "yrs", "year", "years", "mo", "mos", "month", "months", "%", "lakh", "lakhs", "l", "cr", "crore", "crores", "k"}
+    if rest and rest.split()[0].rstrip(",.:;") not in unit_words:
+        return value
+    try:
+        n = float(num_str)
+        return int(n) if n.is_integer() else n
+    except ValueError:
+        return value
+
+
 async def apply_set(args: dict[str, Any]) -> dict[str, Any]:
     plan = await get_plan(args["household_id"])
     if not plan:
         return {"ok": False, "updated_path": args["path"]}
     plan_d = _to_dict(plan)
     write_ok = True
+    coerced_value = _coerce_scalar_for_path(args["value"])
     if _enforce_source_priority(plan_d, args["path"], args.get("source_type", "user")):
-        write_ok = set_path(plan_d, args["path"], args["value"])
+        write_ok = set_path(plan_d, args["path"], coerced_value)
         if write_ok:
             _push_evidence(plan_d, args["path"], get_path(plan_d, args["path"]), args.get("source_type", "user"))
     if not write_ok:
@@ -210,7 +263,20 @@ async def apply_set(args: dict[str, Any]) -> dict[str, Any]:
             "error": f"could not navigate path '{args['path']}' on plan",
         }
     derived = _sync_fsi_from_breakdown(plan_d, args["path"])
-    plan_d = recompute(plan_d)
+    try:
+        plan_d = recompute(plan_d)
+    except ValidationError as ve:
+        # The write produced a plan that doesn't match the schema (e.g. LLM
+        # gave a string for a numeric field). Skip this single field rather
+        # than crashing the whole request; the existing saved plan is left
+        # untouched.
+        errs = "; ".join(f"{'.'.join(str(x) for x in e['loc'])}: {e['msg']}" for e in ve.errors()[:3])
+        return {
+            "ok": False,
+            "updated_path": args["path"],
+            "error": f"value rejected by schema: {errs}",
+            "rejected_value": args["value"],
+        }
     await save_plan(_from_dict(plan_d))
     out: dict[str, Any] = {"ok": True, "updated_path": args["path"]}
     if derived:
@@ -282,6 +348,32 @@ def _sync_fsi_from_breakdown(plan_d: dict, written_path: str) -> dict[str, float
         derived["freedom_score_inputs.monthly_emi"] = emi_total
 
     return derived or None
+
+
+async def force_fsi_sync(household_id: str) -> dict[str, float]:
+    """Recompute all FSI aggregates from the current breakdown and persist.
+    Used at the end of an upload pass so the LLM's direct FSI emission can't
+    leave a stale or double-counted aggregate behind."""
+    plan = await get_plan(household_id)
+    if not plan:
+        return {}
+    plan_d = _to_dict(plan)
+    income = plan_d.get("income_details") or {}
+    me = plan_d.get("monthly_expenses") or {}
+    fsi = plan_d.setdefault("freedom_score_inputs", {})
+    fsi["monthly_income"] = sum(float(income.get(k) or 0) for k in _INCOME_KEYS)
+    fsi["monthly_expenses"] = sum(float(me.get(k) or 0) for k in _EXPENSE_KEYS)
+    fsi["monthly_emi"] = sum(float(me.get(k) or 0) for k in _EMI_KEYS)
+    try:
+        plan_d = recompute(plan_d)
+        await save_plan(_from_dict(plan_d))
+    except ValidationError:
+        return {}
+    return {
+        "freedom_score_inputs.monthly_income": fsi["monthly_income"],
+        "freedom_score_inputs.monthly_expenses": fsi["monthly_expenses"],
+        "freedom_score_inputs.monthly_emi": fsi["monthly_emi"],
+    }
 
 
 def _maybe_warn_monthly_expenses(plan_d: dict, path: str, value: Any) -> str | None:
@@ -365,8 +457,19 @@ async def apply_add(args: dict[str, Any]) -> dict[str, Any]:
     row = dict(args["row"]) if isinstance(args["row"], dict) else {}
     row_id = row.get("id") or str(uuid4())
     row["id"] = row_id
+    # Coerce common "<n> <unit>" strings (e.g. "12 years") on numeric subfields
+    # before the row gets validated against the model.
+    row = {k: _coerce_scalar_for_path(v) for k, v in row.items()}
     set_path(plan_d, args["path"], list_ + [row])
-    plan_d = recompute(plan_d)
+    try:
+        plan_d = recompute(plan_d)
+    except ValidationError as ve:
+        errs = "; ".join(f"{'.'.join(str(x) for x in e['loc'])}: {e['msg']}" for e in ve.errors()[:3])
+        return {
+            "ok": False,
+            "error": f"row rejected by schema: {errs}",
+            "rejected_row": row,
+        }
     await save_plan(_from_dict(plan_d))
     return {"ok": True, "id": row_id}
 

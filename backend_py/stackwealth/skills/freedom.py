@@ -51,6 +51,24 @@ def _sum_debts(plan: PlanState) -> float:
     return total
 
 
+def _dependents_to_count(d: Any) -> int:
+    """`personal_details.dependents` is loosely typed (int or freeform str).
+    Best-effort: if int → use as-is; if str → count distinct name/phrase
+    tokens (commas / 'and' / '+' separators) as a proxy for dependent count.
+    Empty/None → 0."""
+    if d is None:
+        return 0
+    if isinstance(d, (int, float)):
+        return max(0, int(d))
+    s = str(d).strip()
+    if not s:
+        return 0
+    # Replace common separators with commas so a single split works.
+    import re as _re
+    pieces = [p for p in _re.split(r"\s*(?:,| and | & |\+)\s*", s, flags=_re.I) if p.strip()]
+    return max(1, len(pieces))
+
+
 def _dependent_life_mult(d: int) -> float:
     if d <= 0:
         return 0.5
@@ -103,7 +121,8 @@ def compute_freedom(plan: PlanState) -> FreedomOutput:
         liquid = _sum_optionals(plan.liquid_capital)
     portfolio = fsi.portfolio_current_value or 0
     equity_pct = fsi.equity_allocation_percent or 0
-    dependents = plan.personal_details.dependents or 0
+    dependents_raw = plan.personal_details.dependents
+    dependents = _dependents_to_count(dependents_raw)
     annual_income = monthly_income * 12
     city_mult = 1.25 if (plan.personal_details.city_type or "Non-metro") == "Metro" else 1.0
 
