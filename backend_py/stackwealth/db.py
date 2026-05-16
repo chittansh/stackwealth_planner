@@ -55,34 +55,27 @@ def _database_url() -> Optional[str]:
     url = os.environ.get("DATABASE_URL")
     if not url:
         return None
-    # asyncpg expects `postgres://` or `postgresql://` and chokes on
-    # `?sslmode=disable` query strings that libpq-style drivers accept.
-    # Strip sslmode entirely — Fly's internal flycast network is
-    # already a private mesh.
+    # Fly's `.flycast` haproxy was RST'ing plain-TCP asyncpg handshakes; use
+    # `.internal` 6PN hostname instead. Same-org private mesh, no TLS needed.
+    url = url.replace(".flycast:", ".internal:")
+    # Strip libpq-style sslmode from the query — asyncpg accepts it but the
+    # actual SSL choice is forced off via the `ssl=False` kwarg passed to
+    # `create_pool` (Fly's internal mesh is plain TCP; SSL handshakes there
+    # silently RST and surface later as "unexpected connection_lost()").
     if "?sslmode=" in url:
         url = url.split("?sslmode=", 1)[0]
-    # Fly's `.flycast` haproxy routes Postgres through a TLS-terminating
-    # load balancer that sometimes RST's plain TCP asyncpg handshakes
-    # (the haproxy expects a TLS ClientHello). For app-to-Postgres in
-    # the same Fly org, the direct WireGuard 6PN hostname `.internal`
-    # is reliable and avoids the haproxy entirely. Swap the host.
-    url = url.replace(".flycast:", ".internal:")
     return url
 
 
-_pool_init_failed = False
-
-
 async def _get_pool() -> Any | None:
-    """Lazy pool. Returns None when DATABASE_URL is unset OR when a prior
-    connection attempt failed. Serialized by `_pool_lock` so concurrent
-    callers from the FastAPI startup task + request handlers don't all
-    race to create their own pool."""
-    global _pool, _pool_init_failed, _pool_lock
+    """Lazy pool. Returns None when DATABASE_URL is unset OR when this attempt
+    couldn't connect. We don't cache the failure — the next request gets a
+    fresh attempt — so a transient blip doesn't pin the server to in-memory
+    mode for its entire lifetime. The `_pool_lock` still serializes concurrent
+    creators."""
+    global _pool, _pool_lock
     if _pool is not None:
         return _pool
-    if _pool_init_failed:
-        return None
     url = _database_url()
     if not url:
         return None
@@ -90,11 +83,8 @@ async def _get_pool() -> Any | None:
     if _pool_lock is None:
         _pool_lock = asyncio.Lock()
     async with _pool_lock:
-        # Re-check under the lock — another coroutine may have just finished.
         if _pool is not None:
             return _pool
-        if _pool_init_failed:
-            return None
         import asyncpg  # type: ignore
         try:
             # Fly's internal `.flycast` DNS + IPv6 negotiation can take
@@ -108,13 +98,21 @@ async def _get_pool() -> Any | None:
                 max_size=5,
                 command_timeout=10,
                 timeout=30.0,
+                # Recycle idle connections every 5 min so we don't acquire a
+                # silently-dead socket. Fly's egress + Postgres-side idle
+                # timeout was tripping `ConnectionError: unexpected
+                # connection_lost()` during longer uploads.
+                max_inactive_connection_lifetime=300.0,
+                # Fly's `.internal` 6PN mesh is plain TCP — asyncpg's default
+                # SSL upgrade probe was being silently dropped and surfacing
+                # later as the connection_lost error.
+                ssl=False,
             )
         except Exception as e:
             print(
-                f"[db] Postgres unreachable, falling back to in-memory. "
-                f"err={type(e).__name__}: {e!r}"
+                f"[db] Postgres unreachable this attempt, falling back to "
+                f"in-memory for THIS request. err={type(e).__name__}: {e!r}"
             )
-            _pool_init_failed = True
             return None
     return _pool
 
@@ -169,37 +167,82 @@ async def close_db() -> None:
 # ── PlanState round-trip ──────────────────────────────────────────────────
 
 
+# Errors that indicate a stale / broken pool connection. We rebuild the pool
+# and retry once when we see them. Anything else propagates.
+def _is_transient_pg_error(e: BaseException) -> bool:
+    if isinstance(e, ConnectionError):
+        return True
+    name = type(e).__name__
+    return name in {
+        "ConnectionFailureError",
+        "ConnectionDoesNotExistError",
+        "InterfaceError",
+        "PostgresConnectionError",
+        "TooManyConnectionsError",
+        "CannotConnectNowError",
+    }
+
+
+async def _reset_pool() -> None:
+    """Tear down the cached pool so the next `_get_pool()` rebuilds it. Used
+    after a transient connection failure that left dead sockets behind."""
+    global _pool
+    if _pool is not None:
+        try:
+            await _pool.close()
+        except Exception:
+            pass
+    _pool = None
+
+
 async def get_plan(household_id: str) -> Optional[PlanState]:
     """Auto-creates an empty plan if missing — same behaviour the TS port
     relied on. The first call from a fresh household ID materialises a
     blank PlanState rather than 404'ing."""
-    pool = await _get_pool()
-    if pool is None:
-        if household_id not in _memory:
-            _memory[household_id] = empty_plan_state(household_id)
-        return _memory[household_id]
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT plan FROM households WHERE id = $1", household_id
-        )
-        if row is None:
-            blank = empty_plan_state(household_id)
-            await _save_plan_via_conn(conn, blank)
-            return blank
-        # asyncpg returns the JSONB column as a Python str; deserialize.
-        data = row["plan"]
-        if isinstance(data, str):
-            data = json.loads(data)
-        return PlanState.model_validate(data)
+    for attempt in (0, 1):
+        pool = await _get_pool()
+        if pool is None:
+            if household_id not in _memory:
+                _memory[household_id] = empty_plan_state(household_id)
+            return _memory[household_id]
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT plan FROM households WHERE id = $1", household_id
+                )
+                if row is None:
+                    blank = empty_plan_state(household_id)
+                    await _save_plan_via_conn(conn, blank)
+                    return blank
+                data = row["plan"]
+                if isinstance(data, str):
+                    data = json.loads(data)
+                return PlanState.model_validate(data)
+        except Exception as e:
+            if attempt == 0 and _is_transient_pg_error(e):
+                print(f"[db] transient pg err in get_plan, rebuilding pool: {type(e).__name__}: {e}")
+                await _reset_pool()
+                continue
+            raise
+    return None  # unreachable
 
 
 async def save_plan(plan: PlanState) -> None:
-    pool = await _get_pool()
-    if pool is None:
-        _memory[plan.household_id] = plan
-        return
-    async with pool.acquire() as conn:
-        await _save_plan_via_conn(conn, plan)
+    for attempt in (0, 1):
+        pool = await _get_pool()
+        if pool is None:
+            _memory[plan.household_id] = plan
+            return
+        try:
+            async with pool.acquire() as conn:
+                await _save_plan_via_conn(conn, plan)
+            return
+        except Exception as e:
+            if attempt == 0 and _is_transient_pg_error(e):
+                print(f"[db] transient pg err in save_plan, rebuilding pool: {type(e).__name__}: {e}")
+                await _reset_pool()
+                continue
+            raise
 
 
 async def _save_plan_via_conn(conn: Any, plan: PlanState) -> None:

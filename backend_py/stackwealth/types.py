@@ -9,7 +9,7 @@ nulls survive the round-trip.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -75,7 +75,10 @@ class PersonalDetails(StrictModel):
     marital_status: Optional[str] = None
     spouse_name_and_age: Optional[str] = None
     number_of_children: Optional[int] = None
-    dependents: Optional[int] = None
+    # `dependents` is loosely typed because intake sheets often capture freeform
+    # descriptions ("Mother (78)", "Father 60 + Mother 56") that are more
+    # informative than a count. Accept both int (count) and str (description).
+    dependents: Optional[Union[int, str]] = None
     city_of_residence: Optional[str] = None
     city_type: Optional[CityType] = None
     occupation: Optional[str] = None
