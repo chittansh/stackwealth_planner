@@ -1,10 +1,31 @@
-"""/api/upload — accepts files / pasted text → ingest pipeline → plan deltas."""
+"""/api/upload — accepts files / pasted text → ingest pipeline → plan deltas.
+
+The main `POST /api/upload/{id}` endpoint returns a streaming NDJSON response.
+Each line is a JSON event the frontend can render live, so the user sees
+"extracting 14 fields…" instead of a multi-second blank spinner.
+
+Event shapes (one per line):
+    {"event":"file_started","filename":"...","size":N}
+    {"event":"parsing","parser_hint":"xlsx"}                    # LLM call started
+    {"event":"heartbeat","stage":"llm","elapsed_ms":N}          # every 2s during LLM
+    {"event":"parsed","parser_used":"xlsx:llm","field_count":N} # LLM returned
+    {"event":"field","path":"...","value":...,"ok":true}        # per leaf write
+    {"event":"row_added","path":"...","row_id":"...","label":"..."}
+    {"event":"rejected","path":"...","reason":"..."}
+    {"event":"fsi_synced","derived":{...}}
+    {"event":"file_done","summary":{...}}
+    {"event":"done","summaries":[...]}                          # always last
+"""
 from __future__ import annotations
 
+import asyncio
 import base64
-from typing import Any
+import json
+import time
+from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, File, Request, UploadFile
+from fastapi.responses import StreamingResponse
 
 from ..skills.intake import ingest
 from ..skills.scenario import apply_add, apply_set, confirm_field, force_fsi_sync
@@ -14,13 +35,7 @@ def _normalize_partial_state(ps: dict[str, Any]) -> dict[str, Any]:
     """Fix common LLM mis-categorizations before they reach apply_set:
 
     - `monthly_expenses.sip_investments` → `monthly_investments.mutual_fund_sip`
-      (LLMs treat the legacy `sip_investments` key as the right home for SIPs;
-      it's actually a deprecated bucket. SIPs are investments, not consumption.)
-    - Mirror `liquid_capital.savings_account_balance` into
-      `freedom_score_inputs.liquid_assets_current_value` when the LLM only
-      set the breakdown.
-
-    Mutates and returns the same dict.
+    - Mirror liquid totals into `freedom_score_inputs.liquid_assets_current_value`
     """
     if not isinstance(ps, dict):
         return ps
@@ -44,6 +59,7 @@ def _normalize_partial_state(ps: dict[str, Any]) -> dict[str, Any]:
             fsi["liquid_assets_current_value"] = total_liquid
     return ps
 
+
 router = APIRouter()
 
 
@@ -65,97 +81,165 @@ def _parser_to_source(parser_used: str) -> str:
     return "md"
 
 
+def _parser_hint_from_filename(filename: str, mime: str) -> str:
+    lower = (filename or "").lower()
+    m = (mime or "").lower()
+    if lower.endswith(".pdf") or m == "application/pdf":
+        return "pdf"
+    if lower.endswith(".xlsx") or lower.endswith(".xls") or "spreadsheet" in m:
+        return "xlsx"
+    if lower.endswith(".csv") or m == "text/csv":
+        return "csv"
+    if lower.endswith(".docx") or "wordprocessing" in m:
+        return "docx"
+    if m.startswith("image/") or lower.endswith((".png", ".jpg", ".jpeg", ".webp")):
+        return "image"
+    if m.startswith("audio/") or m.startswith("video/"):
+        return "audio"
+    return "text"
+
+
 @router.post("/{id}")
 async def upload_files(
     id: str,
     file: list[UploadFile] = File(...),
-) -> dict[str, Any]:
-    summaries = []
+) -> StreamingResponse:
+    # Read all file bytes before kicking off the streaming response — we want
+    # the multipart upload phase complete before we start emitting events.
+    files_data: list[tuple[str, str, bytes]] = []
     for f in file:
         buf = await f.read()
-        try:
-            result = await ingest(
-                {
-                    "household_id": id,
-                    "source": {
-                        "kind": "file",
-                        "filename": f.filename,
-                        "mime": f.content_type or "application/octet-stream",
-                        "contents_b64": base64.b64encode(buf).decode(),
-                    },
-                }
+        files_data.append((f.filename or "untitled", f.content_type or "application/octet-stream", buf))
+
+    async def stream() -> AsyncIterator[bytes]:
+        summaries: list[dict[str, Any]] = []
+
+        def emit(obj: dict[str, Any]) -> bytes:
+            return (json.dumps(obj) + "\n").encode("utf-8")
+
+        for filename, mime, buf in files_data:
+            yield emit({"event": "file_started", "filename": filename, "size": len(buf)})
+
+            hint = _parser_hint_from_filename(filename, mime)
+            yield emit({"event": "parsing", "parser_hint": hint, "filename": filename})
+
+            # Run the LLM call as a task so we can interleave heartbeats while
+            # it's waiting on Claude.
+            ingest_task = asyncio.create_task(
+                ingest(
+                    {
+                        "household_id": id,
+                        "source": {
+                            "kind": "file",
+                            "filename": filename,
+                            "mime": mime,
+                            "contents_b64": base64.b64encode(buf).decode(),
+                        },
+                    }
+                )
             )
-        except Exception as err:
-            summaries.append(
-                {
-                    "filename": f.filename,
+            t0 = time.monotonic()
+            while not ingest_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(ingest_task), timeout=2.0)
+                except asyncio.TimeoutError:
+                    yield emit({"event": "heartbeat", "stage": "llm", "elapsed_ms": int((time.monotonic() - t0) * 1000), "filename": filename})
+
+            try:
+                result = ingest_task.result()
+            except Exception as err:
+                summary = {
+                    "filename": filename,
                     "parser_used": "failed",
                     "sections_set": [],
                     "list_rows_added": 0,
                     "fields_extracted": 0,
                     "missing": [],
+                    "rejected": [],
                     "error": str(err),
                 }
-            )
-            continue
+                summaries.append(summary)
+                yield emit({"event": "file_done", "summary": summary})
+                continue
 
-        sections_set: list[str] = []
-        list_rows_added = 0
-        rejected: list[dict[str, Any]] = []
-        source_type = _parser_to_source(result.get("parser_used", ""))
+            yield emit({
+                "event": "parsed",
+                "parser_used": result.get("parser_used", ""),
+                "field_count": len(result.get("evidence") or []),
+                "filename": filename,
+            })
 
-        async def _write_leaf(path: str, value: Any) -> None:
-            """Apply a single scalar/leaf write, recording rejections."""
-            set_res = await apply_set(
-                {"household_id": id, "path": path, "value": value, "source_type": source_type}
-            )
-            if not set_res.get("ok") and "rejected" in (set_res.get("error") or ""):
-                rejected.append({"path": path, "value": value, "reason": set_res["error"]})
+            sections_set: list[str] = []
+            list_rows_added = 0
+            rejected: list[dict[str, Any]] = []
+            field_writes = 0
+            source_type = _parser_to_source(result.get("parser_used", ""))
 
-        async def _write(path: str, value: Any) -> None:
-            """Walk a partial-state value. Lists → apply_add per row. Dicts →
-            recurse into sub-paths so a single bad subfield doesn't poison the
-            whole section. Leaves → apply_set."""
-            nonlocal list_rows_added
-            if isinstance(value, list):
-                for row in value:
-                    add_res = await apply_add(
-                        {"household_id": id, "path": path, "row": row, "source_type": source_type}
-                    )
-                    if add_res.get("ok"):
-                        list_rows_added += 1
-                    elif "rejected" in (add_res.get("error") or ""):
-                        rejected.append({"path": path, "row": row, "reason": add_res["error"]})
-            elif isinstance(value, dict):
-                for sub_k, sub_v in value.items():
-                    await _write(f"{path}.{sub_k}", sub_v)
-            else:
-                await _write_leaf(path, value)
+            # Buffer of events to flush after the write completes.
+            event_buffer: list[bytes] = []
 
-        partial_state = _normalize_partial_state(result.get("partial_state") or {})
-        for path, value in partial_state.items():
-            await _write(path, value)
-            sections_set.append(path)
+            async def _write_leaf(path: str, value: Any) -> None:
+                nonlocal field_writes
+                set_res = await apply_set(
+                    {"household_id": id, "path": path, "value": value, "source_type": source_type}
+                )
+                if set_res.get("ok"):
+                    field_writes += 1
+                    event_buffer.append(emit({"event": "field", "path": path, "value": value, "ok": True}))
+                elif "rejected" in (set_res.get("error") or ""):
+                    rejected.append({"path": path, "value": value, "reason": set_res["error"]})
+                    event_buffer.append(emit({"event": "rejected", "path": path, "reason": set_res["error"]}))
 
-        # FSI finalization: the LLM may have emitted `freedom_score_inputs.*`
-        # AFTER the breakdown sections, overwriting our server-derived sync
-        # and double-counting EMI/SIP. Force one final sync from the breakdown
-        # so the projection uses correct aggregates.
-        await force_fsi_sync(id)
+            async def _write(path: str, value: Any) -> None:
+                nonlocal list_rows_added
+                if isinstance(value, list):
+                    for row in value:
+                        add_res = await apply_add(
+                            {"household_id": id, "path": path, "row": row, "source_type": source_type}
+                        )
+                        if add_res.get("ok"):
+                            list_rows_added += 1
+                            label = ""
+                            if isinstance(row, dict):
+                                label = str(row.get("fund_name") or row.get("stock_name") or row.get("goal_name") or row.get("instrument") or row.get("name") or "")
+                            event_buffer.append(emit({"event": "row_added", "path": path, "row_id": add_res.get("id"), "label": label}))
+                        elif "rejected" in (add_res.get("error") or ""):
+                            rejected.append({"path": path, "row": row, "reason": add_res["error"]})
+                            event_buffer.append(emit({"event": "rejected", "path": path, "reason": add_res["error"]}))
+                elif isinstance(value, dict):
+                    for sub_k, sub_v in value.items():
+                        await _write(f"{path}.{sub_k}", sub_v)
+                else:
+                    await _write_leaf(path, value)
 
-        summaries.append(
-            {
-                "filename": f.filename,
+            partial_state = _normalize_partial_state(result.get("partial_state") or {})
+            for path, value in partial_state.items():
+                await _write(path, value)
+                sections_set.append(path)
+                # Flush buffered events for this section so the FE sees progress.
+                for ev in event_buffer:
+                    yield ev
+                event_buffer.clear()
+
+            derived = await force_fsi_sync(id)
+            yield emit({"event": "fsi_synced", "derived": derived, "filename": filename})
+
+            summary = {
+                "filename": filename,
                 "parser_used": result.get("parser_used", ""),
                 "sections_set": sections_set,
                 "list_rows_added": list_rows_added,
                 "fields_extracted": len(result.get("evidence") or []),
+                "writes_applied": field_writes,
                 "missing": result.get("missing") or [],
                 "rejected": rejected,
             }
-        )
+            summaries.append(summary)
+            yield emit({"event": "file_done", "summary": summary})
 
-    return {"ok": True, "summaries": summaries}
+        yield emit({"event": "done", "summaries": summaries})
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
 @router.post("/{id}/text")
@@ -171,6 +255,7 @@ async def upload_text(id: str, request: Request) -> dict[str, Any]:
             },
         }
     )
+
     async def _write(path: str, value: Any) -> None:
         if isinstance(value, list):
             for row in value:
@@ -185,8 +270,9 @@ async def upload_text(id: str, request: Request) -> dict[str, Any]:
                 {"household_id": id, "path": path, "value": value, "source_type": "user"}
             )
 
-    for path, value in (result.get("partial_state") or {}).items():
+    for path, value in (_normalize_partial_state(result.get("partial_state") or {})).items():
         await _write(path, value)
+    await force_fsi_sync(id)
     return {"ok": True, "result": result}
 
 

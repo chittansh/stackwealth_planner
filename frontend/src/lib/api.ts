@@ -20,15 +20,56 @@ export type UploadSummary = {
   error?: string;
 };
 
-export async function uploadFiles(
+export type UploadStreamEvent =
+  | { event: 'file_started'; filename: string; size: number }
+  | { event: 'parsing'; parser_hint: string; filename: string }
+  | { event: 'heartbeat'; stage: string; elapsed_ms: number; filename: string }
+  | { event: 'parsed'; parser_used: string; field_count: number; filename: string }
+  | { event: 'field'; path: string; value: unknown; ok: true }
+  | { event: 'row_added'; path: string; row_id?: string; label?: string }
+  | { event: 'rejected'; path: string; reason: string }
+  | { event: 'fsi_synced'; derived: Record<string, number>; filename: string }
+  | { event: 'file_done'; summary: UploadSummary }
+  | { event: 'done'; summaries: UploadSummary[] };
+
+/**
+ * Stream NDJSON events from the upload endpoint. Each yield is a parsed event;
+ * the caller updates UI as they arrive (live "extracted N fields..." status
+ * instead of a dead spinner).
+ */
+export async function* uploadFiles(
   id: string,
   files: File[],
-): Promise<{ ok: boolean; summaries: UploadSummary[] }> {
+): AsyncGenerator<UploadStreamEvent, void, void> {
   const fd = new FormData();
   for (const f of files) fd.append('file', f);
   const r = await fetch(`${BASE}/api/upload/${id}`, { method: 'POST', body: fd });
   if (!r.ok) throw new Error(`uploadFiles ${r.status}`);
-  return r.json();
+  if (!r.body) throw new Error('uploadFiles: empty response body');
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      try {
+        yield JSON.parse(line) as UploadStreamEvent;
+      } catch {
+        // tolerate partial / malformed lines
+      }
+    }
+  }
+  // Flush any final unterminated line.
+  const tail = buf.trim();
+  if (tail) {
+    try { yield JSON.parse(tail) as UploadStreamEvent; } catch { /* ignore */ }
+  }
 }
 
 export async function uploadText(id: string, text: string, source_type: 'user' | 'transcript' | 'md' = 'user') {

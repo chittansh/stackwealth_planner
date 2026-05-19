@@ -118,29 +118,53 @@ class _PgConn:
     def __init__(self) -> None:
         self.conn: Any = None
         self._cm: Any = None
+        self._direct: bool = False  # True when we bypassed the pool
 
     async def __aenter__(self) -> Any | None:
         pool = await _get_pool()
-        if pool is None:
+        if pool is not None:
+            try:
+                self._cm = pool.acquire(timeout=10.0)
+                self.conn = await self._cm.__aenter__()
+                return self.conn
+            except Exception as e:
+                # Pool's connections are dying mid-acquire on Fly's `.internal`
+                # mesh — fall through to a direct connect so this single
+                # request doesn't get silently routed to in-memory mode (which
+                # would lose data on a multi-machine deployment).
+                print(f"[db] pool acquire failed, falling back to direct connect: {type(e).__name__}")
+                self._cm = None
+                self.conn = None
+
+        # Direct-connect fallback. No pool, no stale-socket reuse.
+        url = _database_url()
+        if not url:
             return None
+        import asyncpg  # type: ignore
         try:
-            self._cm = pool.acquire(timeout=15.0)
-            self.conn = await self._cm.__aenter__()
+            self.conn = await asyncpg.connect(dsn=url, ssl=False, timeout=15.0)
+            self._direct = True
             return self.conn
         except Exception as e:
-            print(f"[db] pool acquire failed: {type(e).__name__}: {e!r}")
+            print(f"[db] direct connect also failed: {type(e).__name__}: {e!r}")
             self.conn = None
-            self._cm = None
+            self._direct = False
             return None
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        if self._cm is not None:
+        if self._direct and self.conn is not None:
+            try:
+                await self.conn.close(timeout=5.0)
+            except Exception:
+                pass
+        elif self._cm is not None:
             try:
                 await self._cm.__aexit__(exc_type, exc_val, exc_tb)
             except Exception:
                 pass
         self.conn = None
         self._cm = None
+        self._direct = False
 
 
 def _acquire_conn() -> _PgConn:

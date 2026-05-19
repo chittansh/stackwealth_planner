@@ -9,7 +9,7 @@ import { AssistantMessage } from './AssistantMessage';
 import { AskInput } from './AskInput';
 import { RiskGate } from './RiskGate';
 import { ChatSwitcher } from './ChatSwitcher';
-import { streamChat, uploadFiles, resetChat, hydrateChat } from '@/lib/api';
+import { streamChat, uploadFiles, resetChat, hydrateChat, type UploadSummary } from '@/lib/api';
 import { firePlanChanged } from '@/lib/prompt';
 import { Sparkles, ListTodo, Plus } from 'lucide-react';
 import { useChatStore, type StoredMsg } from '@/lib/chatStore';
@@ -166,8 +166,84 @@ export function ChatPanel({ householdId }: { householdId: string }) {
           replaceThinking(m, { kind: 'status', tag: 'upload', text: 'Reading attachments…' }),
         );
         try {
-          const r = await uploadFiles(householdId, attachments);
-          const summaries = r.summaries ?? [];
+          let currentFilename = '';
+          let fieldsLanded = 0;
+          let rowsAdded = 0;
+          let rejected = 0;
+          let lastPath = '';
+          // Buffer of completed-file summaries so we can build the agent hint
+          // and the terminal status text after the stream ends.
+          const summaries: UploadSummary[] = [];
+
+          for await (const ev of uploadFiles(householdId, attachments)) {
+            if (ev.event === 'file_started') {
+              currentFilename = ev.filename;
+              setMessages((m) =>
+                replaceTaggedStatus(m, 'upload', {
+                  kind: 'status',
+                  tag: 'upload',
+                  text: `Reading ${ev.filename}…`,
+                }),
+              );
+            } else if (ev.event === 'parsing') {
+              setMessages((m) =>
+                replaceTaggedStatus(m, 'upload', {
+                  kind: 'status',
+                  tag: 'upload',
+                  text: `Extracting from ${currentFilename}…`,
+                }),
+              );
+            } else if (ev.event === 'heartbeat') {
+              const secs = Math.round(ev.elapsed_ms / 1000);
+              setMessages((m) =>
+                replaceTaggedStatus(m, 'upload', {
+                  kind: 'status',
+                  tag: 'upload',
+                  text: `Extracting from ${currentFilename}… (${secs}s)`,
+                }),
+              );
+            } else if (ev.event === 'parsed') {
+              setMessages((m) =>
+                replaceTaggedStatus(m, 'upload', {
+                  kind: 'status',
+                  tag: 'upload',
+                  text: `Found ${ev.field_count} fields in ${currentFilename}, writing…`,
+                }),
+              );
+            } else if (ev.event === 'field') {
+              fieldsLanded += 1;
+              lastPath = ev.path;
+              setMessages((m) =>
+                replaceTaggedStatus(m, 'upload', {
+                  kind: 'status',
+                  tag: 'upload',
+                  text: `Extracted ${fieldsLanded} field${fieldsLanded === 1 ? '' : 's'}${rowsAdded ? ` + ${rowsAdded} rows` : ''} — last: ${ev.path}`,
+                }),
+              );
+              firePlanChanged();
+            } else if (ev.event === 'row_added') {
+              rowsAdded += 1;
+              lastPath = ev.path;
+              setMessages((m) =>
+                replaceTaggedStatus(m, 'upload', {
+                  kind: 'status',
+                  tag: 'upload',
+                  text: `Extracted ${fieldsLanded} field${fieldsLanded === 1 ? '' : 's'} + ${rowsAdded} row${rowsAdded === 1 ? '' : 's'}${ev.label ? ` — last: ${ev.label}` : ''}`,
+                }),
+              );
+              firePlanChanged();
+            } else if (ev.event === 'rejected') {
+              rejected += 1;
+            } else if (ev.event === 'fsi_synced') {
+              firePlanChanged();
+            } else if (ev.event === 'file_done') {
+              summaries.push(ev.summary);
+            } else if (ev.event === 'done') {
+              // Final summaries from the server (authoritative).
+              if (ev.summaries.length) summaries.splice(0, summaries.length, ...ev.summaries);
+            }
+          }
+
           uploadHint = summaries
             .map((s) =>
               s.error
@@ -176,20 +252,20 @@ export function ChatPanel({ householdId }: { householdId: string }) {
             )
             .join('\n');
           const totalFields = summaries.reduce((n, s) => n + s.fields_extracted, 0);
+          const totalRows = summaries.reduce((n, s) => n + (s.list_rows_added || 0), 0);
           const failed = summaries.some((s) => s.error || s.fields_extracted === 0);
-          uploadFailedHard = totalFields === 0;
-          if (totalFields > 0) firePlanChanged();
-          // Replace the in-flight pill with the terminal one — don't stack.
+          uploadFailedHard = totalFields === 0 && totalRows === 0;
+          if (!uploadFailedHard) firePlanChanged();
           setMessages((m) =>
             replaceTaggedStatus(m, 'upload', {
               kind: 'status',
               tag: 'upload',
               done: !uploadFailedHard,
               error: uploadFailedHard,
-              text: totalFields
-                ? `Extracted ${totalFields} field${totalFields === 1 ? '' : 's'} from ${summaries.length} file${summaries.length === 1 ? '' : 's'}`
+              text: !uploadFailedHard
+                ? `Extracted ${totalFields} field${totalFields === 1 ? '' : 's'}${totalRows ? ` + ${totalRows} row${totalRows === 1 ? '' : 's'}` : ''} from ${summaries.length} file${summaries.length === 1 ? '' : 's'}${rejected ? ` · ${rejected} skipped` : ''}`
                 : failed
-                ? `Could not extract from ${summaries.length} file${summaries.length === 1 ? '' : 's'}. Re-export as JPEG / PNG / PDF / CSV and try again.`
+                ? `Could not extract from ${summaries.length || attachments.length} file${(summaries.length || attachments.length) === 1 ? '' : 's'}. Re-export as JPEG / PNG / PDF / CSV and try again.`
                 : 'Upload processed (no fields extracted)',
             }),
           );
