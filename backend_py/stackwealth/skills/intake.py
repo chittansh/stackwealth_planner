@@ -71,13 +71,17 @@ Rules:
     * 1 crore / 1 Cr = 10000000 (ten million, i.e. ₹1,00,00,000 — exactly 100 lakhs)
     * Worked examples — VERIFY each before emitting:
         - "2.5L" → 250000 (NOT 2500000)
+        - "2.6L savings" → savings_account_balance: 260000 (NOT 2600000)
+        - "1.8L in savings" → 180000 (NOT 1800000)
         - "12L" → 1200000 (NOT 12000000)
+        - "28L in MFs" → 2800000
         - "50 lakh" → 5000000
         - "1.5 Cr" → 15000000 (NOT 150000000)
         - "2.5 Cr" → 25000000 (NOT 2500000)
         - "80k" → 80000
         - "12 LPA" annual → 100000 per month (divide by 12 if the schema field is monthly)
-    * Sanity check: 1 Cr is 100x of 1 L. If your output has 8 digits for a "lakh" value, it's WRONG. If your output has 9 digits for a "crore" value, it's WRONG by 10x.
+    * Sanity check before every emit: "L" / "lakh" → multiply by 100000 EXACTLY. NOT 1000000. A value like "2.6L" must produce 260000, NOT 2600000. If the original text mentions a "lakh" / "L" value and your output has more than 6 digits for amounts < 10L, you 10x'd it — re-multiply by 0.1.
+    * Sanity check: 1 Cr is 100x of 1 L. If your output has 9 digits for a "crore" value, it's WRONG by 10x.
 - DOB format: DD-MM-YYYY (re-format "15-Aug-1997" → "15-08-1997"). If only an age is mentioned ("im 32"), set `freedom_score_inputs.age` to that integer. Don't fabricate a DOB.
 - Age: ALWAYS emit `freedom_score_inputs.age` when an age is mentioned in any form ("32 years old", "age 45", "im 28", "I'm in my 40s" → 40).
 - City type: Mumbai/Delhi/Kolkata/Chennai/Bengaluru/Hyderabad/Pune/Ahmedabad = "Metro"; else "Non-metro".
