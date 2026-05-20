@@ -12,6 +12,7 @@ import { firePlanChanged } from '@/lib/prompt';
 const VIEWS = [
   { value: 'net-worth', label: 'Net Worth' },
   { value: 'cash-flow', label: 'Cash Flow' },
+  { value: 'risk', label: 'Risk & Planning' },
   { value: 'allocation', label: 'Allocation' },
   { value: 'goals', label: 'Goals' },
   { value: 'insurance', label: 'Insurance' },
