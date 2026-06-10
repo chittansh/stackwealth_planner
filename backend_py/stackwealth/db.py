@@ -333,6 +333,26 @@ async def list_all_households() -> list[str]:
         return [r["id"] for r in rows]
 
 
+async def list_households_page(limit: int, offset: int) -> tuple[list[str], int]:
+    """Paginated household IDs — `(ids_for_page, total_count)`.
+
+    Far faster than `list_all_households()` because Postgres handles the
+    ORDER BY + LIMIT + OFFSET server-side, and the caller only fetches plans
+    for the page they need (not the whole table)."""
+    async with _acquire_conn() as conn:
+        if conn is None:
+            ids = list(_memory.keys())
+            return ids[offset : offset + limit], len(ids)
+        # Two-roundtrip — paginated rows + total. Both cheap.
+        rows = await conn.fetch(
+            "SELECT id FROM households ORDER BY updated_at DESC LIMIT $1 OFFSET $2",
+            limit,
+            offset,
+        )
+        total = await conn.fetchval("SELECT COUNT(*) FROM households")
+        return [r["id"] for r in rows], int(total or 0)
+
+
 def seed_memory(plan: PlanState) -> None:
     """Test helper — bypasses the DB. Only meaningful in in-memory mode."""
     _memory[plan.household_id] = plan

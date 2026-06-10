@@ -18,6 +18,7 @@ import { PlanBlocks } from './PlanBlocks';
 import { Scenarios } from './Scenarios';
 import { ScenarioChips } from './ScenarioChips';
 import { RiskBanner } from './RiskBanner';
+import { CalculationsChip } from './CalculationsChip';
 
 export function CanvasRouter({
   householdId,
@@ -87,7 +88,10 @@ export function CanvasRouter({
   return (
     <div className="flex flex-col">
       <Headline householdId={householdId} plan={plan} />
-      <RiskBanner plan={plan} />
+      <div className="mt-3 flex items-center gap-2 flex-wrap">
+        <RiskBanner plan={plan} />
+        <CalculationsChip householdId={householdId} />
+      </div>
 
       {view === 'net-worth' && (
         <>

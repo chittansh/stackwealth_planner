@@ -11,6 +11,7 @@ from ..db import get_plan, save_plan
 from ..skills.allocate import compute_allocation
 from ..skills.allocate import recommend as allocate_recommend
 from ..skills.cashflow import project as cashflow_project
+from ..skills.cfp import run_cfp
 from ..skills.debt import paydown as debt_paydown
 from ..skills.freedom import score as freedom_score
 from ..skills.risk import assess as risk_assess
@@ -108,3 +109,14 @@ async def debt(id: str) -> JSONResponse:
         plan.last_updated_at = datetime.now(timezone.utc).isoformat()
         await save_plan(plan)
     return _json(r)
+
+
+@router.post("/cfp/{id}")
+@router.get("/cfp/{id}")
+async def cfp(id: str) -> JSONResponse:
+    """Direct CFP-engine endpoint — bypasses the agent. Returns the full
+    Excel-faithful plan: summary, goal_blocks (with computation_trace per
+    goal), retirement, insurance, yoy_cashflow, and the top-level
+    computation_trace. Use this for quick verification or for non-chat
+    surfaces that want the math without the agent in the loop."""
+    return _json(await run_cfp(id))
