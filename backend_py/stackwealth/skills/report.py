@@ -28,6 +28,7 @@ from typing import Any
 from .. import config
 from ..db import get_plan
 from ..types import PlanState
+from . import cfp as cfp_skill
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -1005,6 +1006,827 @@ def _build_html(plan: PlanState) -> str:
 </body></html>"""
 
 
+# ── Sandeep-style builder ─────────────────────────────────────────────────
+# Mirrors `Sandeep_Hongamath_Financial_Plan_v1.docx` section-by-section.
+# 9 sections; same headers, same tables, same field labels. Every numeric
+# cell pulls from PlanState or from the CFP engine (Excel-faithful).
+
+
+def _build_sandeep_html(plan: PlanState) -> str:
+    cfp = cfp_skill.compute_cfp(plan)
+    sections = [
+        _sandeep_cover(plan, cfp),
+        _sandeep_s1_profile(plan),
+        _sandeep_s2_cashflow(plan),
+        _sandeep_s3_networth(plan),
+        _sandeep_s4_goals(plan, cfp),
+        _sandeep_s5_strategy(plan, cfp),
+        _sandeep_s6_risk(plan, cfp),
+        _sandeep_s7_tax(plan),
+        _sandeep_s8_future(plan, cfp),
+        _sandeep_s9_roadmap(plan, cfp),
+    ]
+    name = plan.personal_details.full_name or plan.household_id
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<title>Comprehensive Financial Plan — {_h(name)}</title>
+<style>{CSS}</style>
+</head><body>
+{''.join(sections)}
+</body></html>"""
+
+
+def _sandeep_cover(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
+    pd = plan.personal_details
+    fsi = plan.freedom_score_inputs
+    nw = plan.computed.net_worth
+    persons = plan.assumptions.persons
+    name = pd.full_name or plan.household_id
+    spouse = persons[1].name if len(persons) > 1 and persons[1].name else None
+    headline = f"MR. {name.upper()}" + (f" & MRS. {spouse.upper()}" if spouse else "")
+    today = datetime.now().strftime("%B %Y")
+    city = pd.city_of_residence or ""
+    retire_year = (datetime.now().year + max(0, (pd.retirement_age_target or 60) - (fsi.age or 30)))
+
+    monthly_income = fsi.monthly_income or 0
+    monthly_expenses = fsi.monthly_expenses or 0
+    monthly_emi = fsi.monthly_emi or 0
+    surplus_gross = monthly_income - monthly_expenses - monthly_emi
+    return f"""<section class="page cover">
+  <p class="brand" style="text-align:center;">Stack Wealth</p>
+  <h1 style="text-align:center; font-size:24pt;">COMPREHENSIVE FINANCIAL PLAN</h1>
+  <p class="sub" style="text-align:center;">A Forward-Looking Wealth & Life Planning Report</p>
+
+  <div style="text-align:center; margin: 12mm 0 6mm;">
+    <p class="muted">Prepared For</p>
+    <p style="font-size: 14pt; font-weight: 600; letter-spacing: 0.03em; margin: 2mm 0;">{_h(headline)}</p>
+    <p class="muted">{_h(city)}  |  {_h(today)}</p>
+  </div>
+
+  <h3>Headline</h3>
+  <table>
+    <thead><tr>
+      <th>Monthly Income</th>
+      <th>Monthly Surplus</th>
+      <th>Net Worth</th>
+      <th>Retirement Target</th>
+    </tr></thead>
+    <tbody><tr>
+      <td class="num">{_fmt_inr(monthly_income)}</td>
+      <td class="num">{_fmt_inr(surplus_gross)}</td>
+      <td class="num">{_fmt_lakhs(nw.total)}</td>
+      <td>Age {pd.retirement_age_target or 60} ({retire_year})</td>
+    </tr></tbody>
+  </table>
+
+  <p class="muted cover-foot">Sections that follow: Client Profiling · Cash Flow Analysis · Net Worth Assessment ·
+  Goal-Based Planning · Investment Strategy · Risk Management · Tax Efficiency ·
+  Future-Proofing & Scenario Analysis · Execution Roadmap.</p>
+</section>"""
+
+
+def _sandeep_s1_profile(plan: PlanState) -> str:
+    """SECTION 1 — Client Profiling."""
+    pd = plan.personal_details
+    persons = plan.assumptions.persons
+    fsi = plan.freedom_score_inputs
+    risk = plan.computed.risk_profile
+
+    p1 = persons[0] if persons else None
+    p2 = persons[1] if len(persons) > 1 else None
+    fsname_p1 = p1.name if p1 else (pd.full_name or "—")
+    fsname_p2 = p2.name if p2 else "—"
+    p1_age = int((datetime.now().year) - int((p1.date_of_birth or "01-01-1990")[-4:])) if p1 and p1.date_of_birth else (fsi.age or "—")
+    p2_age = int((datetime.now().year) - int((p2.date_of_birth or "01-01-1990")[-4:])) if p2 and p2.date_of_birth else "—"
+    retire_year = (datetime.now().year + max(0, (pd.retirement_age_target or 60) - (fsi.age or 30)))
+    years_to_retire = max(0, (pd.retirement_age_target or 60) - (fsi.age or 30))
+
+    children_descr = []
+    for person in persons[2:]:
+        a = "—"
+        if person.date_of_birth:
+            try:
+                a = str(int((datetime.now().year) - int(person.date_of_birth[-4:])))
+            except Exception:
+                pass
+        children_descr.append(f"{person.name} (Age {a})")
+    children_cell = " & ".join(children_descr) if children_descr else (
+        f"{pd.number_of_children} children" if pd.number_of_children else "None"
+    )
+
+    profile_table = f"""
+    <table>
+      <thead><tr><th>Parameter</th><th>Client</th><th>Spouse</th></tr></thead>
+      <tbody>
+        <tr><td>Full Name</td><td>{_h(fsname_p1)}</td><td>{_h(fsname_p2)}</td></tr>
+        <tr><td>Date of Birth</td><td>{_h((p1 and p1.date_of_birth) or '—')}</td><td>{_h((p2 and p2.date_of_birth) or '—')}</td></tr>
+        <tr><td>Current Age</td><td>{p1_age} years</td><td>{p2_age} years</td></tr>
+        <tr><td>Occupation</td><td>{_h(pd.occupation or '—')}</td><td>—</td></tr>
+        <tr><td>City</td><td>{_h(pd.city_of_residence or '—')}</td><td>{_h(pd.city_of_residence or '—')}</td></tr>
+        <tr><td>Marital Status</td><td>{_h(pd.marital_status or '—')}</td><td>{_h(pd.marital_status or '—')}</td></tr>
+        <tr><td>Children</td><td>{_h(children_cell)}</td><td>{_h(children_cell)}</td></tr>
+        <tr><td>Dependents</td><td>{_h(pd.dependents or '—')}</td><td>{_h(pd.dependents or '—')}</td></tr>
+        <tr><td>Retirement Age Target</td><td>{pd.retirement_age_target or 60} years (Year {retire_year})</td><td>{pd.retirement_age_target or 60} years (Year {retire_year})</td></tr>
+        <tr><td>Years to Retirement</td><td>{years_to_retire} years</td><td>{years_to_retire} years</td></tr>
+      </tbody>
+    </table>"""
+
+    age = fsi.age or 30
+    if age < 30:
+        stage = "Early-Career Accumulation"
+        stage_text = "You are in the earliest, highest-leverage phase of compounding. Habits formed here — automated SIPs, term insurance, an emergency fund — pay decades of dividends."
+    elif age < 45:
+        stage = "Peak Accumulation Phase"
+        stage_text = f"At {age}, with {years_to_retire} years to a retirement target of {pd.retirement_age_target or 60}, every investment decision carries high urgency. This phase is characterised by maximum income, multiple competing financial goals, and a need for disciplined, goal-linked investing."
+    elif age < 55:
+        stage = "Pre-Retirement Consolidation"
+        stage_text = "Focus shifts from accumulation to consolidation — de-risking goal corpora as they approach, paying down high-interest debt, locking in insurance, and stress-testing the retirement plan."
+    else:
+        stage = "Retirement Transition"
+        stage_text = "The corpus is now load-bearing. Withdrawal strategy, sequence-of-returns risk, and healthcare cover dominate."
+    life_stage_html = f"<p>{_h(fsname_p1)} is in the <strong>{_h(stage)}</strong> — {_h(stage_text)}</p>"
+
+    if risk:
+        rp_summary = risk.recommended_profile
+        rp_rows = f"""
+        <tr><td>Financial Risk Capacity</td><td>{risk.capacity_score:.0f} / 100 — {_h(risk.capacity_profile)}</td><td>Binding cap: {_h((risk.capacity_binding_cap or '').replace('_', ' '))}</td></tr>
+        <tr><td>Behavioural Risk Tolerance</td><td>{risk.willingness_score:.0f} / 100 — {_h(risk.willingness_profile)}</td><td>Raw willingness {risk.willingness_raw_score:.0f}</td></tr>
+        <tr><td>Goal-Based Risk</td><td>{risk.need_score:.0f} / 100 — {_h(risk.need_profile)}</td><td>{_h(risk.need_primary_goal or 'No driver goal yet')}</td></tr>
+        <tr><td>Overall Profile</td><td><strong>{_h(rp_summary)}</strong></td><td>Recommended score {risk.recommended_score:.0f}, prudent ceiling {risk.prudent_ceiling:.0f}</td></tr>
+        """
+    else:
+        rp_rows = '<tr><td colspan="3" class="muted">Risk profile not yet computed — answer 3 questions in chat to populate.</td></tr>'
+
+    return f"""<section class="page">
+  <h2>SECTION 1 — CLIENT PROFILING</h2>
+  <h3>1.1  Personal & Professional Overview</h3>
+  {profile_table}
+
+  <h3>1.2  Life Stage Classification</h3>
+  {life_stage_html}
+
+  <h3>1.3  Risk Assessment</h3>
+  <table>
+    <thead><tr><th>Risk Dimension</th><th>Assessment</th><th>Implication</th></tr></thead>
+    <tbody>{rp_rows}</tbody>
+  </table>
+</section>"""
+
+
+def _sandeep_s2_cashflow(plan: PlanState) -> str:
+    """SECTION 2 — Cash Flow Analysis."""
+    income = plan.income_details
+    expenses = plan.monthly_expenses
+    invest = plan.monthly_investments
+    fsi = plan.freedom_score_inputs
+
+    def _row(label: str, monthly: float | None, *, group_total: bool = False) -> str:
+        if not monthly:
+            return ""
+        annual = (monthly or 0) * 12
+        klass = ' style="font-weight:600;background:#f4f4f5;"' if group_total else ""
+        return f'<tr{klass}><td>{_h(label)}</td><td class="num">{_fmt_inr(monthly)}</td><td class="num">{_fmt_inr(annual)}</td></tr>'
+
+    income_rows = "".join([
+        _row("Salary (In-Hand) — Client", income.client_salary_in_hand),
+        _row("Salary (In-Hand) — Spouse", income.spouse_salary_in_hand),
+        _row("Business Income — Client", income.client_business_income),
+        _row("Business Income — Spouse", income.spouse_business_income),
+        _row("Rental Income — Client", income.client_rental_income),
+        _row("Rental Income — Spouse", income.spouse_rental_income),
+        _row("Other Income — Client", income.client_other_income),
+        _row("Other Income — Spouse", income.spouse_other_income),
+    ])
+    monthly_income_total = fsi.monthly_income or 0
+    income_rows += _row("TOTAL INCOME", monthly_income_total, group_total=True)
+
+    exp_rows = "".join([
+        _row("Home Loan EMI / Rent", expenses.rent_or_emi),
+        _row("School Fees", expenses.school_fees),
+        _row("Household Expenses", expenses.household_expenses),
+        _row("Groceries", expenses.groceries),
+        _row("Utilities (Phone, Internet, OTT)", expenses.utilities),
+        _row("Travel / Lifestyle / Dining", expenses.travel_or_lifestyle),
+        _row("Medical / Healthcare", expenses.medical),
+        _row("Insurance Premium", expenses.insurance_premium),
+        _row("Other EMIs", expenses.other_emis),
+    ])
+    monthly_exp_total = fsi.monthly_expenses or 0
+    monthly_emi_total = fsi.monthly_emi or 0
+    exp_rows += _row("TOTAL PURE LIVING EXPENSES", monthly_exp_total + monthly_emi_total, group_total=True)
+
+    inv_rows = "".join([
+        _row("Mutual Fund SIPs", invest.mutual_fund_sip),
+        _row("PPF", invest.ppf),
+        _row("NPS", invest.nps),
+        _row("RD", invest.rd),
+        _row("Direct Equity", invest.direct_equity),
+        _row("Insurance Premium (savings)", invest.insurance_premium),
+        _row("Other", invest.other),
+    ])
+    invest_total = sum([
+        invest.mutual_fund_sip or 0, invest.ppf or 0, invest.nps or 0,
+        invest.rd or 0, invest.direct_equity or 0,
+        invest.insurance_premium or 0, invest.other or 0,
+    ])
+    if invest_total > 0:
+        inv_rows += _row("Investments Sub-Total", invest_total, group_total=True)
+
+    total_outflow = monthly_exp_total + monthly_emi_total + invest_total
+    gross_surplus = monthly_income_total - monthly_exp_total - monthly_emi_total
+    net_surplus = monthly_income_total - total_outflow
+
+    summary = f"""
+    <tr style="font-weight:600;background:#f4f4f5;"><td>TOTAL OUTFLOW</td><td class="num">{_fmt_inr(total_outflow)}</td><td class="num">{_fmt_inr(total_outflow * 12)}</td></tr>
+    <tr style="font-weight:600;"><td>GROSS SURPLUS (before investments)</td><td class="num">{_fmt_inr(gross_surplus)}</td><td class="num">{_fmt_inr(gross_surplus * 12)}</td></tr>
+    <tr style="font-weight:600;"><td>NET SURPLUS (after current investments)</td><td class="num">{_fmt_inr(net_surplus)}</td><td class="num">{_fmt_inr(net_surplus * 12)}</td></tr>
+    """
+
+    gross_rate = (gross_surplus / monthly_income_total) if monthly_income_total else 0
+    invest_rate = ((invest.mutual_fund_sip or 0) / monthly_income_total) if monthly_income_total else 0
+    emi_rate = (monthly_emi_total / monthly_income_total) if monthly_income_total else 0
+
+    return f"""<section class="page">
+  <h2>SECTION 2 — CASH FLOW ANALYSIS</h2>
+  <h3>2.1  Monthly Income vs Expenses — Detailed Breakdown</h3>
+  <table>
+    <thead><tr><th>Category</th><th class="num">Monthly (₹)</th><th class="num">Annual (₹)</th></tr></thead>
+    <tbody>
+      {income_rows}
+      <tr><td colspan="3"></td></tr>
+      {exp_rows}
+      {('<tr><td colspan="3"></td></tr>' + inv_rows) if invest_total > 0 else ''}
+      <tr><td colspan="3"></td></tr>
+      {summary}
+    </tbody>
+  </table>
+
+  <h3>2.2  Savings Rate Analysis</h3>
+  <table>
+    <thead><tr><th>Metric</th><th class="num">Current</th><th>Target / Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Gross Savings Rate</td><td class="num">{_fmt_pct(gross_rate * 100)}</td><td>Target: 50%+ for peak-accumulation households</td></tr>
+      <tr><td>Equity Investment Rate (SIP only)</td><td class="num">{_fmt_pct(invest_rate * 100)}</td><td>Lift toward 30-40% via goal-linked SIPs</td></tr>
+      <tr><td>EMI as % of Income</td><td class="num">{_fmt_pct(emi_rate * 100)}</td><td>Below 35% is healthy</td></tr>
+      <tr><td>Net Surplus (Monthly)</td><td class="num">{_fmt_inr(net_surplus)}</td><td>Remaining capacity to deploy</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.3  Expense Review — Optimisation Opportunities</h3>
+  {_sandeep_expense_opportunities(plan)}
+</section>"""
+
+
+def _sandeep_expense_opportunities(plan: PlanState) -> str:
+    """Surface the top 3-5 expense lines as 'observation' candidates."""
+    e = plan.monthly_expenses
+    candidates = []
+    if e.travel_or_lifestyle and e.travel_or_lifestyle >= 15000:
+        candidates.append(("Travel / Lifestyle", e.travel_or_lifestyle, "Annual budget — review whether all of it is essential"))
+    if e.utilities and e.utilities >= 8000:
+        candidates.append(("Utilities", e.utilities, "Audit subscriptions; OTT/phone packages often have bundled savings"))
+    if e.other_emis and e.other_emis >= 30000:
+        candidates.append(("Other EMIs", e.other_emis, "Check rates — refinancing or prepayment may free up surplus"))
+    if e.medical and e.medical >= 15000:
+        candidates.append(("Medical", e.medical, "Clarify if chronic; enhance health insurance to reduce out-of-pocket"))
+    if e.rent_or_emi and e.rent_or_emi >= 80000:
+        candidates.append(("Rent / Home Loan EMI", e.rent_or_emi, "Largest fixed outflow — track tenure and prepayment opportunities"))
+    if not candidates:
+        return '<p class="muted">No outlier expense lines flagged. The household is operating on a lean cost base.</p>'
+    rows = "".join(
+        f'<tr><td>{_h(label)}</td><td class="num">{_fmt_inr(amt)}</td><td>{_h(note)}</td></tr>'
+        for label, amt, note in candidates
+    )
+    return f"""<table>
+    <thead><tr><th>Expense Head</th><th class="num">Monthly (₹)</th><th>Observation</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>"""
+
+
+def _sandeep_s3_networth(plan: PlanState) -> str:
+    """SECTION 3 — Net Worth Assessment."""
+    nw = plan.computed.net_worth
+    mf_total = sum((h.current_value or 0) for h in plan.mutual_funds)
+    eq_total = sum((h.current_value or 0) for h in plan.equity_stocks)
+    fi_total = sum((h.current_value or 0) for h in plan.fixed_income)
+    liquid_total = _sum_optionals(plan.liquid_capital)
+    assets_total = mf_total + eq_total + fi_total + liquid_total
+    if assets_total == 0:
+        assets_total = nw.assets_total or 0
+
+    def _pct(val: float) -> str:
+        if assets_total <= 0:
+            return "—"
+        return f"{(val / assets_total * 100):.1f}%"
+
+    asset_rows = []
+    for mf in plan.mutual_funds:
+        v = mf.current_value or 0
+        if v > 0:
+            asset_rows.append((mf.fund_name or "Mutual Fund", v, "Equity – MF"))
+    for eq in plan.equity_stocks:
+        v = eq.current_value or 0
+        if v > 0:
+            asset_rows.append((eq.stock_name or "Direct Equity", v, "Direct Equity"))
+    for fi in plan.fixed_income:
+        v = fi.current_value or 0
+        if v > 0:
+            asset_rows.append((fi.instrument or "Fixed Income", v, "Debt"))
+    if liquid_total > 0:
+        asset_rows.append(("Savings + Idle Cash", liquid_total, "Liquid"))
+
+    asset_html_rows = "".join(
+        f'<tr><td>{_h(label)}</td><td class="num">{_fmt_inr(v)}</td><td class="num">{_pct(v)}</td><td>{_h(kind)}</td></tr>'
+        for label, v, kind in asset_rows
+    )
+    asset_html_rows += f'<tr style="font-weight:600;background:#f4f4f5;"><td>TOTAL ASSETS</td><td class="num">{_fmt_inr(assets_total)}</td><td class="num">100%</td><td></td></tr>'
+
+    loans = plan.loans_liabilities
+    liab_rows = []
+    for key, name in (("home_loan", "Home Loan"), ("car_loan", "Car Loan"),
+                      ("personal_loan", "Personal Loan"), ("credit_card_dues", "Credit Card Dues")):
+        block = getattr(loans, key, None)
+        if block and (block.outstanding_amount or 0) > 0:
+            liab_rows.append(
+                f'<tr><td>{_h(name)}</td><td class="num">{_fmt_inr(block.outstanding_amount)}</td>'
+                f'<td class="num">{_fmt_inr(block.emi or 0)}</td>'
+                f'<td class="num">{block.interest_rate or "—"}%</td>'
+                f'<td>{block.tenure_left or "—"} yrs</td></tr>'
+            )
+    total_liab = nw.debts_total + nw.secured_debts
+    liab_rows.append(
+        f'<tr style="font-weight:600;background:#f4f4f5;"><td>TOTAL LIABILITIES</td>'
+        f'<td class="num">{_fmt_inr(total_liab)}</td><td></td><td></td><td></td></tr>'
+    )
+    liab_html = "".join(liab_rows) if liab_rows else '<tr><td colspan="5" class="muted">No liabilities recorded.</td></tr>'
+
+    mf_rows = "".join(
+        f'<tr><td>{_h(mf.fund_name or "Fund")}</td>'
+        f'<td>{_h((getattr(mf, "category", "") or "—"))}</td>'
+        f'<td>{_h(getattr(mf, "plan_type", "Direct") or "Direct")}</td>'
+        f'<td class="num">{_fmt_inr(mf.sip_amount or 0)}</td>'
+        f'<td class="num">{_fmt_inr(mf.current_value or 0)}</td>'
+        f'<td>{"Switch to Direct" if "regular" in str(getattr(mf, "plan_type", "") or "").lower() else "Keep"}</td></tr>'
+        for mf in plan.mutual_funds
+    )
+    if not mf_rows:
+        mf_rows = '<tr><td colspan="6" class="muted">No mutual funds recorded — start with index funds or a flexi-cap.</td></tr>'
+
+    nw_summary = f"""
+    <table>
+      <tbody>
+        <tr><td>Total Assets</td><td class="num">{_fmt_inr(assets_total)}</td></tr>
+        <tr><td>Total Liabilities</td><td class="num">({_fmt_inr(total_liab)})</td></tr>
+        <tr style="font-weight:600;background:#f4f4f5;"><td>NET WORTH</td><td class="num">{_fmt_inr(nw.total)}</td></tr>
+        <tr><td>Financial Assets (excl. Real Estate)</td><td class="num">{_fmt_inr(mf_total + eq_total + fi_total + liquid_total)}</td></tr>
+      </tbody>
+    </table>"""
+
+    return f"""<section class="page">
+  <h2>SECTION 3 — NET WORTH ASSESSMENT</h2>
+  <h3>3.1  Asset Inventory ({datetime.now().strftime("%B %Y")})</h3>
+  <table>
+    <thead><tr><th>Asset</th><th class="num">Current Value (₹)</th><th class="num">% of Assets</th><th>Type</th></tr></thead>
+    <tbody>{asset_html_rows}</tbody>
+  </table>
+
+  <h3>3.2  Liabilities</h3>
+  <table>
+    <thead><tr><th>Liability</th><th class="num">Outstanding (₹)</th><th class="num">EMI (₹)</th><th class="num">Rate</th><th>Tenure</th></tr></thead>
+    <tbody>{liab_html}</tbody>
+  </table>
+
+  <h3>3.3  Mutual Fund Portfolio — Quality Audit</h3>
+  <table>
+    <thead><tr><th>Fund</th><th>Category</th><th>Plan</th><th class="num">SIP (₹)</th><th class="num">Current Value (₹)</th><th>Action</th></tr></thead>
+    <tbody>{mf_rows}</tbody>
+  </table>
+
+  <h3>Net Worth Summary</h3>
+  {nw_summary}
+</section>"""
+
+
+def _sandeep_s4_goals(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
+    """SECTION 4 — Goal-Based Planning."""
+    intro = ("<p>All goals inflation-adjusted using the firm's CFP table: General 7%, Education 10%, "
+             "Wedding 9%, Medical 12%, Real Estate / Vacation 9%. Investment returns use the glide-path "
+             "effective return — equity for the early years de-risking toward debt as the goal approaches. "
+             "All SIP calculations use Excel-faithful <code>PMT(rate/12, n×12, 0, −FV_gap)</code>.</p>")
+
+    overview_rows = "".join(
+        f"<tr><td>{_h(g['goal_name'])}</td>"
+        f"<td>{g['target_year']} ({g['years_to_go']} yrs)</td>"
+        f'<td class="num">{_fmt_lakhs(g["today_cost"])}</td>'
+        f'<td class="num">{_fmt_lakhs(g["future_value_needed"])} @ {g["inflation_used"]*100:.0f}%</td>'
+        f'<td>SIP ₹{g["required_sip_monthly"]:,}/mo @ {g["effective_return"]*100:.1f}%</td></tr>'
+        for g in cfp.goal_blocks
+    )
+    if not overview_rows:
+        overview_rows = '<tr><td colspan="5" class="muted">No goals set yet — add one in chat.</td></tr>'
+
+    detail_blocks = []
+    for i, g in enumerate(cfp.goal_blocks):
+        h_label = f"4.{i+2}  {_h(g['goal_name'])} ({g['target_year']})"
+        trace_rows = "".join(
+            f'<tr><td>{_h(s["label"])}</td><td>{_h(s["formula"])}</td>'
+            f'<td class="num">{_fmt_trace_value(s["value"], s["unit"])}</td></tr>'
+            for s in g["computation_trace"]
+        )
+        detail_blocks.append(f"""
+        <h3>{h_label}</h3>
+        <table>
+          <tbody>
+            <tr><td>Current Today's Cost</td><td class="num">{_fmt_inr(g['today_cost'])}</td></tr>
+            <tr><td>Inflation Applied</td><td class="num">{g['inflation_used']*100:.1f}% p.a.</td></tr>
+            <tr><td>Inflation-Adjusted Cost in {g['target_year']}</td><td class="num">{_fmt_inr(g['future_value_needed'])}</td></tr>
+            <tr><td>Existing Assets Allocated (FV)</td><td class="num">{_fmt_inr(g['allocated_today_total'])} today</td></tr>
+            <tr><td>FV Gap to Cover via SIP</td><td class="num">{_fmt_inr(g['fv_gap'])}</td></tr>
+            <tr><td>Glide-path Effective Return</td><td class="num">{g['effective_return']*100:.1f}% (horizon {g['years_to_go']}y)</td></tr>
+            <tr style="font-weight:600;background:#f4f4f5;"><td>Required Monthly SIP</td><td class="num">₹{g['required_sip_monthly']:,}/month</td></tr>
+          </tbody>
+        </table>
+        <p class="muted" style="margin-top:1mm;">Step-by-step (Excel-faithful):</p>
+        <table>
+          <thead><tr><th>Step</th><th>Formula</th><th class="num">Value</th></tr></thead>
+          <tbody>{trace_rows}</tbody>
+        </table>
+        """)
+
+    # Retirement block
+    r = cfp.retirement
+    r_trace = "".join(
+        f'<tr><td>{_h(s["label"])}</td><td>{_h(s["formula"])}</td>'
+        f'<td class="num">{_fmt_trace_value(s["value"], s["unit"])}</td></tr>'
+        for s in r["computation_trace"]
+    )
+    retirement_block = f"""
+    <h3>4.{len(cfp.goal_blocks)+2}  Retirement Goal — Detailed Calculation</h3>
+    <table>
+      <tbody>
+        <tr><td>Years to Retirement</td><td class="num">{r['years_to_retire']}</td></tr>
+        <tr><td>Post-Retirement Horizon</td><td class="num">{r['post_retire_years']} years</td></tr>
+        <tr><td>Annual Expenses at Retirement (inflation-adjusted)</td><td class="num">{_fmt_inr(r['annual_expenses_at_retirement'])}</td></tr>
+        <tr><td>Real Return Used (Post-Retire)</td><td class="num">{r['real_return_used']*100:.2f}%</td></tr>
+        <tr style="font-weight:600;background:#f4f4f5;"><td>Required Retirement Corpus</td><td class="num">{_fmt_inr(r['corpus_required'])}</td></tr>
+      </tbody>
+    </table>
+    <p class="muted" style="margin-top:1mm;">Step-by-step (Excel-faithful):</p>
+    <table>
+      <thead><tr><th>Step</th><th>Formula</th><th class="num">Value</th></tr></thead>
+      <tbody>{r_trace}</tbody>
+    </table>"""
+
+    return f"""<section class="page">
+  <h2>SECTION 4 — GOAL-BASED PLANNING</h2>
+  {intro}
+
+  <h3>4.1  Goal Overview</h3>
+  <table>
+    <thead><tr><th>Goal</th><th>Timeline</th><th class="num">Today's Cost</th><th class="num">Inflation-Adj. Need</th><th>Strategy</th></tr></thead>
+    <tbody>{overview_rows}</tbody>
+  </table>
+
+  {''.join(detail_blocks)}
+  {retirement_block}
+</section>"""
+
+
+def _fmt_trace_value(value: Any, unit: str) -> str:
+    if isinstance(value, str):
+        return _h(value)
+    try:
+        v = float(value)
+    except Exception:
+        return _h(str(value))
+    if unit == "%":
+        return f"{v*100:.2f}%"
+    if unit == "years":
+        return f"{v:.1f}y"
+    return _fmt_inr(v)
+
+
+def _sandeep_s5_strategy(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
+    """SECTION 5 — Investment Strategy."""
+    al = plan.computed.allocation
+    if al:
+        rec = al.recommended_allocation
+        eq_split = al.recommended_equity_split
+        target_table = f"""
+        <table>
+          <thead><tr><th>Asset Class</th><th class="num">Target %</th><th>Rationale</th></tr></thead>
+          <tbody>
+            <tr><td>Equity — Large Cap</td><td class="num">{eq_split.large * rec.equity / 100:.0f}%</td><td>Core stability via index funds</td></tr>
+            <tr><td>Equity — Mid Cap</td><td class="num">{eq_split.mid * rec.equity / 100:.0f}%</td><td>Growth engine for the long horizon</td></tr>
+            <tr><td>Equity — Small Cap</td><td class="num">{eq_split.small * rec.equity / 100:.0f}%</td><td>Higher risk/reward — 5y+ horizon only</td></tr>
+            <tr><td>Debt</td><td class="num">{rec.debt}%</td><td>Provides stability + drawdown buffer</td></tr>
+            <tr><td>Gold</td><td class="num">{rec.gold}%</td><td>Inflation hedge; prefer SGB over physical</td></tr>
+            <tr><td>Cash / Liquid</td><td class="num">{rec.cash}%</td><td>Emergency liquidity</td></tr>
+          </tbody>
+        </table>
+        <p class="muted">Strategic anchor: {_h(al.investor_risk_band)}. Tactical regime: {_h(al.tactical_regime_label)} (signal {al.tactical_regime_score:+d}).</p>"""
+    else:
+        target_table = '<p class="muted">Allocation not yet computed. Answer 3 risk questions in chat to unlock.</p>'
+
+    total_sip = sum(g["required_sip_monthly"] for g in cfp.goal_blocks)
+    if total_sip > 0 and al:
+        rec = al.recommended_allocation
+        sip_rows = f"""
+        <tr><td>Nifty 50 Index Fund</td><td>Large Cap</td><td class="num">₹{int(total_sip * (al.recommended_equity_split.large * rec.equity / 100) / 100):,}</td><td>Direct</td></tr>
+        <tr><td>Parag Parikh Flexi Cap / Mid Cap blend</td><td>Mid Cap</td><td class="num">₹{int(total_sip * (al.recommended_equity_split.mid * rec.equity / 100) / 100):,}</td><td>Direct</td></tr>
+        <tr><td>Nippon India Small Cap</td><td>Small Cap</td><td class="num">₹{int(total_sip * (al.recommended_equity_split.small * rec.equity / 100) / 100):,}</td><td>Direct</td></tr>
+        <tr><td>Short-term Debt Fund / PPF Top-up</td><td>Debt</td><td class="num">₹{int(total_sip * rec.debt / 100):,}</td><td>Direct</td></tr>
+        <tr style="font-weight:600;background:#f4f4f5;"><td>TOTAL MONTHLY SIP</td><td></td><td class="num">₹{total_sip:,}</td><td></td></tr>"""
+    else:
+        sip_rows = '<tr><td colspan="4" class="muted">Set goals + risk profile to populate the recommended SIP table.</td></tr>'
+
+    actions = []
+    for mf in plan.mutual_funds:
+        plan_type = (getattr(mf, "plan_type", "") or "").lower()
+        if "regular" in plan_type:
+            actions.append(f"Switch <strong>{_h(mf.fund_name or 'Fund')}</strong> from Regular → Direct (use LTCG headroom).")
+    if len(plan.mutual_funds) > 6:
+        actions.append(f"Consolidate — you hold {len(plan.mutual_funds)} funds; 5-6 is plenty.")
+    if not actions:
+        actions = ["Portfolio looks clean. Continue current SIPs and step them up annually with salary increments."]
+    actions_html = "".join(f"<li>{a}</li>" for a in actions)
+
+    return f"""<section class="page">
+  <h2>SECTION 5 — INVESTMENT STRATEGY</h2>
+
+  <h3>5.1  Recommended Asset Allocation</h3>
+  {target_table}
+
+  <h3>5.2  Recommended Monthly SIP Portfolio</h3>
+  <table>
+    <thead><tr><th>Fund</th><th>Category</th><th class="num">SIP (₹)</th><th>Plan</th></tr></thead>
+    <tbody>{sip_rows}</tbody>
+  </table>
+
+  <h3>5.3  Portfolio Consolidation Actions</h3>
+  <ul>{actions_html}</ul>
+
+  <h3>5.4  Expected Returns & Scenario Analysis</h3>
+  {_sandeep_scenarios(plan)}
+</section>"""
+
+
+def _sandeep_scenarios(plan: PlanState) -> str:
+    mc = plan.computed.monte_carlo
+    if not mc:
+        return '<p class="muted">Run Monte Carlo via the agent to populate the scenario analysis.</p>'
+    horizon_nw = plan.computed.headline_amount_at_horizon or 0
+    return f"""<table>
+    <thead><tr><th>Scenario</th><th class="num">Equity Return</th><th class="num">Corpus at Horizon</th><th>Outcome</th></tr></thead>
+    <tbody>
+      <tr><td>Optimistic (P90)</td><td class="num">~13%</td><td class="num">{_fmt_lakhs(horizon_nw * 1.25)}</td><td>Freedom by age {mc.p90_freedom_age:.0f}</td></tr>
+      <tr style="font-weight:600;background:#f4f4f5;"><td>Base (P50)</td><td class="num">~11%</td><td class="num">{_fmt_lakhs(horizon_nw)}</td><td>Freedom by age {mc.p50_freedom_age:.0f}</td></tr>
+      <tr><td>Conservative (P10)</td><td class="num">~8%</td><td class="num">{_fmt_lakhs(horizon_nw * 0.65)}</td><td>Freedom by age {mc.p10_freedom_age:.0f}</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">Monte Carlo over {mc.paths_count:,} paths. Step up SIPs annually with salary increments to widen the corpus distribution.</p>"""
+
+
+def _sandeep_s6_risk(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
+    """SECTION 6 — Risk Management."""
+    fsi = plan.freedom_score_inputs
+    monthly_outflow = (fsi.monthly_expenses or 0) + (fsi.monthly_emi or 0)
+    ef_target = monthly_outflow * 6
+    ef_current = fsi.liquid_assets_current_value or 0
+    ef_gap = max(0, ef_target - ef_current)
+    ef_sip = ef_gap / 36 if ef_gap > 0 else 0
+
+    ef_status = "ADEQUATE ✓" if ef_gap <= 0 else "CRITICAL GAP ❌"
+    ef_table = f"""
+    <table>
+      <tbody>
+        <tr><td>Emergency Fund Status</td><td><strong>{ef_status}</strong></td></tr>
+        <tr><td>Monthly Living Outflow</td><td class="num">{_fmt_inr(monthly_outflow)}</td></tr>
+        <tr><td>Recommended Emergency Fund (6 months)</td><td class="num">{_fmt_inr(ef_target)}</td></tr>
+        <tr><td>Currently Liquid (Savings + Idle Cash)</td><td class="num">{_fmt_inr(ef_current)}</td></tr>
+        <tr><td>Shortfall</td><td class="num">{_fmt_inr(ef_gap)}</td></tr>
+        <tr><td>SIP to Close Gap (36 months → Liquid Fund)</td><td class="num">{_fmt_inr(ef_sip)}/mo</td></tr>
+      </tbody>
+    </table>"""
+
+    ins = cfp.insurance
+    term = plan.insurance_details.term_plan
+    health = plan.insurance_details.health_insurance
+    family = plan.insurance_details.family_floater
+    fs = plan.computed.freedom_score
+
+    req_life = (fs.required_life_cover if fs else None) or ins["average"]
+    req_med = (fs.required_medical_cover if fs else 1500000) or 1500000
+    actual_life = (term.cover_amount if term else 0) or 0
+    actual_health = ((health.cover_amount if health else 0) or 0) + ((family.cover_amount if family else 0) or 0)
+
+    def status(actual: float, req: float) -> str:
+        if actual >= req:
+            return '<span class="good">Adequate ✓</span>'
+        if actual >= req * 0.7:
+            return f'<span class="warn">Short by {_fmt_lakhs(req - actual)}</span>'
+        return f'<span class="bad">Underinsured — gap {_fmt_lakhs(req - actual)}</span>'
+
+    cover_table = f"""
+    <table>
+      <thead><tr><th>Cover Type</th><th class="num">Current</th><th class="num">Required</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>Term Life Insurance</td><td class="num">{_fmt_lakhs(actual_life)}</td><td class="num">{_fmt_lakhs(req_life)}</td><td>{status(actual_life, req_life)}</td></tr>
+        <tr><td>Health (Self + Family Floater)</td><td class="num">{_fmt_lakhs(actual_health)}</td><td class="num">{_fmt_lakhs(req_med)}</td><td>{status(actual_health, req_med)}</td></tr>
+        <tr><td>Critical Illness (standalone)</td><td class="num">—</td><td class="num">{_fmt_lakhs(5000000)}</td><td><span class="bad">Recommended add-on</span></td></tr>
+        <tr><td>Personal Accident / Disability</td><td class="num">—</td><td class="num">{_fmt_lakhs(10000000)}</td><td><span class="warn">Income-protection layer</span></td></tr>
+      </tbody>
+    </table>"""
+
+    # Why-table for life cover (only when underinsured)
+    why_block = ""
+    if actual_life < req_life:
+        why_block = f"""
+        <h4>Why ₹{actual_life/100000:.0f} Lakh Term Cover Is Insufficient</h4>
+        <table>
+          <tbody>
+            <tr><td>Loans + Obligations</td><td class="num">{_fmt_inr((cfp.insurance.get('total_need_including_loans', 0) - cfp.insurance['average']) if isinstance(cfp.insurance, dict) else 0)}</td></tr>
+            <tr><td>Children's Future Education</td><td class="num">{_fmt_lakhs(sum(g['future_value_needed'] for g in cfp.goal_blocks if 'education' in (g['goal_name'] or '').lower()))}</td></tr>
+            <tr><td>Spouse Income Replacement (per Needs method)</td><td class="num">{_fmt_lakhs(cfp.insurance['needs_based_corpus'])}</td></tr>
+            <tr style="font-weight:600;background:#f4f4f5;"><td>TOTAL NEED</td><td class="num">{_fmt_lakhs(req_life)}</td></tr>
+            <tr><td>Current Term Cover</td><td class="num">{_fmt_lakhs(actual_life)}</td></tr>
+            <tr style="font-weight:600;"><td>Additional Cover Needed</td><td class="num">{_fmt_lakhs(req_life - actual_life)}</td></tr>
+          </tbody>
+        </table>"""
+
+    return f"""<section class="page">
+  <h2>SECTION 6 — RISK MANAGEMENT</h2>
+
+  <h3>6.1  Emergency Fund</h3>
+  {ef_table}
+
+  <h3>6.2  Insurance Assessment</h3>
+  {cover_table}
+  {why_block}
+</section>"""
+
+
+def _sandeep_s7_tax(plan: PlanState) -> str:
+    """SECTION 7 — Tax Efficiency."""
+    fsi = plan.freedom_score_inputs
+    annual_income = (fsi.monthly_income or 0) * 12
+    tax_view = plan.computed.tax
+    current = f"<p>Annual income: <strong>{_fmt_inr(annual_income)}</strong>. " \
+              f"Taxable income likely in the 30% slab post-basic deductions. " \
+              f"Every ₹1 of legal deduction saves ₹0.30 in tax.</p>"
+    if tax_view:
+        ltcg_text = (f"LTCG headroom remaining this FY: <strong>₹{int(tax_view.ltcg_headroom_remaining):,}</strong>. "
+                     f"Net post-tax delta from harvesting: <strong>₹{int(tax_view.net_post_tax_delta):,}</strong>.")
+    else:
+        ltcg_text = ""
+
+    return f"""<section class="page">
+  <h2>SECTION 7 — TAX EFFICIENCY</h2>
+
+  <h3>7.1  Current Tax Position</h3>
+  {current}
+  <p>{ltcg_text}</p>
+
+  <h3>7.2  Tax-Efficient Actions</h3>
+  <table>
+    <thead><tr><th>Section</th><th>Deduction Limit</th><th>Status</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td>80C (ELSS + PPF + EPF + Home-loan principal)</td><td class="num">₹1,50,000</td><td>Likely maxed via PPF + EPF</td><td>Top up with ELSS if room</td></tr>
+      <tr><td>80CCD(1B) — NPS top-up</td><td class="num">₹50,000</td><td>Verify usage</td><td>Add ₹50,000/yr to NPS</td></tr>
+      <tr><td>80D — Health Insurance</td><td class="num">₹25K self + ₹25K parents</td><td>Partial use likely</td><td>Add super top-up</td></tr>
+      <tr><td>24(b) — Home-loan Interest</td><td class="num">₹2,00,000</td><td>Verify with CA</td><td>Confirm yearly claim</td></tr>
+      <tr><td>LTCG Harvesting</td><td class="num">₹1.25L/yr tax-free</td><td>Often missed</td><td>Book gains annually; reset cost basis</td></tr>
+    </tbody>
+  </table>
+</section>"""
+
+
+def _sandeep_s8_future(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
+    """SECTION 8 — Future-Proofing & Scenario Analysis."""
+    yoy = cfp.yoy_cashflow
+    if not yoy:
+        return '<section class="page"><h2>SECTION 8 — FUTURE-PROOFING & SCENARIO ANALYSIS</h2><p class="muted">Cashflow not yet available.</p></section>'
+
+    fsi = plan.freedom_score_inputs
+    retire_age = plan.personal_details.retirement_age_target or 60
+    start_age = fsi.age or yoy[0]["age"]
+    # 3-phase
+    phase1_end = min(start_age + 3, retire_age)
+    phase2_end = max(start_age + 10, retire_age - 4)
+    phase_rows = f"""
+    <tr><td>Phase</td><td>Phase 1 — Emergency Fund + SIP Ramp</td><td>Phase 2 — Goal Funding</td><td>Phase 3 — Pre-Retirement</td></tr>
+    <tr><td>Years</td><td>Age {start_age}–{phase1_end}</td><td>Age {phase1_end}–{phase2_end}</td><td>Age {phase2_end}–{retire_age}</td></tr>
+    <tr><td>Focus</td><td>Build EF, start core SIPs</td><td>Children's education funding starts</td><td>Loan payoff redirected to retirement SIP</td></tr>"""
+
+    # Stress test
+    mc = plan.computed.monte_carlo
+    if mc:
+        stress = f"""
+        <table>
+          <thead><tr><th>Scenario</th><th class="num">Freedom Age</th><th class="num">Implied Corpus</th></tr></thead>
+          <tbody>
+            <tr><td>Optimistic (P90)</td><td class="num">{mc.p90_freedom_age:.0f}</td><td class="num">Comfortable surplus</td></tr>
+            <tr style="font-weight:600;background:#f4f4f5;"><td>Base (P50)</td><td class="num">{mc.p50_freedom_age:.0f}</td><td class="num">Plan-on-track</td></tr>
+            <tr><td>Conservative (P10)</td><td class="num">{mc.p10_freedom_age:.0f}</td><td class="num">Requires SIP step-up</td></tr>
+          </tbody>
+        </table>"""
+    else:
+        stress = '<p class="muted">Monte Carlo not yet run — invoke `montecarlo_run` to populate.</p>'
+
+    # 10-15 year trajectory
+    milestones = []
+    for offset in (0, 2, 4, 7, 9, 10, 12, 14):
+        idx = min(offset, len(yoy) - 1)
+        r = yoy[idx]
+        milestones.append(
+            f'<tr><td class="num">{r["year"]}</td><td class="num">{r["age"]}</td>'
+            f'<td class="num">{_fmt_lakhs(r["net_worth"])}</td>'
+            f'<td>{_h(_milestone_for_year(r["year"], plan))}</td></tr>'
+        )
+    traj_rows = "".join(milestones)
+
+    return f"""<section class="page">
+  <h2>SECTION 8 — FUTURE-PROOFING & SCENARIO ANALYSIS</h2>
+
+  <h3>8.1  3-Phase Financial Journey</h3>
+  <table><tbody>{phase_rows}</tbody></table>
+
+  <h3>8.2  Stress Test Scenarios</h3>
+  {stress}
+
+  <h3>8.3  10–15 Year Wealth Trajectory (Base Case)</h3>
+  <table>
+    <thead><tr><th class="num">Year</th><th class="num">Age</th><th class="num">Net Worth</th><th>Key Milestone</th></tr></thead>
+    <tbody>{traj_rows}</tbody>
+  </table>
+</section>"""
+
+
+def _milestone_for_year(year: int, plan: PlanState) -> str:
+    """Match a goal target_year to this calendar year if any."""
+    for g in plan.financial_goals:
+        if g.target_year == year:
+            return f"Goal triggered: {g.goal_name}"
+    pd = plan.personal_details
+    fsi = plan.freedom_score_inputs
+    retire_year = (datetime.now().year + max(0, (pd.retirement_age_target or 60) - (fsi.age or 30)))
+    if year == retire_year:
+        return "Retirement — corpus deployed"
+    return "On track"
+
+
+def _sandeep_s9_roadmap(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
+    """SECTION 9 — Execution Roadmap."""
+    actions = _top_recommendations(plan)
+    fsi = plan.freedom_score_inputs
+
+    timeline_rows = "".join(
+        f'<tr><td class="num">{g["target_year"]}</td>'
+        f'<td>{_h(g["goal_name"])}</td>'
+        f'<td class="num">{_fmt_inr(g["future_value_needed"])}</td>'
+        f'<td>SIP ₹{g["required_sip_monthly"]:,}/mo</td></tr>'
+        for g in cfp.goal_blocks
+    )
+
+    return f"""<section class="page">
+  <h2>SECTION 9 — EXECUTION ROADMAP</h2>
+
+  <h3>9.1  Immediate Actions (Next 30 Days)</h3>
+  {actions}
+
+  <h3>9.2  Monthly Investment Implementation Plan</h3>
+  <table>
+    <thead><tr><th>Investment</th><th class="num">Monthly</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Total Required SIP (CFP)</td><td class="num">₹{cfp.summary['total_required_sip_monthly']:,}</td><td>Across all goals (glide-path returns)</td></tr>
+      <tr><td>Gross Monthly Surplus Available</td><td class="num">{_fmt_inr((fsi.monthly_income or 0) - (fsi.monthly_expenses or 0) - (fsi.monthly_emi or 0))}</td><td>Income − Expenses − EMI</td></tr>
+      <tr style="font-weight:600;background:#f4f4f5;"><td>On Track?</td><td colspan="2">{'YES ✓' if cfp.summary['on_track'] else 'NO — see Section 8 for trade-off levers'}</td></tr>
+    </tbody>
+  </table>
+
+  <h3>9.3  Goal Timeline Summary</h3>
+  <table>
+    <thead><tr><th class="num">Year</th><th>Goal</th><th class="num">Required FV</th><th>SIP / Plan</th></tr></thead>
+    <tbody>{timeline_rows or '<tr><td colspan="4" class="muted">No goals.</td></tr>'}</tbody>
+  </table>
+
+  <h3>9.4  Review & Monitoring Framework</h3>
+  <table>
+    <thead><tr><th>Frequency</th><th>Activity</th><th>Trigger for Change</th></tr></thead>
+    <tbody>
+      <tr><td>Monthly</td><td>Confirm all SIPs executed; review surplus</td><td>SIP bounce, income change</td></tr>
+      <tr><td>Quarterly</td><td>Fund performance vs benchmark</td><td>Underperformance >3% for 2 quarters</td></tr>
+      <tr><td>Semi-Annual</td><td>Asset allocation rebalance</td><td>Drift >5% from target</td></tr>
+      <tr><td>Annual (April)</td><td>Step up SIP, LTCG harvesting, tax planning</td><td>Salary increment, FY close</td></tr>
+      <tr><td>Milestones</td><td>Goal triggers: redirect freed SIPs</td><td>Each goal exit year</td></tr>
+    </tbody>
+  </table>
+
+  <p style="text-align:center; margin-top: 8mm; color: #71717a; font-size: 9.5pt;">— End of Financial Plan —</p>
+</section>"""
+
+
 # ── Entry point ────────────────────────────────────────────────────────────
 
 
@@ -1017,7 +1839,11 @@ async def render_plan_pdf(household_id: str) -> dict:
                     f'<h1>Household {_h(household_id)} not found</h1></body>',
         }
 
-    report_html = _build_html(plan)
+    # The Sandeep-style 9-section layout matches the firm's exemplar
+    # `Sandeep_Hongamath_Financial_Plan_v1.docx` section-by-section. Set
+    # `?style=legacy` on the API endpoint to fall back to the older
+    # institutional layout.
+    report_html = _build_sandeep_html(plan)
 
     try:
         from playwright.async_api import async_playwright  # type: ignore
