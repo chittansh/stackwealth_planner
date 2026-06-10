@@ -1525,7 +1525,7 @@ def _sandeep_s5_strategy(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
             <tr><td>Cash / Liquid</td><td class="num">{rec.cash}%</td><td>Emergency liquidity</td></tr>
           </tbody>
         </table>
-        <p class="muted">Strategic anchor: {_h(al.investor_risk_band)}. Tactical regime: {_h(al.tactical_regime_label)} (signal {al.tactical_regime_score:+d}).</p>"""
+        <p class="muted">Strategic anchor: {_h(al.investor_risk_band)}. Tactical regime: {_h(al.tactical_regime_label)} (signal {int(round(al.tactical_regime_score)):+d}).</p>"""
     else:
         target_table = '<p class="muted">Allocation not yet computed. Answer 3 risk questions in chat to unlock.</p>'
 
@@ -1537,7 +1537,7 @@ def _sandeep_s5_strategy(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
         <tr><td>Parag Parikh Flexi Cap / Mid Cap blend</td><td>Mid Cap</td><td class="num">₹{int(total_sip * (al.recommended_equity_split.mid * rec.equity / 100) / 100):,}</td><td>Direct</td></tr>
         <tr><td>Nippon India Small Cap</td><td>Small Cap</td><td class="num">₹{int(total_sip * (al.recommended_equity_split.small * rec.equity / 100) / 100):,}</td><td>Direct</td></tr>
         <tr><td>Short-term Debt Fund / PPF Top-up</td><td>Debt</td><td class="num">₹{int(total_sip * rec.debt / 100):,}</td><td>Direct</td></tr>
-        <tr style="font-weight:600;background:#f4f4f5;"><td>TOTAL MONTHLY SIP</td><td></td><td class="num">₹{total_sip:,}</td><td></td></tr>"""
+        <tr style="font-weight:600;background:#f4f4f5;"><td>TOTAL MONTHLY SIP</td><td></td><td class="num">₹{int(total_sip):,}</td><td></td></tr>"""
     else:
         sip_rows = '<tr><td colspan="4" class="muted">Set goals + risk profile to populate the recommended SIP table.</td></tr>'
 
