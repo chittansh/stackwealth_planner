@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from ..db import get_plan, save_plan
 from ..skills import allocate as allocate_skill
 from ..skills import cashflow as cashflow_skill
+from ..skills import cfp as cfp_skill
 from ..skills import debt as debt_skill
 from ..skills import freedom as freedom_skill
 from ..skills import intake as intake_skill
@@ -226,6 +227,16 @@ async def _debt_paydown(**kwargs: Any) -> Any:
     return await _persist_computed(
         kwargs["household_id"], "debt_paydown", await debt_skill.paydown(kwargs)
     )
+
+
+async def _cfp_plan(**kwargs: Any) -> Any:
+    """The Excel-faithful Comprehensive Financial Plan engine. Returns the
+    full goal-by-goal breakdown, year-by-year cashflow, retirement corpus,
+    insurance need, AND a `computation_trace` array so the agent can render
+    the math inline in the tool-call response — every step labelled with
+    its formula and the inputs that went into it."""
+    kwargs = _coerce_kwargs(kwargs)
+    return await cfp_skill.run_cfp(kwargs["household_id"])
 
 
 class CashflowArgs(BaseModel):
@@ -590,6 +601,23 @@ def make_tools() -> list[StructuredTool]:
             ),
             args_schema=HouseholdOnlyArgs,
             coroutine=_debt_paydown,
+        ),
+        StructuredTool.from_function(
+            name="cfp_plan",
+            description=(
+                "Excel-faithful Comprehensive Financial Plan engine — mirrors the firm's "
+                "`Format for inputs for CFP_ng_080626.xlsx` cell-for-cell. Returns per-goal "
+                "FV/gap/SIP via the documented inflation table (Education 10%, Wedding 9%, "
+                "Medical 12%, etc.) and glide-path effective return; the year-by-year cashflow "
+                "with each asset class compounding at its own post-tax return; the retirement "
+                "corpus via PV(real_return, post_retire_years, -annual_need); and Human Life "
+                "Value + Needs-based insurance averaged. Every step is included in "
+                "`computation_trace` so the user can see the math, not just the answer. Use "
+                "this for the comprehensive financial-plan view; use `cashflow_project` for "
+                "the simpler in-platform projection."
+            ),
+            args_schema=HouseholdOnlyArgs,
+            coroutine=_cfp_plan,
         ),
         StructuredTool.from_function(
             name="cashflow_project",
