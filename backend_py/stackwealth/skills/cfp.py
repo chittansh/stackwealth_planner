@@ -224,64 +224,64 @@ def compute_goal_block(
         ))
 
     # ── Step 2: Allocate existing assets in priority order ──────────────
+    # Excel model (10_Financial_Goals): allocated assets are netted in TODAY's
+    # value — they're "earmarked" for the goal, inflation-tracked but not
+    # compounded at an excess investment return. The remaining gap (in
+    # today's money) is then inflated to FV and that's what the SIP funds.
+    # Mirrors:  Y = E − X;  Z = FV(G, D, , -Y);  AB = PMT(AA/12, D*12, , -Z)
     allocations: list[dict] = []
     allocated_today = 0.0
-    remaining_fv_needed = fv_need
+    remaining_today = today_cost if is_today_money else 0.0
     for bucket in ALLOCATION_PRIORITY:
         avail = float(asset_pool.get(bucket, 0) or 0)
         if avail <= 0:
             continue
-        # Convert this bucket's today value to FV at the bucket's own
-        # post-tax return for the goal's horizon.
-        bucket_return = POST_TAX_RETURN.get(_bucket_return_key(bucket), 0.07)
-        bucket_fv = avail * ((1 + bucket_return) ** n_years)
-        if bucket_fv <= 0:
+        consumed_today = min(avail, remaining_today) if is_today_money else avail
+        if consumed_today <= 0:
             continue
-        # Decide how much of this bucket to consume — only as much as the
-        # remaining FV need wants.
-        if bucket_fv <= remaining_fv_needed:
-            consumed_today = avail
-            consumed_fv = bucket_fv
-        else:
-            # Partial — scale linearly.
-            ratio = remaining_fv_needed / bucket_fv
-            consumed_today = avail * ratio
-            consumed_fv = remaining_fv_needed
         allocations.append({
             "bucket": bucket,
             "today_value_used": round(consumed_today),
-            "future_value_at_goal_year": round(consumed_fv),
-            "bucket_return_used": round(bucket_return, 4),
         })
         asset_pool[bucket] = avail - consumed_today
         allocated_today += consumed_today
-        remaining_fv_needed -= consumed_fv
-        if remaining_fv_needed <= 1:
-            break
+        if is_today_money:
+            remaining_today -= consumed_today
+            if remaining_today <= 1:
+                break
 
     trace.append(_trace(
-        f"Existing assets allocated to '{name}'",
-        "for bucket in priority_order: consume FV at bucket's post-tax return until FV need is met",
+        f"Existing assets allocated to '{name}' (today's value, priority order)",
+        "X = K + M + O + Q + S + U + W   (sum of buckets drawn in priority)",
         {"buckets_used": [a["bucket"] for a in allocations]},
         round(allocated_today),
     ))
 
-    # ── Step 3: Gap and FV of gap ────────────────────────────────────────
-    gap_today = max(0.0, today_cost - allocated_today) if is_today_money else None
-    fv_gap = max(0.0, remaining_fv_needed)
-    if gap_today is not None:
+    # ── Step 3: Gap (today's value) and FV of gap ────────────────────────
+    if is_today_money:
+        gap_today = max(0.0, today_cost - allocated_today)
         trace.append(_trace(
             f"Gap in today's value for '{name}'",
-            "today_cost - allocated_today",
+            "Y = E − X   (today_cost minus allocated)",
             {"today_cost": today_cost, "allocated_today": round(allocated_today)},
             round(gap_today),
         ))
-    trace.append(_trace(
-        f"FV of unallocated gap for '{name}'",
-        "FV(inflation, years, , -gap_today)" if is_today_money else "remaining FV need",
-        {"inflation": round(inflation, 4), "years": n_years, "gap_today": round(gap_today or 0)},
-        round(fv_gap),
-    ))
+        fv_gap = excel_fv(inflation, n_years, 0, -gap_today) if gap_today > 0 else 0.0
+        trace.append(_trace(
+            f"FV of unallocated gap for '{name}'",
+            "Z = FV(G, D, , −Y)   (inflate gap_today to target year)",
+            {"inflation": round(inflation, 4), "years": n_years, "gap_today": round(gap_today)},
+            round(fv_gap),
+        ))
+    else:
+        gap_today = None
+        fv_gap = max(0.0, fv_need - allocated_today)
+        trace.append(_trace(
+            f"FV gap for '{name}' (target already in FV)",
+            "fv_need − allocated_today",
+            {"fv_need": round(fv_need), "allocated_today": round(allocated_today)},
+            round(fv_gap),
+        ))
 
     # ── Step 4: Glide-path return & required SIP ─────────────────────────
     eff_return = goal.required_return_override or glide_path_return(n_years)
