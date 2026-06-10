@@ -45,6 +45,25 @@ type Msg =
 // when the turn is *finished* (assistant message lands or an error fires).
 const replaceThinking = (m: Msg[], next: Msg): Msg[] => [...m.filter((x) => x.kind !== 'thinking'), next];
 
+/**
+ * Heuristic: does this assistant reply look like the agent asking the
+ * 3 risk-gate questions? If so we append a clickable RiskGate card so the
+ * user doesn't have to type free-form answers. Conservative — needs at
+ * least TWO independent signals before we inject.
+ */
+function isRiskGatePrompt(text: string): boolean {
+  const t = (text || '').toLowerCase();
+  const signals = [
+    /portfolio (drop|dropped|fell|fell by|dropped by).{0,40}(\d{1,2})\s*%/i.test(t),
+    /sell everything/.test(t) && /buy more/.test(t),
+    /preserve capital/.test(t) || /maximum growth/.test(t),
+    /maximum (loss|tolerable)/.test(t) || /tolerate (losing|to lose)/.test(t),
+    /risk[/-]return tradeoff/.test(t) || /risk\/return/.test(t),
+    /3 quick (risk )?questions/.test(t) || /three (quick |short )?risk questions/.test(t),
+  ];
+  return signals.filter(Boolean).length >= 2;
+}
+
 // Insert a new message (e.g. a tool card) but KEEP a thinking pill at the
 // bottom — so the user always sees a spinner while tool calls are in flight,
 // not just before the first one. The pill is only removed when the assistant
@@ -340,15 +359,20 @@ export function ChatPanel({ householdId }: { householdId: string }) {
             const reply = (ev.data as { text: string }).text;
             const stamp = pendingTrace;
             pendingTrace = {};
-            setMessages((m) =>
-              replaceThinking(m, {
+            // Detect when the agent has asked the 3 risk-profile questions
+            // and append a clickable RiskGate card instead of relying on the
+            // user to type a free-text answer.
+            const looksLikeRiskGate = isRiskGatePrompt(reply);
+            setMessages((m) => {
+              const replaced = replaceThinking(m, {
                 kind: 'assistant',
                 text: reply,
                 traceId: stamp.traceId,
                 observationId: stamp.observationId,
                 turn: stamp.turn,
-              }),
-            );
+              });
+              return looksLikeRiskGate ? [...replaced, { kind: 'risk_gate' }] : replaced;
+            });
           } else if (ev.event === 'error') {
             setMessages((m) =>
               replaceThinking(m, { kind: 'assistant', text: 'Something went wrong. Try again.' }),
@@ -560,15 +584,26 @@ function renderMessages(
         <RiskGate
           key={i}
           householdId={householdId}
-          onComplete={() =>
+          onComplete={() => {
+            // Replace the card with a confirmation in the transcript, then
+            // nudge the agent so it picks up from the computed risk profile
+            // (allocation, tax, montecarlo are now unlocked).
             setMessages((mm) => [
-              ...mm,
+              ...mm.filter((x) => x.kind !== 'risk_gate'),
               {
                 kind: 'assistant',
                 text: 'Risk profile computed. Allocation, tax, and Monte Carlo are now unlocked.',
               },
-            ])
-          }
+            ]);
+            window.dispatchEvent(
+              new CustomEvent('sw:chat-prompt', {
+                detail: {
+                  prompt:
+                    "I've completed the 3-question risk profile via the in-chat card. Use the computed risk profile and continue with the next step of the plan (allocation → tax → Monte Carlo → final summary).",
+                },
+              }),
+            );
+          }}
         />,
       );
     }
