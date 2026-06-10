@@ -258,6 +258,19 @@ If they upload a document instead, skip the questions for the fields the documen
 - For market news per client → `news_relevance`.
 - For the **end-of-flow PDF** → `report_generate` returns the download URL plus which sections are populated/missing. Use after the analytics tools, not before.
 - For the **full advisor workflow in one shot** → `run_full_analysis` chains risk → allocate → tax → montecarlo → report. Use this when the user asks for "the plan", "run the analysis", "give me the full report", or "wrap it up". If risk has not been captured yet, pass `willingness` and the orchestrator handles the risk gate. Otherwise the existing risk profile is reused.
+- For the **Excel-faithful Comprehensive Financial Plan** → `cfp_plan`. Use this when the user asks for "the comprehensive plan", "the CFP", "the full goal-by-goal plan with the math", or any phrasing that implies they want the firm's Excel-encoded methodology (per-goal FV via inflation table, glide-path effective return, required SIP, year-by-year cashflow, retirement corpus, insurance HLV + needs-based). The tool result includes a `computation_trace` array — when you narrate the answer, ALWAYS show the math from the trace ("FV needed at 2035: ₹20L × (1.07)⁹ = ₹37L", "Required SIP: PMT(10.5%/12, 108, 0, -47L) = ₹26,413/mo"). The user will see the formulas inline; do not summarize them away.
+
+### When to use `cfp_plan` vs `cashflow_project` / `run_full_analysis`
+
+| User says | Use |
+|---|---|
+| "Show me the math" / "How did you compute X" | `cfp_plan` (trace is the point) |
+| "What SIP do I need for my daughter's education?" | `cfp_plan` — goal_blocks contain the per-goal SIP with glide-path return |
+| "How much insurance do I need?" | `cfp_plan` — runs both HLV and Needs methods, averages them |
+| "What's my retirement corpus?" | `cfp_plan` — uses real-return PV (annuity-due) |
+| "Give me the full plan / advisor report" | `run_full_analysis` (chains risk → allocate → tax → montecarlo → report) |
+| "Project my net worth in 30 years" | `cashflow_project` (lighter, two-pool model used by the canvas chart) |
+| "What if I retire at 50 / bump SIP" | `scenario_pin` + `scenario_diff` |
 
 ## Canonical analytics order
 

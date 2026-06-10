@@ -1,0 +1,842 @@
+"""
+Comprehensive Financial Plan (CFP) engine — port of the firm's
+`Format for inputs for CFP_ng_080626.xlsx` model. The math in this module is
+intentionally kept cell-for-cell aligned with the Excel: same inflation
+table, same post-tax return table, same allocation priority order, same
+FV / PMT / PV invocations. The output bundles a full `computation_trace`
+so the calling agent can render every step inline in the chat.
+
+Public surface:
+    compute_cfp(plan) -> CFPOutput      — full plan engine
+    plan_summary(plan) -> CFPSummary    — single-row recap (for headlines)
+
+Conventions:
+    All monthly values are in plain INR (no commas, no suffixes).
+    All annual values likewise.
+    All percentages are stored as decimals (0.07, not 7).
+    FV / PV / PMT use the same sign convention as Excel:
+        FV(rate, nper, pmt, -pv)            payments out
+        PMT(rate/12, nper*12, 0, -fv)       SIP needed to hit FV
+        PV(disc_rate, nper, -annual_need, 0, 1)   annuity due
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Optional
+
+from ..db import get_plan
+from ..types import Goal, PlanState
+
+
+# ── Excel-encoded constants (Assumptions & Computation sheet) ─────────────
+
+# Inflation table — see the "Assumptions & Computation" sheet, rows 5-12.
+INFLATION_TABLE: dict[str, float] = {
+    "general": 0.07,
+    "education": 0.10,
+    "child_education": 0.10,
+    "wedding": 0.09,
+    "child_marriage": 0.09,
+    "medical": 0.12,
+    "lifestyle": 0.25,
+    "real_estate": 0.09,
+    "house_purchase": 0.09,
+    "vacation": 0.09,
+    "foreign_travel": 0.09,
+    "other": 0.07,
+    "retirement": 0.07,  # general for the corpus, post-retirement expense
+}
+
+# Post-tax annual return by asset class — see rows 20-39 of the
+# Assumptions sheet. The pre-tax values are kept alongside as a comment so
+# anyone diffing against the Excel can verify the haircut.
+POST_TAX_RETURN: dict[str, float] = {
+    "equity_aggressive":   0.14 * (1 - 0.125),    # = 0.1225  Small/Mid MFs
+    "equity_hybrid":       0.12 * (1 - 0.125),    # = 0.1050  Large+Mid MFs / hybrid
+    "equity_conservative": 0.10 * (1 - 0.125),    # = 0.0875  Large-cap MFs
+    "bank_fd":             0.065 * (1 - 0.30),    # = 0.0455  FDs/RDs (slab)
+    "bonds":               0.075 * (1 - 0.30),    # = 0.0525
+    "ppf":                 0.071,                  # tax-free
+    "epf":                 0.081,                  # tax-free
+    "sukanya":             0.081,                  # tax-free
+    "sgb":                 0.05 + 0.025 * 0.70,    # = 0.0675  ~ Excel: 5% appreciation + 2.5% coupon, tax-adjusted
+    "ulip":                0.06,                   # treated as gross = net
+    "nps":                 0.07,
+    "liquid_fund":         0.055 * (1 - 0.30),    # = 0.0385
+    "savings_bank":        0.035 * (1 - 0.30),    # = 0.0245
+    "real_estate":         0.08 * (1 - 0.125),    # = 0.07
+    "gold":                0.08 * (1 - 0.125),    # = 0.07
+}
+
+# Equal-weight blended ROI on the financial-asset pool — Excel's
+# AVERAGE(D20:D39) and AVERAGE(E20:E39) on the assumptions sheet. Used by
+# the YoY-Cashflow sheet for the "Income from investments" line on each
+# closing financial-asset balance.
+BLENDED_ROI_POST_TAX = sum(POST_TAX_RETURN.values()) / len(POST_TAX_RETURN)
+
+# Asset allocation priority for funding goals — see "10_Financial_Goals"
+# columns J..W and Rule 6 of the brief. Earlier entries get exited first.
+ALLOCATION_PRIORITY: list[str] = [
+    "weak_stocks",
+    "weak_mfs",
+    "fixed_deposits",
+    "bonds",
+    "neutral_stocks",
+    "neutral_mfs",
+    "ulip_endowment",
+    "nsc",
+    "ppf",
+    "real_estate_for_sale",
+    "gold",
+    "lic_proceeds",
+    "epf",
+    "pension",
+]
+
+# Glide-path effective returns by horizon — see Rule 6 of the brief.
+# Used by `goal_block.required_sip` when no explicit override is set.
+def glide_path_return(horizon_years: int) -> float:
+    if horizon_years > 10:
+        return 0.110
+    if horizon_years >= 7:
+        return 0.105
+    if horizon_years >= 4:
+        return 0.090
+    if horizon_years >= 2:
+        return 0.065
+    return 0.055
+
+
+# ── Excel-equivalent financial functions ──────────────────────────────────
+
+def excel_fv(rate: float, nper: float, pmt: float, pv: float) -> float:
+    """Mirror of Excel's `FV(rate, nper, pmt, pv)` for end-of-period
+    payments. Negative `pv` means "money in" (the convention the planner
+    Excel uses). Sign-flips so positive output = corpus accumulated."""
+    if rate == 0:
+        return -(pv + pmt * nper)
+    growth = (1 + rate) ** nper
+    return -(pv * growth + pmt * (growth - 1) / rate)
+
+
+def excel_pmt(rate: float, nper: float, pv: float, fv: float, when: int = 0) -> float:
+    """Mirror of Excel's PMT. `when=0` end-of-period, `when=1` start-of-period.
+    Used for: PMT(annual_rate/12, years*12, 0, -goal_fv) → monthly SIP."""
+    if nper == 0:
+        return 0.0
+    if rate == 0:
+        return -(pv + fv) / nper
+    growth = (1 + rate) ** nper
+    base = (pv * growth + fv) / ((growth - 1) / rate)
+    if when == 1:
+        base /= (1 + rate)
+    return -base
+
+
+def excel_pv(rate: float, nper: float, pmt: float, fv: float = 0.0, when: int = 0) -> float:
+    """Mirror of Excel's PV. Used for the retirement-corpus discounted
+    annuity: PV(disc_rate, post_retire_years, -annual_expense, 0, 1)."""
+    if rate == 0:
+        return -(pmt * nper + fv)
+    growth = (1 + rate) ** nper
+    factor = (1 - 1 / growth) / rate
+    if when == 1:
+        factor *= (1 + rate)
+    return -(pmt * factor + fv / growth)
+
+
+# ── Computation-trace dataclasses ─────────────────────────────────────────
+
+@dataclass
+class TraceStep:
+    """One inspectable computation step. The agent renders this in the
+    tool-call response so the user sees the math, not just the answer."""
+    label: str
+    formula: str             # human-readable, mirrors the Excel cell
+    inputs: dict[str, Any]   # named inputs that went into the formula
+    value: float | str       # the result
+    unit: str = "INR"        # "INR" / "%" / "years"
+
+
+def _trace(label: str, formula: str, inputs: dict, value: float | str, unit: str = "INR") -> dict:
+    return {
+        "label": label,
+        "formula": formula,
+        "inputs": inputs,
+        "value": value,
+        "unit": unit,
+    }
+
+
+# ── Goal block (per-goal calculation) ─────────────────────────────────────
+
+def _years_to(target_year: int, current_year: int) -> int:
+    return max(0, target_year - current_year)
+
+
+def _inflation_for_goal(goal: Goal, default: float) -> float:
+    """Excel's inflation column on `10_Financial_Goals` is configurable per
+    goal but defaults to the type-keyed table on the Assumptions sheet."""
+    if goal.inflation_assumed is not None:
+        return float(goal.inflation_assumed)
+    kind = (goal.kind or "other").lower()
+    return INFLATION_TABLE.get(kind, default)
+
+
+def compute_goal_block(
+    goal: Goal,
+    *,
+    current_year: int,
+    asset_pool: dict[str, float],
+    existing_goal_sip: float = 0.0,
+) -> dict:
+    """One goal's full Excel-equivalent block: FV need, allocated assets in
+    priority order, gap, glide-path return, required SIP, and the trace.
+
+    `asset_pool` is mutated — assets get drawn down as they're allocated to
+    this goal so the next goal sees the remainder."""
+    trace: list[dict] = []
+    name = goal.goal_name or "Unnamed goal"
+    target_year = goal.target_year or current_year + 10
+    n_years = _years_to(target_year, current_year)
+    today_cost = float(goal.target_amount or 0)
+    is_today_money = goal.is_target_in_today_money
+    inflation = _inflation_for_goal(goal, INFLATION_TABLE["general"])
+
+    # ── Step 1: Future value of the goal ─────────────────────────────────
+    if is_today_money:
+        fv_need = excel_fv(inflation, n_years, 0, -today_cost)
+        trace.append(_trace(
+            f"FV of '{name}' at target year {target_year}",
+            "FV(inflation, years, , -today_cost)",
+            {"inflation": round(inflation, 4), "years": n_years, "today_cost": today_cost},
+            round(fv_need),
+        ))
+    else:
+        fv_need = today_cost
+        trace.append(_trace(
+            f"FV of '{name}' (already in target-year money)",
+            "= target_amount",
+            {"target_amount": today_cost},
+            round(fv_need),
+        ))
+
+    # ── Step 2: Allocate existing assets in priority order ──────────────
+    allocations: list[dict] = []
+    allocated_today = 0.0
+    remaining_fv_needed = fv_need
+    for bucket in ALLOCATION_PRIORITY:
+        avail = float(asset_pool.get(bucket, 0) or 0)
+        if avail <= 0:
+            continue
+        # Convert this bucket's today value to FV at the bucket's own
+        # post-tax return for the goal's horizon.
+        bucket_return = POST_TAX_RETURN.get(_bucket_return_key(bucket), 0.07)
+        bucket_fv = avail * ((1 + bucket_return) ** n_years)
+        if bucket_fv <= 0:
+            continue
+        # Decide how much of this bucket to consume — only as much as the
+        # remaining FV need wants.
+        if bucket_fv <= remaining_fv_needed:
+            consumed_today = avail
+            consumed_fv = bucket_fv
+        else:
+            # Partial — scale linearly.
+            ratio = remaining_fv_needed / bucket_fv
+            consumed_today = avail * ratio
+            consumed_fv = remaining_fv_needed
+        allocations.append({
+            "bucket": bucket,
+            "today_value_used": round(consumed_today),
+            "future_value_at_goal_year": round(consumed_fv),
+            "bucket_return_used": round(bucket_return, 4),
+        })
+        asset_pool[bucket] = avail - consumed_today
+        allocated_today += consumed_today
+        remaining_fv_needed -= consumed_fv
+        if remaining_fv_needed <= 1:
+            break
+
+    trace.append(_trace(
+        f"Existing assets allocated to '{name}'",
+        "for bucket in priority_order: consume FV at bucket's post-tax return until FV need is met",
+        {"buckets_used": [a["bucket"] for a in allocations]},
+        round(allocated_today),
+    ))
+
+    # ── Step 3: Gap and FV of gap ────────────────────────────────────────
+    gap_today = max(0.0, today_cost - allocated_today) if is_today_money else None
+    fv_gap = max(0.0, remaining_fv_needed)
+    if gap_today is not None:
+        trace.append(_trace(
+            f"Gap in today's value for '{name}'",
+            "today_cost - allocated_today",
+            {"today_cost": today_cost, "allocated_today": round(allocated_today)},
+            round(gap_today),
+        ))
+    trace.append(_trace(
+        f"FV of unallocated gap for '{name}'",
+        "FV(inflation, years, , -gap_today)" if is_today_money else "remaining FV need",
+        {"inflation": round(inflation, 4), "years": n_years, "gap_today": round(gap_today or 0)},
+        round(fv_gap),
+    ))
+
+    # ── Step 4: Glide-path return & required SIP ─────────────────────────
+    eff_return = goal.required_return_override or glide_path_return(n_years)
+    if n_years <= 0 or fv_gap <= 0:
+        required_sip_total = 0.0
+    else:
+        required_sip_total = abs(excel_pmt(eff_return / 12, n_years * 12, 0, -fv_gap, when=0))
+    trace.append(_trace(
+        f"Glide-path effective return for '{name}'",
+        "horizon > 10y → 11%, 7-10y → 10.5%, 4-6y → 9%, 2-3y → 6.5%, <2y → 5.5%",
+        {"horizon_years": n_years},
+        round(eff_return, 4),
+        unit="%",
+    ))
+    trace.append(_trace(
+        f"Total required SIP for '{name}'",
+        "PMT(eff_return/12, years*12, 0, -fv_gap)",
+        {"eff_return": round(eff_return, 4), "months": n_years * 12, "fv_gap": round(fv_gap)},
+        round(required_sip_total),
+    ))
+
+    incremental_sip = max(0.0, required_sip_total - existing_goal_sip)
+    if existing_goal_sip > 0:
+        trace.append(_trace(
+            f"Incremental SIP needed for '{name}' (net of existing)",
+            "required_sip_total - existing_goal_sip",
+            {"required_sip_total": round(required_sip_total), "existing_goal_sip": existing_goal_sip},
+            round(incremental_sip),
+        ))
+
+    return {
+        "goal_name": name,
+        "goal_id": getattr(goal, "id", None),
+        "target_year": target_year,
+        "years_to_go": n_years,
+        "today_cost": round(today_cost),
+        "inflation_used": round(inflation, 4),
+        "future_value_needed": round(fv_need),
+        "allocations": allocations,
+        "allocated_today_total": round(allocated_today),
+        "gap_today": round(gap_today or 0) if is_today_money else None,
+        "fv_gap": round(fv_gap),
+        "effective_return": round(eff_return, 4),
+        "required_sip_monthly": round(required_sip_total),
+        "existing_sip_monthly": round(existing_goal_sip),
+        "incremental_sip_monthly": round(incremental_sip),
+        "computation_trace": trace,
+    }
+
+
+def _bucket_return_key(bucket: str) -> str:
+    """Map allocation-priority bucket → POST_TAX_RETURN key."""
+    return {
+        "weak_stocks":           "equity_aggressive",
+        "weak_mfs":              "equity_aggressive",
+        "fixed_deposits":        "bank_fd",
+        "bonds":                 "bonds",
+        "neutral_stocks":        "equity_hybrid",
+        "neutral_mfs":           "equity_hybrid",
+        "ulip_endowment":        "ulip",
+        "nsc":                   "bonds",
+        "ppf":                   "ppf",
+        "real_estate_for_sale":  "real_estate",
+        "gold":                  "gold",
+        "lic_proceeds":          "ulip",
+        "epf":                   "epf",
+        "pension":               "nps",
+    }.get(bucket, "bank_fd")
+
+
+# ── Retirement corpus (Retirement Plan tab) ───────────────────────────────
+
+def compute_retirement_corpus(
+    *,
+    current_age: int,
+    retirement_age: int,
+    life_expectancy: int,
+    current_annual_expenses: float,
+    inflation: float = 0.07,
+    post_retire_return: float = 0.07,
+) -> dict:
+    """Excel's Retirement Plan tab — annuity-due PV approach.
+    Mirror of:
+        E21 = FV(inflation, years_to_retire, , -current_annual_expenses)
+        E25 = ((1 + return) / (1 + inflation)) - 1
+        E26 = PV(disc_rate, post_retire_years, -annual_at_retire, 0, 1)
+    """
+    trace: list[dict] = []
+    years_to_retire = max(0, retirement_age - current_age)
+    post_retire_years = max(0, life_expectancy - retirement_age)
+
+    annual_at_retire = excel_fv(inflation, years_to_retire, 0, -current_annual_expenses)
+    trace.append(_trace(
+        "Annual expenses at retirement (inflation-adjusted)",
+        "FV(inflation, years_to_retire, , -current_annual_expenses)",
+        {"inflation": round(inflation, 4), "years_to_retire": years_to_retire,
+         "current_annual_expenses": round(current_annual_expenses)},
+        round(annual_at_retire),
+    ))
+
+    disc_rate = ((1 + post_retire_return) / (1 + inflation)) - 1
+    trace.append(_trace(
+        "Inflation-adjusted real return (post-retirement)",
+        "((1+post_retire_return)/(1+inflation)) - 1",
+        {"post_retire_return": round(post_retire_return, 4), "inflation": round(inflation, 4)},
+        round(disc_rate, 4),
+        unit="%",
+    ))
+
+    corpus_required = abs(excel_pv(disc_rate, post_retire_years, -annual_at_retire, 0, when=1))
+    trace.append(_trace(
+        "Required retirement corpus",
+        "PV(disc_rate, post_retire_years, -annual_at_retire, 0, 1)",
+        {"disc_rate": round(disc_rate, 4), "post_retire_years": post_retire_years,
+         "annual_at_retire": round(annual_at_retire)},
+        round(corpus_required),
+    ))
+
+    return {
+        "years_to_retire": years_to_retire,
+        "post_retire_years": post_retire_years,
+        "annual_expenses_at_retirement": round(annual_at_retire),
+        "real_return_used": round(disc_rate, 4),
+        "corpus_required": round(corpus_required),
+        "computation_trace": trace,
+    }
+
+
+# ── Insurance computation (Insurance Computation tab) ────────────────────
+
+def compute_insurance_need(
+    *,
+    current_annual_income: float,
+    current_annual_expenses: float,
+    current_age: int,
+    retirement_age: int,
+    spouse_age: int,
+    spouse_life_expectancy: int,
+    loans_outstanding: float,
+    existing_cover: float,
+    investable_assets: float,
+    return_rate: float = 0.10,
+    inflation: float = 0.06,
+) -> dict:
+    """Excel's Insurance Computation tab. Two methods averaged:
+       Method A — Human Life Value: PV of future income to retirement.
+       Method B — Needs: PV of dependent's expenses to their life expectancy.
+       Final cover = avg(A, B) + loans − existing − investable_assets.
+    """
+    trace: list[dict] = []
+    years_to_retire = max(0, retirement_age - current_age)
+    years_spouse_left = max(0, spouse_life_expectancy - spouse_age)
+    disc_rate = ((1 + return_rate) / (1 + inflation)) - 1
+
+    trace.append(_trace(
+        "Discounting rate (real return)",
+        "((1+return)/(1+inflation)) - 1",
+        {"return": round(return_rate, 4), "inflation": round(inflation, 4)},
+        round(disc_rate, 4),
+        unit="%",
+    ))
+
+    hlv = abs(excel_pv(disc_rate, years_to_retire, -current_annual_income, 0, when=0))
+    trace.append(_trace(
+        "Method A — Human Life Value",
+        "PV(disc_rate, years_to_retire, -current_annual_income, 0)",
+        {"disc_rate": round(disc_rate, 4), "years_to_retire": years_to_retire,
+         "current_annual_income": round(current_annual_income)},
+        round(hlv),
+    ))
+
+    needs_corpus = abs(excel_pv(disc_rate, years_spouse_left, -current_annual_expenses, 0, when=0))
+    trace.append(_trace(
+        "Method B — Needs-based corpus",
+        "PV(disc_rate, years_spouse_left, -current_annual_expenses, 0)",
+        {"disc_rate": round(disc_rate, 4), "years_spouse_left": years_spouse_left,
+         "current_annual_expenses": round(current_annual_expenses)},
+        round(needs_corpus),
+    ))
+
+    avg_method = (hlv + needs_corpus) / 2
+    trace.append(_trace(
+        "Average of both methods",
+        "(HLV + Needs corpus) / 2",
+        {"hlv": round(hlv), "needs_corpus": round(needs_corpus)},
+        round(avg_method),
+    ))
+
+    total_need = avg_method + loans_outstanding
+    additional = max(0.0, total_need - existing_cover - investable_assets)
+    trace.append(_trace(
+        "Additional cover required",
+        "(avg + loans) − existing_cover − investable_assets",
+        {"avg": round(avg_method), "loans": round(loans_outstanding),
+         "existing_cover": round(existing_cover), "investable_assets": round(investable_assets)},
+        round(additional),
+    ))
+
+    return {
+        "human_life_value": round(hlv),
+        "needs_based_corpus": round(needs_corpus),
+        "average": round(avg_method),
+        "total_need_including_loans": round(total_need),
+        "existing_cover": round(existing_cover),
+        "investable_assets": round(investable_assets),
+        "additional_cover_required": round(additional),
+        "computation_trace": trace,
+    }
+
+
+# ── Year-by-year cashflow (YoY Cash Flow tab) ─────────────────────────────
+
+def compute_yoy_cashflow(
+    *,
+    horizon_years: int,
+    start_year: int,
+    start_age: int,
+    retirement_age: int,
+    monthly_income_employment: float,
+    monthly_income_business: float,
+    monthly_income_rental: float,
+    monthly_income_other: float,
+    monthly_expenses_living: float,
+    monthly_loan_repayment: float,
+    opening_financial_assets: float,
+    opening_non_financial_assets: float,
+    income_growth_rate: float = 0.08,       # E$5
+    expense_growth_rate: float = 0.07,      # J$5
+    financial_asset_roi: float = None,      # S$5 — defaults to BLENDED_ROI_POST_TAX
+    non_financial_appreciation: float = 0.08,  # Z$5
+    goal_outflows_by_year: dict[int, float] | None = None,
+) -> list[dict]:
+    """Excel's `YoY Cash Flow` sheet — row-by-row. Each year:
+        income[y]  = income[y-1] * (1 + E$5)
+        expense[y] = expense[y-1] * (1 + J$5)
+        loan[y]    = loan[y-1]   (no inflation; fixed EMI)
+        surplus[y] = income[y] - expense[y] - loan[y]
+        FA_close[y] = (FA_open[y] + surplus[y]/2 - goal_outflow[y]) * (1 + S$5)
+                     + (FA_open[y] + surplus[y] - goal_outflow[y])  ... see Excel
+        NFA_close[y]= NFA_open[y] * (1 + Z$5)
+        net_worth   = FA_close + NFA_close
+    """
+    if financial_asset_roi is None:
+        financial_asset_roi = BLENDED_ROI_POST_TAX
+    goal_outflows_by_year = goal_outflows_by_year or {}
+
+    rows: list[dict] = []
+    income_emp = monthly_income_employment * 12
+    income_biz = monthly_income_business * 12
+    income_rent = monthly_income_rental * 12
+    income_oth = monthly_income_other * 12
+    expense = monthly_expenses_living * 12
+    loan = monthly_loan_repayment * 12
+    fa_open = opening_financial_assets
+    nfa_open = opening_non_financial_assets
+
+    for i in range(horizon_years):
+        year = start_year + i
+        age = start_age + i
+        earning = age < retirement_age
+
+        # Income lines stop at retirement (employment) but rental + others
+        # carry forward.
+        annual_emp = income_emp if earning else 0
+        annual_biz = income_biz if earning else 0
+        total_income = annual_emp + annual_biz + income_rent + income_oth
+        # Loan stops once paid off (assumed: loan_repayment goes to 0 after
+        # the term ends — caller must track that separately and pass 0).
+        annual_loan = loan if earning else 0
+        total_outflow = expense + annual_loan
+        surplus = total_income - total_outflow
+
+        # Major withdrawals for goals triggering this year.
+        withdrawal = float(goal_outflows_by_year.get(year, 0))
+
+        # Mid-year compounding convention from the Excel:
+        #   FA_close = (FA_open + surplus/2 − withdrawal) × (1 + ROI)
+        fa_returns = (fa_open + surplus / 2 - withdrawal) * financial_asset_roi
+        fa_close = fa_open + surplus - withdrawal + fa_returns
+
+        # Non-financial — pure appreciation.
+        nfa_close = nfa_open * (1 + non_financial_appreciation)
+
+        rows.append({
+            "year": year,
+            "age": age,
+            "income_employment": round(annual_emp),
+            "income_business": round(annual_biz),
+            "income_rental": round(income_rent),
+            "income_other": round(income_oth),
+            "total_income": round(total_income),
+            "expenses": round(expense),
+            "loan_repayment": round(annual_loan),
+            "total_outflow": round(total_outflow),
+            "surplus": round(surplus),
+            "goal_withdrawal": round(withdrawal),
+            "financial_asset_returns": round(fa_returns),
+            "financial_assets_closing": round(fa_close),
+            "non_financial_assets_closing": round(nfa_close),
+            "net_worth": round(fa_close + nfa_close),
+            "net_worth_crore": round((fa_close + nfa_close) / 1e7, 2),
+        })
+
+        # Roll-forward
+        fa_open = fa_close
+        nfa_open = nfa_close
+        income_emp *= (1 + income_growth_rate)
+        income_biz *= (1 + income_growth_rate)
+        income_rent *= (1 + income_growth_rate)
+        income_oth *= (1 + income_growth_rate)
+        expense *= (1 + expense_growth_rate)
+
+    return rows
+
+
+# ── Top-level orchestrator ───────────────────────────────────────────────
+
+@dataclass
+class CFPOutput:
+    summary: dict
+    goal_blocks: list[dict]
+    retirement: dict
+    insurance: dict
+    yoy_cashflow: list[dict]
+    constants_used: dict
+    computation_trace: list[dict]
+
+
+async def run_cfp(household_id: str) -> dict[str, Any]:
+    plan = await get_plan(household_id)
+    if not plan:
+        return {"error": "household_not_found"}
+    return compute_cfp(plan).__dict__
+
+
+def compute_cfp(plan: PlanState) -> CFPOutput:
+    """The Excel-faithful orchestration — runs every block and bundles the
+    computation trace for inline display in the agent's tool result."""
+    trace: list[dict] = []
+
+    fsi = plan.freedom_score_inputs
+    pd = plan.personal_details
+    current_year = datetime.now().year
+    current_age = fsi.age or 30
+    retirement_age = pd.retirement_age_target or 60
+    life_expectancy = (plan.assumptions.persons[0].life_expectancy if plan.assumptions.persons else 85)
+
+    monthly_income = fsi.monthly_income or 0
+    monthly_expenses = fsi.monthly_expenses or 0
+    monthly_emi = fsi.monthly_emi or 0
+
+    annual_income = monthly_income * 12
+    annual_expenses = monthly_expenses * 12
+
+    trace.append(_trace(
+        "Annual income",
+        "monthly_income × 12",
+        {"monthly_income": monthly_income},
+        round(annual_income),
+    ))
+    trace.append(_trace(
+        "Annual expenses (excl. investments, excl. EMIs)",
+        "monthly_expenses × 12",
+        {"monthly_expenses": monthly_expenses},
+        round(annual_expenses),
+    ))
+
+    # ── Goal blocks ────────────────────────────────────────────────────
+    asset_pool = _build_asset_pool(plan)
+    goal_blocks: list[dict] = []
+    goal_outflows_by_year: dict[int, float] = {}
+    for g in plan.financial_goals:
+        block = compute_goal_block(g, current_year=current_year, asset_pool=asset_pool)
+        goal_blocks.append(block)
+        if block["target_year"] and block["future_value_needed"]:
+            goal_outflows_by_year[block["target_year"]] = (
+                goal_outflows_by_year.get(block["target_year"], 0) + block["future_value_needed"]
+            )
+
+    total_required_sip = sum(b["required_sip_monthly"] for b in goal_blocks)
+    total_incremental_sip = sum(b["incremental_sip_monthly"] for b in goal_blocks)
+    trace.append(_trace(
+        "Total required SIP across all goals",
+        "Σ goal.required_sip_monthly",
+        {"goal_count": len(goal_blocks)},
+        round(total_required_sip),
+    ))
+
+    # ── Retirement corpus ──────────────────────────────────────────────
+    # Excel uses the equity_hybrid (10.5%) post-tax return for the
+    # retirement-corpus discounting. See Retirement Plan tab cell E23 →
+    # Assumptions sheet E22.
+    retirement = compute_retirement_corpus(
+        current_age=current_age,
+        retirement_age=retirement_age,
+        life_expectancy=life_expectancy,
+        current_annual_expenses=annual_expenses,
+        inflation=plan.assumptions.inflation or 0.07,
+        post_retire_return=POST_TAX_RETURN["equity_hybrid"],
+    )
+
+    # ── Insurance need ─────────────────────────────────────────────────
+    loans = plan.loans_liabilities
+    loans_outstanding = sum(
+        (getattr(loans, k).outstanding_amount or 0) if getattr(loans, k, None) else 0
+        for k in ("home_loan", "car_loan", "personal_loan", "credit_card_dues")
+    )
+    existing_cover = (
+        plan.insurance_details.term_plan.cover_amount
+        if plan.insurance_details and plan.insurance_details.term_plan
+        else 0
+    ) or 0
+    investable_assets = (fsi.portfolio_current_value or 0) + (fsi.liquid_assets_current_value or 0)
+
+    spouse_age = (plan.assumptions.persons[1].id and (current_age - 2)) if len(plan.assumptions.persons) > 1 else current_age - 2
+    insurance = compute_insurance_need(
+        current_annual_income=annual_income,
+        current_annual_expenses=annual_expenses,
+        current_age=current_age,
+        retirement_age=retirement_age,
+        spouse_age=spouse_age if isinstance(spouse_age, int) else current_age - 2,
+        spouse_life_expectancy=life_expectancy,
+        loans_outstanding=loans_outstanding,
+        existing_cover=existing_cover,
+        investable_assets=investable_assets,
+        return_rate=0.10,
+        inflation=plan.assumptions.inflation or 0.06,
+    )
+
+    # ── Year-by-year cashflow ──────────────────────────────────────────
+    income_emp_monthly = (plan.income_details.client_salary_in_hand or 0) + (plan.income_details.spouse_salary_in_hand or 0)
+    income_biz_monthly = (plan.income_details.client_business_income or 0) + (plan.income_details.spouse_business_income or 0)
+    income_rent_monthly = (plan.income_details.client_rental_income or 0) + (plan.income_details.spouse_rental_income or 0)
+    income_oth_monthly = (plan.income_details.client_other_income or 0) + (plan.income_details.spouse_other_income or 0)
+
+    opening_fa = (fsi.portfolio_current_value or 0) + (fsi.liquid_assets_current_value or 0)
+    # Non-financial = real estate at today's value. The current schema
+    # doesn't carry a separate `real_estate[]` list — when one lands,
+    # we'll sum it here. For now non-financial assets aren't tracked in
+    # the platform.
+    opening_nfa = 0.0
+
+    yoy = compute_yoy_cashflow(
+        horizon_years=min(40, max(life_expectancy - current_age, 10)),
+        start_year=current_year,
+        start_age=current_age,
+        retirement_age=retirement_age,
+        monthly_income_employment=income_emp_monthly,
+        monthly_income_business=income_biz_monthly,
+        monthly_income_rental=income_rent_monthly,
+        monthly_income_other=income_oth_monthly,
+        monthly_expenses_living=monthly_expenses,
+        monthly_loan_repayment=monthly_emi,
+        opening_financial_assets=opening_fa,
+        opening_non_financial_assets=opening_nfa,
+        income_growth_rate=0.08,
+        expense_growth_rate=plan.assumptions.inflation or 0.07,
+        financial_asset_roi=BLENDED_ROI_POST_TAX,
+        non_financial_appreciation=POST_TAX_RETURN["real_estate"],
+        goal_outflows_by_year=goal_outflows_by_year,
+    )
+
+    # ── Summary ────────────────────────────────────────────────────────
+    gross_savings_rate = (annual_income - annual_expenses - monthly_emi * 12) / annual_income if annual_income else 0
+    required_savings_rate = total_required_sip / monthly_income if monthly_income else 0
+    on_track = required_savings_rate <= gross_savings_rate
+
+    summary = {
+        "current_age": current_age,
+        "retirement_age": retirement_age,
+        "life_expectancy": life_expectancy,
+        "annual_income": round(annual_income),
+        "annual_expenses": round(annual_expenses),
+        "annual_emi": round(monthly_emi * 12),
+        "gross_savings_rate": round(gross_savings_rate, 4),
+        "required_savings_rate": round(required_savings_rate, 4),
+        "on_track": on_track,
+        "total_required_sip_monthly": round(total_required_sip),
+        "total_incremental_sip_monthly": round(total_incremental_sip),
+        "retirement_corpus_required": retirement["corpus_required"],
+        "additional_insurance_cover_required": insurance["additional_cover_required"],
+        "horizon_net_worth_estimate": yoy[-1]["net_worth"] if yoy else 0,
+    }
+
+    trace.append(_trace(
+        "Gross savings rate",
+        "(annual_income − annual_expenses − annual_emi) / annual_income",
+        {"annual_income": round(annual_income), "annual_expenses": round(annual_expenses),
+         "annual_emi": round(monthly_emi * 12)},
+        round(gross_savings_rate, 4),
+        unit="%",
+    ))
+    trace.append(_trace(
+        "Required savings rate (SIP-as-%-of-income)",
+        "total_required_sip / monthly_income",
+        {"total_required_sip": round(total_required_sip), "monthly_income": monthly_income},
+        round(required_savings_rate, 4),
+        unit="%",
+    ))
+    trace.append(_trace(
+        "On track?",
+        "required_savings_rate <= gross_savings_rate",
+        {"required": round(required_savings_rate, 4), "gross": round(gross_savings_rate, 4)},
+        "yes" if on_track else "no",
+        unit="bool",
+    ))
+
+    constants_used = {
+        "inflation_table": INFLATION_TABLE,
+        "post_tax_return_table": {k: round(v, 4) for k, v in POST_TAX_RETURN.items()},
+        "blended_roi_post_tax": round(BLENDED_ROI_POST_TAX, 4),
+        "allocation_priority": ALLOCATION_PRIORITY,
+    }
+
+    return CFPOutput(
+        summary=summary,
+        goal_blocks=goal_blocks,
+        retirement=retirement,
+        insurance=insurance,
+        yoy_cashflow=yoy,
+        constants_used=constants_used,
+        computation_trace=trace,
+    )
+
+
+def _build_asset_pool(plan: PlanState) -> dict[str, float]:
+    """Turn the plan's holdings into the priority-keyed asset pool the
+    goal-allocation step consumes. Tags ('weak' / 'neutral') come from a
+    firm-maintained tagging file (Rule 6 of the brief) — until that's
+    wired, every stock / MF is treated as 'neutral'."""
+    pool: dict[str, float] = {b: 0.0 for b in ALLOCATION_PRIORITY}
+
+    # Mutual funds — currently all neutral (until tagging file lands).
+    for mf in plan.mutual_funds or []:
+        pool["neutral_mfs"] += float(mf.current_value or 0)
+    # Equity stocks
+    for eq in plan.equity_stocks or []:
+        pool["neutral_stocks"] += float(eq.current_value or 0)
+    # Fixed income — split FD vs PPF/EPF vs others
+    for fi in plan.fixed_income or []:
+        instrument = (fi.instrument or "").lower()
+        val = float(fi.current_value or 0)
+        if "fd" in instrument:
+            pool["fixed_deposits"] += val
+        elif "ppf" in instrument:
+            pool["ppf"] += val
+        elif "epf" in instrument:
+            pool["epf"] += val
+        elif "nsc" in instrument:
+            pool["nsc"] += val
+        elif "bond" in instrument:
+            pool["bonds"] += val
+        elif "nps" in instrument:
+            pool["pension"] += val
+        else:
+            pool["fixed_deposits"] += val
+
+    return pool
