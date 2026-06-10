@@ -93,55 +93,249 @@ def _sum_optionals(o: Any) -> float:
 
 
 CSS = """
+/* Stack Wealth — branded report stylesheet.
+   Palette: matcha green (brand), graphite (text), warm cream (page bg),
+   tinted callout surfaces for status (emerald / amber / rose).      */
+
+:root {
+  --brand:        #5f7d56;   /* matcha primary */
+  --brand-soft:   #e8efe4;   /* tinted surface */
+  --brand-deep:   #3a4f33;   /* deep accent for headers */
+  --ink:          #18181b;   /* main text */
+  --ink-soft:     #52525b;   /* secondary text */
+  --ink-muted:    #a1a1aa;   /* faint */
+  --line:         #e4e4e7;   /* borders */
+  --line-soft:    #f4f4f5;   /* table-row tint */
+  --cream:        #fbfaf7;   /* page bg */
+  --good:         #15803d;
+  --good-bg:      #ecfdf5;
+  --warn:         #b45309;
+  --warn-bg:      #fef3c7;
+  --bad:          #b91c1c;
+  --bad-bg:       #fef2f2;
+  --info-bg:      #fffbeb;
+  --info-bd:      #fde68a;
+}
+
 @page { size: A4; margin: 14mm 14mm 18mm 14mm; }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
 body {
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  color: #18181b;
+  font-family: 'Helvetica Neue', 'Inter', Arial, sans-serif;
+  color: var(--ink);
+  background: var(--cream);
   font-size: 10.5pt;
-  line-height: 1.45;
+  line-height: 1.5;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
 }
+
 .page { page-break-after: always; padding-bottom: 18mm; position: relative; }
 .page:last-child { page-break-after: auto; }
-h1 { font-size: 22pt; margin: 0 0 4mm; font-weight: 700; letter-spacing: -0.01em; }
-h2 { font-size: 15pt; margin: 8mm 0 3mm; font-weight: 600; border-bottom: 1px solid #e4e4e7; padding-bottom: 1.5mm; }
-h3 { font-size: 12pt; margin: 5mm 0 2mm; font-weight: 600; color: #27272a; }
-h4 { font-size: 11pt; margin: 3mm 0 1.5mm; font-weight: 600; color: #3f3f46; }
-p { margin: 0 0 2.5mm; }
+
+/* ── Headings ────────────────────────────────────────────────────────── */
+h1 { font-size: 24pt; margin: 0 0 5mm; font-weight: 700; letter-spacing: -0.02em; color: var(--ink); }
+h2 {
+  font-size: 14pt;
+  margin: 9mm 0 4mm;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--brand-deep);
+  padding: 2.5mm 4mm;
+  background: linear-gradient(90deg, var(--brand-soft) 0%, transparent 100%);
+  border-left: 3.5mm solid var(--brand);
+  border-radius: 0 1.5mm 1.5mm 0;
+}
+h3 {
+  font-size: 11.5pt;
+  margin: 6mm 0 2.5mm;
+  font-weight: 600;
+  color: var(--brand-deep);
+  border-bottom: 1px solid var(--brand-soft);
+  padding-bottom: 1.2mm;
+  display: inline-block;
+  min-width: 60mm;
+}
+h4 { font-size: 10.5pt; margin: 3mm 0 1.5mm; font-weight: 600; color: var(--brand-deep); }
+p  { margin: 0 0 2.5mm; }
 ul, ol { margin: 0 0 3mm 5mm; padding: 0; }
 li { margin: 0 0 1mm; }
-table { width: 100%; border-collapse: collapse; margin: 2mm 0 4mm; font-size: 9.8pt; }
-th, td { padding: 2mm 2.5mm; border: 1px solid #e4e4e7; text-align: left; vertical-align: top; }
-th { background: #fafafa; font-weight: 600; color: #3f3f46; }
+
+/* ── Tables ──────────────────────────────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; margin: 2mm 0 4mm; font-size: 9.8pt; background: white; border-radius: 1.5mm; overflow: hidden; box-shadow: 0 1px 0 var(--line); }
+th, td { padding: 2.2mm 3mm; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+tr:last-child th, tr:last-child td { border-bottom: none; }
+thead th {
+  background: var(--brand-deep);
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  font-size: 8.5pt;
+  border-bottom: none;
+}
+tbody tr:nth-child(even) td { background: var(--line-soft); }
+tbody tr.subtotal td, tbody tr.total td { background: var(--brand-soft) !important; font-weight: 600; color: var(--brand-deep); }
+tbody tr.total td { border-top: 2px solid var(--brand); }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
-.muted { color: #71717a; font-size: 9.5pt; }
-.headline { background: #f4f4f5; padding: 4mm 5mm; border-left: 3px solid #18181b; margin: 3mm 0 5mm; }
-.headline h1 { font-size: 18pt; }
+td.label-cell { font-weight: 500; color: var(--ink); }
+
+/* ── Cover ──────────────────────────────────────────────────────────── */
+.cover {
+  padding-top: 0;
+  position: relative;
+  min-height: 250mm;
+}
+.cover-band {
+  background: var(--brand);
+  color: white;
+  padding: 22mm 14mm 18mm;
+  margin: -14mm -14mm 8mm -14mm;
+  position: relative;
+}
+.cover-band::after {
+  content: "";
+  position: absolute;
+  bottom: -3mm;
+  left: 0;
+  right: 0;
+  height: 3mm;
+  background: var(--brand-deep);
+}
+.cover-band .brand { font-size: 11pt; letter-spacing: 0.25em; text-transform: uppercase; opacity: 0.85; margin-bottom: 4mm; }
+.cover-band h1 { color: white; font-size: 30pt; line-height: 1.05; margin: 0 0 3mm; letter-spacing: -0.02em; }
+.cover-band .sub { font-size: 12pt; opacity: 0.85; }
+.cover .prepared-for { text-align: center; margin: 14mm 0 8mm; }
+.cover .prepared-for .label { font-size: 9.5pt; color: var(--ink-soft); letter-spacing: 0.2em; text-transform: uppercase; }
+.cover .prepared-for .name { font-size: 16pt; font-weight: 600; letter-spacing: 0.04em; margin: 3mm 0 2mm; color: var(--brand-deep); }
+.cover .prepared-for .meta { font-size: 10pt; color: var(--ink-soft); }
+.cover .headline-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 3mm;
+  margin: 8mm 0;
+}
+.headline-tile {
+  background: white;
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--brand);
+  border-radius: 2mm;
+  padding: 5mm 4mm;
+  text-align: center;
+}
+.headline-tile .lbl { font-size: 8.5pt; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 2mm; }
+.headline-tile .val { font-size: 15pt; font-weight: 700; color: var(--brand-deep); letter-spacing: -0.01em; }
+.headline-tile .note { font-size: 9pt; color: var(--ink-soft); margin-top: 1mm; }
+.cover-foot { font-size: 9.5pt; line-height: 1.55; color: var(--ink-soft); margin-top: 8mm; padding: 4mm 5mm; background: var(--brand-soft); border-radius: 1.5mm; }
+
+/* ── Headline / Callout boxes ──────────────────────────────────────── */
+.headline-bar {
+  background: var(--brand-soft);
+  padding: 4mm 5mm;
+  border-left: 4px solid var(--brand);
+  margin: 3mm 0 5mm;
+  border-radius: 0 1.5mm 1.5mm 0;
+}
+.headline-bar h1 { font-size: 18pt; color: var(--brand-deep); }
+
+.callout {
+  margin: 4mm 0;
+  padding: 3.5mm 5mm;
+  border-radius: 1.5mm;
+  border-left: 3.5mm solid;
+}
+.callout.good   { background: var(--good-bg); border-color: var(--good); color: #064e3b; }
+.callout.warn   { background: var(--warn-bg); border-color: var(--warn); color: #78350f; }
+.callout.bad    { background: var(--bad-bg);  border-color: var(--bad);  color: #7f1d1d; }
+.callout.info   { background: var(--info-bg); border-color: var(--info-bd); color: #713f12; }
+.callout strong { display: block; font-size: 10.5pt; margin-bottom: 1mm; }
+.callout p { margin: 0; font-size: 10pt; }
+
+/* ── Status badges / pills ─────────────────────────────────────────── */
+.badge {
+  display: inline-block;
+  padding: 0.8mm 2.5mm;
+  border-radius: 8mm;
+  font-size: 8.5pt;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.badge.good { background: var(--good-bg); color: var(--good); border: 1px solid #a7f3d0; }
+.badge.warn { background: var(--warn-bg); color: var(--warn); border: 1px solid #fde68a; }
+.badge.bad  { background: var(--bad-bg);  color: var(--bad);  border: 1px solid #fecaca; }
+.badge.neutral { background: var(--line-soft); color: var(--ink-soft); border: 1px solid var(--line); }
+
+.pill {
+  display: inline-block;
+  padding: 0.5mm 2mm;
+  border-radius: 1.5mm;
+  background: var(--brand-soft);
+  color: var(--brand-deep);
+  font-size: 9pt;
+  font-weight: 500;
+}
+
+/* ── Stat cards ─────────────────────────────────────────────────────── */
 .kbox { display: grid; grid-template-columns: 1fr 1fr; gap: 3mm; margin: 3mm 0; }
 .kbox-3 { grid-template-columns: 1fr 1fr 1fr; }
-.kcell { background: #fafafa; padding: 3mm 4mm; border: 1px solid #e4e4e7; border-radius: 1.5mm; }
-.kcell .label { font-size: 9pt; color: #71717a; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 1mm; }
-.kcell .val { font-size: 13pt; font-weight: 600; color: #18181b; }
-.kcell .note { font-size: 9pt; color: #52525b; margin-top: 1mm; }
-.takeaway { background: #fefce8; padding: 3mm 4mm; border-left: 3px solid #ca8a04; margin: 3mm 0 4mm; font-size: 10pt; }
-.takeaway strong { color: #713f12; }
-.bad { color: #b91c1c; }
-.good { color: #15803d; }
-.warn { color: #b45309; }
-/* No in-content footer — Playwright's footer_template handles every page. */
-/* Cover is now a dense scoreboard, not vertically centred — content fills the page. */
-.cover .brand { font-size: 11pt; color: #71717a; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 3mm; }
-.cover h1 { font-size: 26pt; line-height: 1.1; margin: 0 0 1mm; }
-.cover .sub { font-size: 12pt; color: #52525b; margin-bottom: 4mm; }
-.cover-meta { display: flex; gap: 8mm; flex-wrap: wrap; font-size: 10pt; color: #3f3f46; padding: 2.5mm 0; border-top: 1px solid #e4e4e7; border-bottom: 1px solid #e4e4e7; margin-bottom: 5mm; }
-.cover-section { margin-top: 0; }
-.cover-foot { margin-top: 6mm; font-size: 9.5pt; line-height: 1.5; }
-.disclaimer { font-size: 8.5pt; color: #71717a; line-height: 1.45; margin-top: 5mm; }
-.scorecard td { padding: 1.5mm 3mm; }
-.score-bar { height: 4mm; background: #e4e4e7; border-radius: 1mm; overflow: hidden; }
-.score-bar > div { height: 100%; background: #18181b; }
-.pill { display: inline-block; padding: 0.5mm 2mm; border-radius: 1.5mm; background: #f4f4f5; font-size: 9pt; color: #3f3f46; }
+.kbox-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+.kcell {
+  background: white;
+  padding: 4mm 5mm;
+  border: 1px solid var(--line);
+  border-top: 2.5px solid var(--brand);
+  border-radius: 1.5mm;
+}
+.kcell .label {
+  font-size: 8.5pt;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 1.5mm;
+  font-weight: 600;
+}
+.kcell .val { font-size: 14pt; font-weight: 700; color: var(--brand-deep); letter-spacing: -0.01em; }
+.kcell .note { font-size: 9pt; color: var(--ink-soft); margin-top: 1.5mm; line-height: 1.4; }
+
+/* ── Muted / secondary text ─────────────────────────────────────────── */
+.muted { color: var(--ink-soft); font-size: 9.5pt; }
+.tiny  { font-size: 9pt; color: var(--ink-muted); }
+
+/* ── Status text ────────────────────────────────────────────────────── */
+.bad  { color: var(--bad); font-weight: 600; }
+.good { color: var(--good); font-weight: 600; }
+.warn { color: var(--warn); font-weight: 600; }
+
+/* ── Score / progress bar ──────────────────────────────────────────── */
+.score-bar { height: 4mm; background: var(--line); border-radius: 2mm; overflow: hidden; }
+.score-bar > div { height: 100%; background: var(--brand); border-radius: 2mm; }
+
+/* ── Section opener strip ──────────────────────────────────────────── */
+.section-tag {
+  display: inline-block;
+  background: var(--brand);
+  color: white;
+  font-size: 9pt;
+  font-weight: 600;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  padding: 1mm 3mm;
+  border-radius: 1mm;
+  margin-bottom: 2mm;
+}
+
+/* ── End marker ────────────────────────────────────────────────────── */
+.end-marker {
+  text-align: center;
+  margin-top: 10mm;
+  padding: 5mm 0;
+  border-top: 1px solid var(--brand-soft);
+  color: var(--brand-deep);
+  font-size: 9.5pt;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
 """
 
 
@@ -1054,35 +1248,48 @@ def _sandeep_cover(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     monthly_emi = fsi.monthly_emi or 0
     surplus_gross = monthly_income - monthly_expenses - monthly_emi
     return f"""<section class="page cover">
-  <p class="brand" style="text-align:center;">Stack Wealth</p>
-  <h1 style="text-align:center; font-size:24pt;">COMPREHENSIVE FINANCIAL PLAN</h1>
-  <p class="sub" style="text-align:center;">A Forward-Looking Wealth & Life Planning Report</p>
-
-  <div style="text-align:center; margin: 12mm 0 6mm;">
-    <p class="muted">Prepared For</p>
-    <p style="font-size: 14pt; font-weight: 600; letter-spacing: 0.03em; margin: 2mm 0;">{_h(headline)}</p>
-    <p class="muted">{_h(city)}  |  {_h(today)}</p>
+  <div class="cover-band">
+    <p class="brand">Stack Wealth — Research Desk</p>
+    <h1>Comprehensive<br/>Financial Plan</h1>
+    <p class="sub">A Forward-Looking Wealth &amp; Life Planning Report</p>
   </div>
 
-  <h3>Headline</h3>
-  <table>
-    <thead><tr>
-      <th>Monthly Income</th>
-      <th>Monthly Surplus</th>
-      <th>Net Worth</th>
-      <th>Retirement Target</th>
-    </tr></thead>
-    <tbody><tr>
-      <td class="num">{_fmt_inr(monthly_income)}</td>
-      <td class="num">{_fmt_inr(surplus_gross)}</td>
-      <td class="num">{_fmt_lakhs(nw.total)}</td>
-      <td>Age {pd.retirement_age_target or 60} ({retire_year})</td>
-    </tr></tbody>
-  </table>
+  <div class="prepared-for">
+    <div class="label">Prepared For</div>
+    <div class="name">{_h(headline)}</div>
+    <div class="meta">{_h(city)}  ·  {_h(today)}</div>
+  </div>
 
-  <p class="muted cover-foot">Sections that follow: Client Profiling · Cash Flow Analysis · Net Worth Assessment ·
-  Goal-Based Planning · Investment Strategy · Risk Management · Tax Efficiency ·
-  Future-Proofing & Scenario Analysis · Execution Roadmap.</p>
+  <div class="headline-grid">
+    <div class="headline-tile">
+      <div class="lbl">Monthly Income</div>
+      <div class="val">{_fmt_inr(monthly_income)}</div>
+      <div class="note">Net, after taxes</div>
+    </div>
+    <div class="headline-tile">
+      <div class="lbl">Monthly Surplus</div>
+      <div class="val">{_fmt_inr(surplus_gross)}</div>
+      <div class="note">Pre-investments</div>
+    </div>
+    <div class="headline-tile">
+      <div class="lbl">Net Worth</div>
+      <div class="val">{_fmt_lakhs(nw.total)}</div>
+      <div class="note">Today's snapshot</div>
+    </div>
+    <div class="headline-tile">
+      <div class="lbl">Retirement Target</div>
+      <div class="val">Age {pd.retirement_age_target or 60}</div>
+      <div class="note">Year {retire_year}</div>
+    </div>
+  </div>
+
+  <div class="cover-foot">
+    <strong style="color:var(--brand-deep);">What's inside.</strong>
+    Client Profiling · Cash Flow Analysis · Net Worth Assessment ·
+    Goal-Based Planning · Investment Strategy · Risk Management ·
+    Tax Efficiency · Future-Proofing &amp; Scenario Analysis · Execution Roadmap.
+    Every number on this report traces back to PlanState data and the firm's CFP Excel methodology.
+  </div>
 </section>"""
 
 
@@ -1597,18 +1804,26 @@ def _sandeep_s6_risk(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     ef_gap = max(0, ef_target - ef_current)
     ef_sip = ef_gap / 36 if ef_gap > 0 else 0
 
-    ef_status = "ADEQUATE ✓" if ef_gap <= 0 else "CRITICAL GAP ❌"
+    ef_badge = '<span class="badge good">Adequate</span>' if ef_gap <= 0 else '<span class="badge bad">Critical gap</span>'
+    ef_callout = ""
+    if ef_gap > 0:
+        ef_callout = f"""<div class="callout bad">
+          <strong>⚠  Emergency fund shortfall — {_fmt_lakhs(ef_gap)}</strong>
+          <p>You're {_fmt_pct(ef_current / max(ef_target, 1) * 100, 0)} of the way to a 6-month liquidity buffer.
+          Park ₹{int(ef_sip):,}/month into a Liquid Fund for the next 36 months to close it without delaying goal SIPs.</p>
+        </div>"""
     ef_table = f"""
     <table>
       <tbody>
-        <tr><td>Emergency Fund Status</td><td><strong>{ef_status}</strong></td></tr>
-        <tr><td>Monthly Living Outflow</td><td class="num">{_fmt_inr(monthly_outflow)}</td></tr>
-        <tr><td>Recommended Emergency Fund (6 months)</td><td class="num">{_fmt_inr(ef_target)}</td></tr>
-        <tr><td>Currently Liquid (Savings + Idle Cash)</td><td class="num">{_fmt_inr(ef_current)}</td></tr>
-        <tr><td>Shortfall</td><td class="num">{_fmt_inr(ef_gap)}</td></tr>
-        <tr><td>SIP to Close Gap (36 months → Liquid Fund)</td><td class="num">{_fmt_inr(ef_sip)}/mo</td></tr>
+        <tr><td class="label-cell">Emergency Fund Status</td><td>{ef_badge}</td></tr>
+        <tr><td class="label-cell">Monthly Living Outflow</td><td class="num">{_fmt_inr(monthly_outflow)}</td></tr>
+        <tr><td class="label-cell">Recommended Emergency Fund (6 months)</td><td class="num">{_fmt_inr(ef_target)}</td></tr>
+        <tr><td class="label-cell">Currently Liquid (Savings + Idle Cash)</td><td class="num">{_fmt_inr(ef_current)}</td></tr>
+        <tr><td class="label-cell">Shortfall</td><td class="num">{_fmt_inr(ef_gap)}</td></tr>
+        <tr class="total"><td>SIP to Close Gap (36 months → Liquid Fund)</td><td class="num">{_fmt_inr(ef_sip)}/mo</td></tr>
       </tbody>
-    </table>"""
+    </table>
+    {ef_callout}"""
 
     ins = cfp.insurance
     term = plan.insurance_details.term_plan
@@ -1623,10 +1838,10 @@ def _sandeep_s6_risk(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
 
     def status(actual: float, req: float) -> str:
         if actual >= req:
-            return '<span class="good">Adequate ✓</span>'
+            return '<span class="badge good">Adequate</span>'
         if actual >= req * 0.7:
-            return f'<span class="warn">Short by {_fmt_lakhs(req - actual)}</span>'
-        return f'<span class="bad">Underinsured — gap {_fmt_lakhs(req - actual)}</span>'
+            return f'<span class="badge warn">Short {_fmt_lakhs(req - actual)}</span>'
+        return f'<span class="badge bad">Gap {_fmt_lakhs(req - actual)}</span>'
 
     cover_table = f"""
     <table>
@@ -1823,7 +2038,7 @@ def _sandeep_s9_roadmap(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     </tbody>
   </table>
 
-  <p style="text-align:center; margin-top: 8mm; color: #71717a; font-size: 9.5pt;">— End of Financial Plan —</p>
+  <div class="end-marker">— End of Financial Plan —</div>
 </section>"""
 
 
