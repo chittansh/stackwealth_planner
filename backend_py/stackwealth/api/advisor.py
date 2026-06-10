@@ -1,12 +1,13 @@
 """/api/advisor — dashboard endpoints."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from ..db import get_plan, list_all_households
+from ..db import get_plan, list_all_households, list_households_page
 from ..skills.news import list_news, score_item_for_plan
 from ..types import PlanState
 
@@ -48,12 +49,22 @@ def _humanize(d: datetime) -> str:
 
 
 @router.get("/clients")
-async def clients() -> JSONResponse:
-    ids = await list_all_households()
+async def clients(limit: int = 25, offset: int = 0) -> JSONResponse:
+    """Paginated client list. Default page size 25 — the previous N-roundtrip
+    serial scan against `get_plan` for every household was the source of the
+    slow initial advisor load. Now Postgres handles the ORDER BY + LIMIT +
+    OFFSET server-side and we fetch the page's plans concurrently."""
+    limit = max(1, min(100, int(limit)))
+    offset = max(0, int(offset))
+
+    ids, total = await list_households_page(limit, offset)
     news = list_news()
+
+    # Fetch the page's plans in parallel — biggest single win.
+    plans = await asyncio.gather(*(get_plan(hid) for hid in ids))
+
     rows = []
-    for hid in ids:
-        p = await get_plan(hid)
+    for hid, p in zip(ids, plans):
         if not p:
             continue
         fs = p.computed.freedom_score.final_score if p.computed.freedom_score else None
@@ -73,7 +84,13 @@ async def clients() -> JSONResponse:
                 "news_count": news_count,
             }
         )
-    return JSONResponse(content={"rows": rows})
+    return JSONResponse(content={
+        "rows": rows,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(rows) < total,
+    })
 
 
 @router.get("/highlights")

@@ -27,8 +27,11 @@ const TINT: Record<Highlight['kind'], string> = {
   tax_window: 'border-[var(--color-accent-2)] bg-[var(--color-accent-soft)] text-[color:var(--color-accent)]',
 };
 
+const DEFAULT_VISIBLE = 3;
+
 export function HighlightsStrip() {
   const [items, setItems] = useState<Highlight[]>([]);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     fetch(`${BACKEND}/api/advisor/highlights`)
@@ -39,9 +42,12 @@ export function HighlightsStrip() {
 
   if (!items.length) return null;
 
+  const visible = expanded ? items : items.slice(0, DEFAULT_VISIBLE);
+  const remaining = items.length - DEFAULT_VISIBLE;
+
   return (
-    <div className="mb-5 flex flex-wrap gap-2">
-      {items.map((it, i) => {
+    <div className="mb-5 flex flex-wrap gap-2 items-center">
+      {visible.map((it, i) => {
         const Icon = ICON[it.kind];
         const inner = (
           <span className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border ${TINT[it.kind]}`}>
@@ -57,6 +63,15 @@ export function HighlightsStrip() {
           <span key={i}>{inner}</span>
         );
       })}
+      {remaining > 0 && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="inline-flex items-center text-xs px-2.5 py-1.5 rounded-md border border-zinc-200 bg-white text-zinc-600 hover:text-zinc-900 hover:bg-zinc-50"
+        >
+          {expanded ? 'Show less' : `+${remaining} more`}
+        </button>
+      )}
     </div>
   );
 }

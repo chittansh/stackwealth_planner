@@ -1,13 +1,14 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Plus } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus } from 'lucide-react';
 import { formatINR } from '@/lib/utils';
 import { createHousehold } from '@/lib/api';
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:4000';
+const PAGE_SIZE = 25;
 
 type Row = {
   household_id: string;
@@ -22,26 +23,35 @@ type Row = {
 export function ClientsTable() {
   const router = useRouter();
   const [rows, setRows] = useState<Row[]>([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
   const [busy, setBusy] = useState(true);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   const formRef = useRef<HTMLFormElement>(null);
 
-  const load = async () => {
-    setBusy(true);
-    try {
-      const j = await fetch(`${BACKEND}/api/advisor/clients`).then((r) => r.json());
-      setRows(j.rows ?? []);
-    } catch {
-      setRows([]);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const load = useCallback(
+    async (pageOffset: number) => {
+      setBusy(true);
+      try {
+        const j = await fetch(
+          `${BACKEND}/api/advisor/clients?limit=${PAGE_SIZE}&offset=${pageOffset}`,
+        ).then((r) => r.json());
+        setRows(j.rows ?? []);
+        setTotal(j.total ?? 0);
+      } catch {
+        setRows([]);
+        setTotal(0);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
-    load();
-  }, []);
+    load(offset);
+  }, [load, offset]);
 
   useEffect(() => {
     if (creating) {
@@ -65,7 +75,11 @@ export function ClientsTable() {
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
-        <p className="text-xs text-zinc-500">{rows.length} client{rows.length === 1 ? '' : 's'}</p>
+        <p className="text-xs text-zinc-500">
+          {total === 0
+            ? `${rows.length} client${rows.length === 1 ? '' : 's'}`
+            : `Showing ${offset + 1}–${offset + rows.length} of ${total}`}
+        </p>
         {!creating ? (
           <button
             onClick={() => setCreating(true)}
@@ -154,6 +168,28 @@ export function ClientsTable() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {total > PAGE_SIZE && (
+        <div className="flex items-center justify-between text-xs text-zinc-600 mt-1">
+          <button
+            disabled={offset === 0 || busy}
+            onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+            className="inline-flex items-center gap-1 px-2.5 h-8 rounded-md border border-zinc-200 disabled:opacity-40 hover:bg-zinc-50"
+          >
+            <ChevronLeft size={13} /> Prev
+          </button>
+          <span className="tabular-nums text-zinc-500">
+            Page {Math.floor(offset / PAGE_SIZE) + 1} of {Math.max(1, Math.ceil(total / PAGE_SIZE))}
+          </span>
+          <button
+            disabled={offset + PAGE_SIZE >= total || busy}
+            onClick={() => setOffset(offset + PAGE_SIZE)}
+            className="inline-flex items-center gap-1 px-2.5 h-8 rounded-md border border-zinc-200 disabled:opacity-40 hover:bg-zinc-50"
+          >
+            Next <ChevronRight size={13} />
+          </button>
         </div>
       )}
     </div>
