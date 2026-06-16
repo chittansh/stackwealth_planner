@@ -361,7 +361,11 @@ def compute_retirement_corpus(
     life_expectancy: int,
     current_annual_expenses: float,
     inflation: float = 0.07,
-    post_retire_return: float = 0.07,
+    # Default 10.5% matches Excel `Retirement Plan!E23` → `Assumptions!E22`
+    # (equity_hybrid post-tax). Earlier 0.07 collapsed the real rate to 0
+    # and made the corpus equal expense × years — a footgun for any
+    # non-default caller.
+    post_retire_return: float = 0.105,
 ) -> dict:
     """Excel's Retirement Plan tab — annuity-due PV approach.
     Mirror of:
@@ -507,22 +511,29 @@ def compute_yoy_cashflow(
     monthly_expenses_living: float,
     monthly_loan_repayment: float,
     opening_financial_assets: float,
-    opening_non_financial_assets: float,
-    income_growth_rate: float = 0.08,       # E$5
-    expense_growth_rate: float = 0.07,      # J$5
-    financial_asset_roi: float = None,      # S$5 — defaults to BLENDED_ROI_POST_TAX
-    non_financial_appreciation: float = 0.08,  # Z$5
+    opening_non_financial_assets: float = 0.0,
+    # Per-source income growth — defaults match the firm's `YoY Cash Flow`
+    # row 5 (E5/F5/G5/H5). Excel uses post-tax growth rates per income
+    # line; passing a single `income_growth_rate` was the source of
+    # Finding 3 in the audit.
+    employment_growth: float = 0.056,    # E$5
+    business_growth: float = 0.070,      # F$5
+    rental_growth: float = 0.035,        # G$5
+    other_income_growth: float = 0.035,  # H$5
+    expense_growth_rate: float = 0.07,   # J$5
+    financial_asset_roi: float = None,   # S$5 — holdings-weighted (see compute_cfp)
+    non_financial_appreciation: float = 0.07,  # Z$5 — real estate / gold blend
     goal_outflows_by_year: dict[int, float] | None = None,
 ) -> list[dict]:
     """Excel's `YoY Cash Flow` sheet — row-by-row. Each year:
-        income[y]  = income[y-1] * (1 + E$5)
-        expense[y] = expense[y-1] * (1 + J$5)
-        loan[y]    = loan[y-1]   (no inflation; fixed EMI)
-        surplus[y] = income[y] - expense[y] - loan[y]
-        FA_close[y] = (FA_open[y] + surplus[y]/2 - goal_outflow[y]) * (1 + S$5)
-                     + (FA_open[y] + surplus[y] - goal_outflow[y])  ... see Excel
-        NFA_close[y]= NFA_open[y] * (1 + Z$5)
-        net_worth   = FA_close + NFA_close
+        income_source[y]  = income_source[y-1] × (1 + per_source_growth)
+        expense[y]        = expense[y-1] × (1 + J$5)
+        loan[y]           = loan[y-1]      (fixed EMI)
+        surplus[y]        = income[y] − expense[y] − loan[y]
+        FA_close[y]       = (FA_open + surplus/2 − goal_outflow) × ROI
+                          + (FA_open + surplus − goal_outflow)
+        NFA_close[y]      = NFA_open × (1 + Z$5)
+        net_worth         = FA_close + NFA_close
     """
     if financial_asset_roi is None:
         financial_asset_roi = BLENDED_ROI_POST_TAX
@@ -543,26 +554,19 @@ def compute_yoy_cashflow(
         age = start_age + i
         earning = age < retirement_age
 
-        # Income lines stop at retirement (employment) but rental + others
-        # carry forward.
+        # Employment + business stop at retirement; rental + other carry on.
         annual_emp = income_emp if earning else 0
         annual_biz = income_biz if earning else 0
         total_income = annual_emp + annual_biz + income_rent + income_oth
-        # Loan stops once paid off (assumed: loan_repayment goes to 0 after
-        # the term ends — caller must track that separately and pass 0).
         annual_loan = loan if earning else 0
         total_outflow = expense + annual_loan
         surplus = total_income - total_outflow
 
-        # Major withdrawals for goals triggering this year.
         withdrawal = float(goal_outflows_by_year.get(year, 0))
 
-        # Mid-year compounding convention from the Excel:
-        #   FA_close = (FA_open + surplus/2 − withdrawal) × (1 + ROI)
+        # Mid-year compounding (Excel S6 convention).
         fa_returns = (fa_open + surplus / 2 - withdrawal) * financial_asset_roi
         fa_close = fa_open + surplus - withdrawal + fa_returns
-
-        # Non-financial — pure appreciation.
         nfa_close = nfa_open * (1 + non_financial_appreciation)
 
         rows.append({
@@ -585,13 +589,13 @@ def compute_yoy_cashflow(
             "net_worth_crore": round((fa_close + nfa_close) / 1e7, 2),
         })
 
-        # Roll-forward
+        # Roll-forward per-source.
         fa_open = fa_close
         nfa_open = nfa_close
-        income_emp *= (1 + income_growth_rate)
-        income_biz *= (1 + income_growth_rate)
-        income_rent *= (1 + income_growth_rate)
-        income_oth *= (1 + income_growth_rate)
+        income_emp *= (1 + employment_growth)
+        income_biz *= (1 + business_growth)
+        income_rent *= (1 + rental_growth)
+        income_oth *= (1 + other_income_growth)
         expense *= (1 + expense_growth_rate)
 
     return rows
@@ -615,6 +619,114 @@ async def run_cfp(household_id: str) -> dict[str, Any]:
     if not plan:
         return {"error": "household_not_found"}
     return compute_cfp(plan).__dict__
+
+
+def _holdings_weighted_post_tax_roi(plan: PlanState) -> tuple[float, dict[str, float]]:
+    """Excel S5 = `1_Surplus and Net Worth!K38` = SUMPRODUCT(value, rate)/total
+    — the holdings-weighted average post-tax return across the FA pool.
+    Falls back to the equal-weight blended ROI when the FA pool is empty.
+
+    Returns (rate, breakdown) — breakdown shows how each class contributed."""
+    buckets: list[tuple[str, float, float]] = []  # (label, value, post_tax_rate)
+    for mf in plan.mutual_funds or []:
+        v = float(mf.current_value or 0)
+        if v > 0:
+            buckets.append(("mutual_funds", v, POST_TAX_RETURN["equity_hybrid"]))
+    for eq in plan.equity_stocks or []:
+        v = float(eq.current_value or 0)
+        if v > 0:
+            buckets.append(("equity_stocks", v, POST_TAX_RETURN["equity_hybrid"]))
+    for fi in plan.fixed_income or []:
+        v = float(fi.current_value or 0)
+        if v <= 0:
+            continue
+        inst = (fi.instrument or "").lower()
+        if "ppf" in inst:
+            r = POST_TAX_RETURN["ppf"]
+            label = "ppf"
+        elif "epf" in inst:
+            r = POST_TAX_RETURN["epf"]
+            label = "epf"
+        elif "nps" in inst:
+            r = POST_TAX_RETURN["nps"]
+            label = "nps"
+        elif "nsc" in inst or "bond" in inst:
+            r = POST_TAX_RETURN["bonds"]
+            label = "bonds_nsc"
+        else:
+            r = POST_TAX_RETURN["bank_fd"]
+            label = "fd"
+        buckets.append((label, v, r))
+    # Liquid
+    lc = plan.liquid_capital
+    liq = sum((getattr(lc, k) or 0) for k in
+              ("savings_account_balance", "idle_cash_for_investment",
+               "fd_breakable_for_investment", "bonus_expected_for_investment"))
+    if liq > 0:
+        buckets.append(("liquid", float(liq), POST_TAX_RETURN["liquid_fund"]))
+
+    total = sum(v for _, v, _ in buckets)
+    if total <= 0:
+        return BLENDED_ROI_POST_TAX, {"fallback_equal_weight": BLENDED_ROI_POST_TAX}
+    weighted = sum(v * r for _, v, r in buckets) / total
+    breakdown: dict[str, float] = {}
+    for label, v, r in buckets:
+        breakdown[label] = breakdown.get(label, 0) + v
+    breakdown["_weighted_post_tax_roi"] = round(weighted, 4)
+    breakdown["_total_value"] = round(total)
+    return weighted, breakdown
+
+
+def _retirement_tagged_assets_fv(
+    plan: PlanState, *, years_to_retire: int
+) -> tuple[float, list[dict]]:
+    """Future-value of assets earmarked for retirement (EPF, NPS, and any
+    fixed-income explicitly tagged retirement). Mirrors the Excel netting
+    on Assumptions rows 94-103 — `corpus_required − FV(retirement assets)`.
+    Returns (total_fv, breakdown_rows)."""
+    if years_to_retire <= 0:
+        return 0.0, []
+    rows: list[dict] = []
+    fv_total = 0.0
+    for fi in plan.fixed_income or []:
+        v = float(fi.current_value or 0)
+        if v <= 0:
+            continue
+        inst = (fi.instrument or "").lower()
+        if "epf" in inst:
+            r = POST_TAX_RETURN["epf"]
+        elif "nps" in inst:
+            r = POST_TAX_RETURN["nps"]
+        elif "ppf" in inst:
+            r = POST_TAX_RETURN["ppf"]
+        else:
+            continue
+        fv = v * ((1 + r) ** years_to_retire)
+        fv_total += fv
+        rows.append({"label": f"{fi.instrument} (today ₹{round(v):,})",
+                     "rate": round(r, 4), "fv_at_retirement": round(fv)})
+    return fv_total, rows
+
+
+def _spouse_age_and_life_expectancy(
+    plan: PlanState, current_year: int, fallback_age: int, fallback_le: int
+) -> tuple[int, int]:
+    """Replaces the buggy `persons[1].id and (current_age − 2)` no-op.
+    Reads the spouse Person row if present, computes age from DOB,
+    falls back to caller's defaults."""
+    persons = plan.assumptions.persons or []
+    if len(persons) < 2:
+        return fallback_age, fallback_le
+    spouse = persons[1]
+    le = int(spouse.life_expectancy or fallback_le)
+    if spouse.date_of_birth:
+        try:
+            yr = int(spouse.date_of_birth[-4:])
+            age = max(0, current_year - yr)
+            return age, le
+        except Exception:
+            pass
+    return fallback_age, le
 
 
 def compute_cfp(plan: PlanState) -> CFPOutput:
@@ -670,7 +782,7 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         round(total_required_sip),
     ))
 
-    # ── Retirement corpus ──────────────────────────────────────────────
+    # ── Retirement corpus (gross) ─────────────────────────────────────
     # Excel uses the equity_hybrid (10.5%) post-tax return for the
     # retirement-corpus discounting. See Retirement Plan tab cell E23 →
     # Assumptions sheet E22.
@@ -682,6 +794,24 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         inflation=plan.assumptions.inflation or 0.07,
         post_retire_return=POST_TAX_RETURN["equity_hybrid"],
     )
+    # Net retirement-tagged assets out of the gross corpus to get the
+    # actual shortfall the new SIP needs to fund (Finding 4 — Excel's
+    # Assumptions sheet rows 94-103 do this netting).
+    years_to_retire = max(0, retirement_age - current_age)
+    ret_assets_fv, ret_assets_rows = _retirement_tagged_assets_fv(
+        plan, years_to_retire=years_to_retire
+    )
+    retirement["existing_retirement_assets_fv"] = round(ret_assets_fv)
+    retirement["existing_retirement_assets_breakdown"] = ret_assets_rows
+    corpus_shortfall = max(0.0, retirement["corpus_required"] - ret_assets_fv)
+    retirement["corpus_shortfall_after_existing"] = round(corpus_shortfall)
+    retirement["computation_trace"].append(_trace(
+        "Net existing retirement assets out of corpus need",
+        "shortfall = corpus_required − Σ FV(EPF/NPS/PPF tagged retirement)",
+        {"corpus_required": retirement["corpus_required"],
+         "retirement_assets_fv": round(ret_assets_fv)},
+        round(corpus_shortfall),
+    ))
 
     # ── Insurance need ─────────────────────────────────────────────────
     loans = plan.loans_liabilities
@@ -694,16 +824,33 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         if plan.insurance_details and plan.insurance_details.term_plan
         else 0
     ) or 0
-    investable_assets = (fsi.portfolio_current_value or 0) + (fsi.liquid_assets_current_value or 0)
+    # Broader "investable assets" pool — matches Excel `Insurance
+    # Computation!F174` (MF + equity + FD + bonds + EPF/NPS/PPF + gold +
+    # liquid). Previously cfp.py used only `portfolio + liquid` which
+    # overstated the additional cover needed.
+    mf_total = sum((h.current_value or 0) for h in (plan.mutual_funds or []))
+    eq_total = sum((h.current_value or 0) for h in (plan.equity_stocks or []))
+    fi_total = sum((h.current_value or 0) for h in (plan.fixed_income or []))
+    gold_total = sum((h.current_value or 0) for h in (plan.gold or []) if h.held_for_investment)
+    lc = plan.liquid_capital
+    liquid_total = sum((getattr(lc, k) or 0) for k in
+                       ("savings_account_balance", "idle_cash_for_investment",
+                        "fd_breakable_for_investment", "bonus_expected_for_investment"))
+    investable_assets = mf_total + eq_total + fi_total + gold_total + liquid_total
+    # Fallback to FSI when holdings lists are empty.
+    if investable_assets <= 0:
+        investable_assets = (fsi.portfolio_current_value or 0) + (fsi.liquid_assets_current_value or 0)
 
-    spouse_age = (plan.assumptions.persons[1].id and (current_age - 2)) if len(plan.assumptions.persons) > 1 else current_age - 2
+    spouse_age, spouse_le = _spouse_age_and_life_expectancy(
+        plan, current_year, fallback_age=current_age - 2, fallback_le=life_expectancy
+    )
     insurance = compute_insurance_need(
         current_annual_income=annual_income,
         current_annual_expenses=annual_expenses,
         current_age=current_age,
         retirement_age=retirement_age,
-        spouse_age=spouse_age if isinstance(spouse_age, int) else current_age - 2,
-        spouse_life_expectancy=life_expectancy,
+        spouse_age=spouse_age,
+        spouse_life_expectancy=spouse_le,
         loans_outstanding=loans_outstanding,
         existing_cover=existing_cover,
         investable_assets=investable_assets,
@@ -717,13 +864,32 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     income_rent_monthly = (plan.income_details.client_rental_income or 0) + (plan.income_details.spouse_rental_income or 0)
     income_oth_monthly = (plan.income_details.client_other_income or 0) + (plan.income_details.spouse_other_income or 0)
 
-    opening_fa = (fsi.portfolio_current_value or 0) + (fsi.liquid_assets_current_value or 0)
-    # Non-financial = real estate at today's value. The current schema
-    # doesn't carry a separate `real_estate[]` list — when one lands,
-    # we'll sum it here. For now non-financial assets aren't tracked in
-    # the platform.
-    opening_nfa = 0.0
+    # FA = financial assets at today's value. Prefer the actual holdings
+    # totals (MF + equity + FD/bonds + liquid) — fall back to FSI scalars
+    # only when no holding rows are populated.
+    opening_fa = (mf_total + eq_total + fi_total + liquid_total) or (
+        (fsi.portfolio_current_value or 0) + (fsi.liquid_assets_current_value or 0)
+    )
 
+    # NFA = real estate + gold-as-investment at today's value. Finding 2:
+    # this used to be hardcoded to 0.0 — the single largest numeric error.
+    re_total = sum((h.current_value or 0) for h in (plan.real_estate or []))
+    nfa_gold_total = sum((h.current_value or 0) for h in (plan.gold or []))
+    opening_nfa = re_total + nfa_gold_total
+
+    # Holdings-weighted post-tax ROI (Finding 5) — replaces the equal-
+    # weight BLENDED_ROI_POST_TAX constant.
+    fa_roi, fa_roi_breakdown = _holdings_weighted_post_tax_roi(plan)
+    trace.append(_trace(
+        "Holdings-weighted post-tax ROI on financial assets",
+        "Σ(value_i × rate_i) / Σ value_i",
+        fa_roi_breakdown,
+        round(fa_roi, 4),
+        unit="%",
+    ))
+
+    # Per-source income growth from plan assumptions (Finding 3).
+    ig = plan.assumptions.income_growth
     yoy = compute_yoy_cashflow(
         horizon_years=min(40, max(life_expectancy - current_age, 10)),
         start_year=current_year,
@@ -737,9 +903,12 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         monthly_loan_repayment=monthly_emi,
         opening_financial_assets=opening_fa,
         opening_non_financial_assets=opening_nfa,
-        income_growth_rate=0.08,
+        employment_growth=ig.employment,
+        business_growth=ig.business,
+        rental_growth=ig.rental,
+        other_income_growth=ig.other,
         expense_growth_rate=plan.assumptions.inflation or 0.07,
-        financial_asset_roi=BLENDED_ROI_POST_TAX,
+        financial_asset_roi=fa_roi,
         non_financial_appreciation=POST_TAX_RETURN["real_estate"],
         goal_outflows_by_year=goal_outflows_by_year,
     )
@@ -762,8 +931,13 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         "total_required_sip_monthly": round(total_required_sip),
         "total_incremental_sip_monthly": round(total_incremental_sip),
         "retirement_corpus_required": retirement["corpus_required"],
+        "retirement_existing_assets_fv": retirement.get("existing_retirement_assets_fv", 0),
+        "retirement_corpus_shortfall": retirement.get("corpus_shortfall_after_existing", retirement["corpus_required"]),
         "additional_insurance_cover_required": insurance["additional_cover_required"],
         "horizon_net_worth_estimate": yoy[-1]["net_worth"] if yoy else 0,
+        "opening_financial_assets": round(opening_fa),
+        "opening_non_financial_assets": round(opening_nfa),
+        "fa_holdings_weighted_roi": round(fa_roi, 4),
     }
 
     trace.append(_trace(
@@ -792,7 +966,13 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     constants_used = {
         "inflation_table": INFLATION_TABLE,
         "post_tax_return_table": {k: round(v, 4) for k, v in POST_TAX_RETURN.items()},
-        "blended_roi_post_tax": round(BLENDED_ROI_POST_TAX, 4),
+        "blended_roi_post_tax_equal_weight": round(BLENDED_ROI_POST_TAX, 4),
+        "blended_roi_post_tax_holdings_weighted": round(fa_roi, 4),
+        "fa_holdings_breakdown": fa_roi_breakdown,
+        "income_growth": {
+            "employment": ig.employment, "business": ig.business,
+            "rental": ig.rental, "other": ig.other,
+        },
         "allocation_priority": ALLOCATION_PRIORITY,
     }
 
@@ -838,5 +1018,16 @@ def _build_asset_pool(plan: PlanState) -> dict[str, float]:
             pool["pension"] += val
         else:
             pool["fixed_deposits"] += val
+
+    # Real estate explicitly earmarked for sale → priority slot 10
+    # (Rule 6 Step 4). Otherwise it stays in NFA and isn't drawn on for
+    # goals.
+    for re_row in plan.real_estate or []:
+        if re_row.earmarked_for_sale:
+            pool["real_estate_for_sale"] += float(re_row.current_value or 0)
+    # Investment gold is allocable; sentimental jewellery is not.
+    for g in plan.gold or []:
+        if g.held_for_investment:
+            pool["gold"] += float(g.current_value or 0)
 
     return pool

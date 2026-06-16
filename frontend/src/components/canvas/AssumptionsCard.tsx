@@ -59,7 +59,52 @@ export function AssumptionsCard({ plan }: { plan: PlanState }) {
           <Pair k="State" v={`${(a.taxes.state * 100).toFixed(1)}%`} />
           <Pair k="Capital gains" v={`${(a.taxes.capital_gains * 100).toFixed(1)}%`} />
         </div>
+
+        <div>
+          <h4 className="text-sm text-zinc-700 mb-2">
+            Income growth (per source)
+            <span className="ml-1 text-[10px] text-zinc-400 font-normal">post-tax / yr</span>
+          </h4>
+          <Pair k="Employment" v={`${((a.income_growth?.employment ?? 0.056) * 100).toFixed(1)}%`} />
+          <Pair k="Business" v={`${((a.income_growth?.business ?? 0.070) * 100).toFixed(1)}%`} />
+          <Pair k="Rental" v={`${((a.income_growth?.rental ?? 0.035) * 100).toFixed(1)}%`} />
+          <Pair k="Other" v={`${((a.income_growth?.other ?? 0.035) * 100).toFixed(1)}%`} />
+        </div>
+
+        <div>
+          <h4 className="text-sm text-zinc-700 mb-2">
+            Goal inflation (per type)
+            <span className="ml-1 text-[10px] text-zinc-400 font-normal">CFP table</span>
+          </h4>
+          <Pair k="General" v="7.0%" />
+          <Pair k="Education" v="10.0%" />
+          <Pair k="Wedding" v="9.0%" />
+          <Pair k="Medical" v="12.0%" />
+          <Pair k="Real estate / vacation" v="9.0%" />
+          <Pair k="Lifestyle" v="25.0%" />
+        </div>
+
+        <div>
+          <h4 className="text-sm text-zinc-700 mb-2">
+            Post-tax returns
+            <span className="ml-1 text-[10px] text-zinc-400 font-normal">used by projection</span>
+          </h4>
+          <Pair k="Equity hybrid" v="10.5%" />
+          <Pair k="Equity conservative" v="8.75%" />
+          <Pair k="PPF" v="7.10%" />
+          <Pair k="EPF" v="8.10%" />
+          <Pair k="Bank FD" v="4.55%" />
+          <Pair k="Liquid fund" v="3.85%" />
+          <Pair k="Real estate" v="7.00%" />
+          <Pair k="Gold" v="7.00%" />
+        </div>
       </div>
+
+      <p className="text-[11px] text-zinc-400 mt-4 pt-3 border-t border-zinc-100">
+        All values match the firm&apos;s CFP Excel (Assumptions &amp; Computation tab). Per-goal
+        return overrides take precedence when set on the goal row itself. Income growth applies
+        per source — employment vs business vs rental — instead of a single blended rate.
+      </p>
     </div>
   );
 }
