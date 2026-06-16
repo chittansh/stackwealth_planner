@@ -142,6 +142,27 @@ class FixedIncomeRow(StrictModel):
     maturity_date: Optional[str] = None
 
 
+class RealEstateHolding(StrictModel):
+    """Non-financial asset that appreciates separately from the FA pool.
+    Matches the Excel `YoY Cash Flow` tab columns X..AA (real estate +
+    gold + other non-financial) which roll forward at their own rate."""
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    label: Optional[str] = None
+    kind: Literal["residential", "commercial", "land", "other"] = "residential"
+    current_value: float = 0
+    earmarked_for_sale: bool = False
+    expected_appreciation_pa: Optional[float] = None  # override; default uses growth.real_estate
+
+
+class GoldHolding(StrictModel):
+    """Physical gold / SGB / digital gold / jewellery."""
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    label: Optional[str] = None
+    kind: Literal["physical", "sgb", "digital", "jewellery"] = "physical"
+    current_value: float = 0
+    held_for_investment: bool = True  # vs sentimental — affects allocation eligibility
+
+
 class MonthlyInvestments(StrictModel):
     mutual_fund_sip: Optional[float] = None
     nps: Optional[float] = None
@@ -226,6 +247,17 @@ class Growth(StrictModel):
     vehicle: float = -0.10
 
 
+class IncomeGrowth(StrictModel):
+    """Per-source annual growth rates. Defaults match the firm's
+    `YoY Cash Flow` row 5: employment 5.6%, business 7%, rental 3.5%,
+    other 3.5%. These are post-tax growth rates applied year-over-year
+    to each income line in the projection."""
+    employment: float = 0.056
+    business: float = 0.070
+    rental: float = 0.035
+    other: float = 0.035
+
+
 class Taxes(StrictModel):
     federal: float = 0.30
     state: float = 0.0
@@ -235,6 +267,7 @@ class Taxes(StrictModel):
 class Assumptions(StrictModel):
     persons: list[Person] = Field(default_factory=list)
     growth: Growth = Field(default_factory=Growth)
+    income_growth: IncomeGrowth = Field(default_factory=IncomeGrowth)
     taxes: Taxes = Field(default_factory=Taxes)
     inflation: float = 0.06
     # Annual SIP step-up *over and above* inflation. 0.0 means SIP scales
@@ -531,6 +564,8 @@ class PlanState(StrictModel):
     mutual_funds: list[MFHolding] = Field(default_factory=list)
     equity_stocks: list[StockHolding] = Field(default_factory=list)
     fixed_income: list[FixedIncomeRow] = Field(default_factory=list)
+    real_estate: list[RealEstateHolding] = Field(default_factory=list)
+    gold: list[GoldHolding] = Field(default_factory=list)
     monthly_investments: MonthlyInvestments = Field(default_factory=MonthlyInvestments)
     liquid_capital: LiquidCapital = Field(default_factory=LiquidCapital)
     emergency_fund: EmergencyFund = Field(default_factory=EmergencyFund)

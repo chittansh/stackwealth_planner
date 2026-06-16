@@ -157,8 +157,27 @@ export type Person = {
 export type Assumptions = {
   persons: Person[];
   growth: { cash: number; investment: number; real_estate: number; vehicle: number };
+  /** Per-source annual income growth — see Excel `YoY Cash Flow` row 5. */
+  income_growth?: { employment: number; business: number; rental: number; other: number };
   taxes: { federal: number; state: number; capital_gains: number };
   inflation: number;
+};
+
+export type RealEstateHolding = {
+  id: string;
+  label?: string | null;
+  kind: 'residential' | 'commercial' | 'land' | 'other';
+  current_value: number;
+  earmarked_for_sale: boolean;
+  expected_appreciation_pa?: number | null;
+};
+
+export type GoldHolding = {
+  id: string;
+  label?: string | null;
+  kind: 'physical' | 'sgb' | 'digital' | 'jewellery';
+  current_value: number;
+  held_for_investment: boolean;
 };
 
 export type FreedomScoreInputs = {
@@ -355,6 +374,8 @@ export type PlanState = {
   mutual_funds: MFHolding[];
   equity_stocks: StockHolding[];
   fixed_income: FixedIncomeRow[];
+  real_estate?: RealEstateHolding[];
+  gold?: GoldHolding[];
   monthly_investments: MonthlyInvestments;
   liquid_capital: LiquidCapital;
   emergency_fund: EmergencyFund;
