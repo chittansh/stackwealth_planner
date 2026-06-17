@@ -151,8 +151,29 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
             invested_this_year = max(0.0, surplus)
             cash_added_this_year = 0.0
 
+        # Compound BEFORE applying drawdown so the year's investment return
+        # is on the opening balance, not on a freshly-spent figure.
         portfolio = portfolio * (1 + expected_return) + invested_this_year
         liquid = liquid * (1 + cash_return) + cash_added_this_year
+
+        # ── Negative-surplus drawdown ─────────────────────────────────
+        # The old code clamped invested_this_year to max(0, surplus) and
+        # then walked away. When surplus is negative (retirement years —
+        # zero income, full expenses) the engine grew the portfolio
+        # forever and pretended the household paid its bills from thin
+        # air. The Cash Flow table then crashed to zero only when a goal
+        # hit, producing a cliff that confused users. Now we draw down
+        # liquid → portfolio for the shortfall, matching how retirement
+        # actually works.
+        if surplus < 0:
+            shortfall = -surplus
+            from_liquid = min(liquid, shortfall)
+            liquid -= from_liquid
+            shortfall -= from_liquid
+            from_portfolio = min(portfolio, shortfall)
+            portfolio -= from_portfolio
+            # If still short, the household is mathematically broke —
+            # leave portfolio at 0 and let the row show that reality.
 
         # Goal drawdowns: tap liquid first (rational household behavior — use
         # cash before redeeming investments), then portfolio for any shortfall.
