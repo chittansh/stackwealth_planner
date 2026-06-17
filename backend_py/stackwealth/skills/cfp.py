@@ -855,6 +855,68 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         round(total_required_sip),
     ))
 
+    # ── Surplus & affordability (Finding: "is the required SIP realistic?") ──
+    # The Excel model implicitly assumes the household can spare whatever
+    # the PMT formula demands. In reality SIPs are bounded by:
+    #     surplus_post_existing_sip = monthly_income − living_expenses
+    #                                 − loan_EMI − existing_monthly_SIPs
+    # When `total_required_sip > surplus_post_existing_sip`, the goals
+    # need either: (a) longer horizon, (b) lower target, (c) higher
+    # income, or (d) accepting partial funding. We compute a "feasible
+    # SIP" that proportionally rations the available surplus across goals
+    # by their required SIP share, so the user can see which goals would
+    # actually get fully funded vs partially under the constraint.
+    mi = plan.monthly_investments
+    existing_sip_monthly = 0.0
+    if mi:
+        existing_sip_monthly = float(
+            (mi.mutual_fund_sip or 0) + (mi.nps or 0) + (mi.ppf or 0)
+            + (mi.rd or 0) + (mi.direct_equity or 0)
+        )
+    surplus_pre_sip = monthly_income - monthly_expenses - monthly_emi
+    surplus_post_existing_sip = surplus_pre_sip - existing_sip_monthly
+    affordable_for_new_sip = max(0.0, surplus_post_existing_sip)
+
+    # Ration available surplus proportionally across goals' incremental need.
+    total_incremental = total_incremental_sip or 0
+    if total_incremental > 0 and affordable_for_new_sip < total_incremental:
+        ration_factor = affordable_for_new_sip / total_incremental
+    else:
+        ration_factor = 1.0  # surplus covers required → no rationing
+
+    for b in goal_blocks:
+        inc = b.get("incremental_sip_monthly", 0) or 0
+        affordable = round(inc * ration_factor)
+        b["affordable_sip_monthly"] = affordable
+        b["sip_shortfall_monthly"] = max(0, inc - affordable)
+        # What fraction of the goal does the affordable SIP fund?
+        # Rough: ratio of affordable_sip to required_sip → funded share of
+        # the FV gap (since SIPs are linear in PMT formula at fixed rate
+        # and horizon, halving SIP roughly halves the corpus you accumulate).
+        b["funded_share_at_affordable_sip"] = round(ration_factor, 4) if inc > 0 else 1.0
+
+    affordable_sip_total = round(sum(b["affordable_sip_monthly"] for b in goal_blocks))
+    surplus_shortfall = max(0.0, total_incremental_sip - affordable_for_new_sip)
+
+    trace.append(_trace(
+        "Monthly surplus available for new SIPs",
+        "income − expenses − EMI − existing_SIPs",
+        {"income": round(monthly_income), "expenses": round(monthly_expenses),
+         "emi": round(monthly_emi), "existing_sips": round(existing_sip_monthly)},
+        round(affordable_for_new_sip),
+        unit="INR/mo",
+    ))
+    if surplus_shortfall > 0:
+        trace.append(_trace(
+            "SIP shortfall — required exceeds available surplus",
+            "required_incremental_SIP − affordable_for_new_SIP",
+            {"required_incremental_sip": round(total_incremental_sip),
+             "affordable_for_new_sip": round(affordable_for_new_sip),
+             "ration_factor": round(ration_factor, 4)},
+            round(surplus_shortfall),
+            unit="INR/mo",
+        ))
+
     # ── Retirement corpus (gross) ─────────────────────────────────────
     # Excel uses the equity_hybrid (10.5%) post-tax return for the
     # retirement-corpus discounting. See Retirement Plan tab cell E23 →
@@ -1060,6 +1122,18 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         "on_track": on_track,
         "total_required_sip_monthly": round(total_required_sip),
         "total_incremental_sip_monthly": round(total_incremental_sip),
+        # Surplus & affordability (the "is this realistic?" check)
+        "monthly_income": round(monthly_income),
+        "monthly_expenses": round(monthly_expenses),
+        "monthly_emi": round(monthly_emi),
+        "monthly_existing_sip": round(existing_sip_monthly),
+        "monthly_surplus_pre_sip": round(surplus_pre_sip),
+        "monthly_surplus_after_existing_sip": round(surplus_post_existing_sip),
+        "affordable_new_sip_monthly": round(affordable_for_new_sip),
+        "affordable_sip_total_monthly": affordable_sip_total,
+        "sip_surplus_shortfall_monthly": round(surplus_shortfall),
+        "sip_ration_factor": round(ration_factor, 4),
+        "is_plan_affordable": surplus_shortfall <= 0,
         "retirement_corpus_required": retirement["corpus_required"],
         "retirement_existing_assets_fv": retirement.get("existing_retirement_assets_fv", 0),
         "retirement_corpus_shortfall": retirement.get("corpus_shortfall_after_existing", retirement["corpus_required"]),

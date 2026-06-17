@@ -89,6 +89,9 @@ type GoalBlock = {
   required_sip_monthly?: number;
   existing_sip_monthly?: number;
   incremental_sip_monthly?: number;
+  affordable_sip_monthly?: number;
+  sip_shortfall_monthly?: number;
+  funded_share_at_affordable_sip?: number;
 };
 
 function GoalBlocksDetail({ goals, blocks }: { goals: Goal[]; blocks: GoalBlock[] }) {
@@ -157,12 +160,12 @@ function GoalBlocksDetail({ goals, blocks }: { goals: Goal[]; blocks: GoalBlock[
               </div>
 
               {(b.incremental_sip_monthly ?? 0) > 0 && (
-                <div className="mt-3 rounded-md bg-white border border-zinc-200 px-3 py-2 text-xs flex justify-between items-center">
-                  <span className="text-zinc-500">Remaining SIP needed</span>
-                  <span className="text-zinc-900 font-medium tabular-nums">
-                    {formatINR(b.incremental_sip_monthly ?? 0)} /mo
-                  </span>
-                </div>
+                <FeasibilityRow
+                  required={b.incremental_sip_monthly ?? 0}
+                  affordable={b.affordable_sip_monthly ?? b.incremental_sip_monthly ?? 0}
+                  shortfall={b.sip_shortfall_monthly ?? 0}
+                  fundedShare={b.funded_share_at_affordable_sip ?? 1}
+                />
               )}
 
               {/* Bucket allocation breakdown */}
@@ -222,6 +225,58 @@ function Cell({ label, value, emphasis }: { label: string; value: string; emphas
     <div className="flex flex-col">
       <span className="text-[10px] uppercase tracking-wide text-zinc-500">{label}</span>
       <span className={`tabular-nums ${emphasis ? 'text-zinc-900 font-medium' : 'text-zinc-800'}`}>{value}</span>
+    </div>
+  );
+}
+
+function FeasibilityRow({
+  required,
+  affordable,
+  shortfall,
+  fundedShare,
+}: {
+  required: number;
+  affordable: number;
+  shortfall: number;
+  fundedShare: number;
+}) {
+  const fully = shortfall <= 0;
+  const pct = Math.min(100, Math.max(0, fundedShare * 100));
+
+  return (
+    <div className={`mt-3 rounded-md border px-3 py-2.5 ${fully ? 'bg-white border-zinc-200' : 'bg-amber-50 border-amber-200'}`}>
+      <div className="flex items-baseline justify-between text-xs mb-1">
+        <span className="text-zinc-500 uppercase tracking-wide text-[10px]">SIP feasibility</span>
+        {fully ? (
+          <span className="text-[10px] text-[color:var(--color-accent,#5f7d56)]">✓ surplus covers this</span>
+        ) : (
+          <span className="text-[10px] text-amber-700">
+            funds ~{pct.toFixed(0)}% of this goal at current surplus
+          </span>
+        )}
+      </div>
+      <div className="flex items-baseline justify-between text-sm">
+        <span className="text-zinc-700">Required SIP</span>
+        <span className="text-zinc-900 tabular-nums">{formatINR(required, { compact: true })}/mo</span>
+      </div>
+      <div className="flex items-baseline justify-between text-sm">
+        <span className="text-zinc-700">Feasible SIP (after rationing surplus)</span>
+        <span className={`tabular-nums ${fully ? 'text-zinc-900' : 'text-amber-800'} font-medium`}>
+          {formatINR(affordable, { compact: true })}/mo
+        </span>
+      </div>
+      {!fully && shortfall > 0 && (
+        <div className="mt-1.5 pt-1.5 border-t border-dashed border-amber-200 flex items-baseline justify-between text-xs">
+          <span className="text-amber-800">Shortfall</span>
+          <span className="text-amber-800 font-medium tabular-nums">−{formatINR(shortfall, { compact: true })}/mo</span>
+        </div>
+      )}
+      <div className="h-1 mt-2 rounded-full bg-zinc-100 overflow-hidden">
+        <div
+          className={`h-full ${fully ? 'bg-[color:var(--color-accent,#5f7d56)]' : 'bg-amber-500'}`}
+          style={{ width: `${pct.toFixed(1)}%` }}
+        />
+      </div>
     </div>
   );
 }

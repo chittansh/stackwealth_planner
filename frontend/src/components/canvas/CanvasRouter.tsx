@@ -19,6 +19,7 @@ import { Scenarios } from './Scenarios';
 import { ScenarioChips } from './ScenarioChips';
 import { RiskBanner } from './RiskBanner';
 import { CalculationsChip } from './CalculationsChip';
+import { GoalScenariosCard } from './GoalScenariosCard';
 
 export function CanvasRouter({
   householdId,
@@ -99,6 +100,11 @@ export function CanvasRouter({
             <NetWorthChart householdId={householdId} plan={plan} />
             <ScenarioChips plan={plan} />
           </div>
+          {plan && (
+            <div className="mt-6">
+              <GoalScenariosCard plan={plan} />
+            </div>
+          )}
         </>
       )}
       {view === 'cash-flow' && (
