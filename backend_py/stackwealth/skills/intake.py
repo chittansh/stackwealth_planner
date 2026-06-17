@@ -53,9 +53,12 @@ EXTRACTION_INSTRUCTIONS = """You are an Indian household financial-plan extracto
     "loans_liabilities": { "home_loan"? { outstanding_amount, emi, interest_rate, tenure_left }, "car_loan"?, "personal_loan"?, "credit_card_dues"? },
     "insurance_details": { "term_plan"? { "company"?, "cover_amount"?, "annual_premium"? }, "health_insurance"? { "company"?, "cover_amount"?, "annual_premium"? }, "family_floater"? { "company"?, "cover_amount"?, "annual_premium"? }, "ulip_or_endowment"? { "company"?, "cover_amount"?, "annual_premium"? } },
     "financial_goals": [ { "goal_name", "kind" ("child_education" | "child_marriage" | "retirement" | "house_purchase" | "foreign_travel" | "other"), "target_year"?, "target_amount"? (in TODAY's rupees — see Goals rules below), "is_target_in_today_money"? (bool — true if target_amount is today's cost; false ONLY if the source explicitly gives an already-inflated future-value figure with no today's cost), "inflation_assumed"? (decimal, e.g. 0.08 for 8%), "current_allocated_amount"?, "periodic_contribution"?, "contribution_frequency"? ("monthly" | "annual"), "priority"? } ],
-    "mutual_funds":   [ { "fund_name", "current_value", "isin"?, "folio"? } ],
-    "equity_stocks":  [ { "stock_name", "current_value", "quantity"?, "isin"? } ],
+    "mutual_funds":   [ { "fund_name", "current_value", "isin"?, "folio"?, "sip_amount"? } ],
+    "equity_stocks":  [ { "stock_name", "current_value", "quantity"?, "isin"?, "long_term_or_trading"? ("long_term" | "trading") } ],
     "fixed_income":   [ { "instrument" ("FD" | "RD" | "PPF" | "EPF" | "Bonds" | "NPS"), "invested_amount"?, "current_value"?, "maturity_date"? } ],
+    "real_estate":    [ { "label" (e.g. "Self-Occupied Villa (Gurgaon)"), "kind" ("residential" | "commercial" | "land" | "other"), "current_value", "earmarked_for_sale"? (bool), "expected_appreciation_pa"? (decimal) } ],
+    "gold":           [ { "label" (e.g. "Sovereign Gold Bonds"), "kind" ("physical" | "sgb" | "digital" | "jewellery"), "current_value", "held_for_investment"? (bool, default true) } ],
+    "emergency_fund": { "emergency_fund_available"? (bool), "total_emergency_corpus"? (INR), "where_is_it_parked"? (string), "monthly_household_expense_for_calculation"? (INR), "months_of_cover_available"? (decimal) },
     "freedom_score_inputs": { "age"?, "monthly_income"?, "monthly_expenses"?, "monthly_emi"?, "portfolio_current_value"?, "liquid_assets_current_value"?, "equity_allocation_percent"? }
   },
   "evidence": [ { "field": "<canonical.path>", "value": <same as in partial_state>, "confidence": 0..1, "evidence_quote": "<verbatim span from source>" } ],
@@ -94,6 +97,20 @@ Rules:
 - Portfolio aggregation: if the user mentions a portfolio total ("my portfolio is around 12L", "I have 50L in equities"), set `freedom_score_inputs.portfolio_current_value` to that absolute INR value. If they list individual MFs/stocks, also populate the `mutual_funds[]` / `equity_stocks[]` arrays.
 - Liquid: cash in savings / current accounts → `liquid_capital.savings_account_balance` AND `freedom_score_inputs.liquid_assets_current_value` (same total).
 - Loan tenure_left: numeric YEARS only. "12 years" → 12, "3 years 6 months" → 3.5. If credit card is paid in full each month, set `tenure_left` to 0 (not a string).
+- Real estate — extract every property in `real_estate[]`. The firm xlsx template has a `4D_Real_Estate` sheet with columns "Property Type | Current Market Value | Loan Outstanding | Rental Income". Map "Property Type" → `label`, "Current Market Value" → `current_value` (INR). Infer `kind`:
+    * "self-occupied" / "house" / "villa" / "apartment" / "flat" → "residential"
+    * "commercial" / "shop" / "office" → "commercial"
+    * "plot" / "land" → "land"
+    * else → "other"
+  If the row also has a "Loan Outstanding" value, that's a home loan — ALSO emit a `loans_liabilities.home_loan` entry with that outstanding_amount (only ONE home_loan row aggregated across properties). If "Rental Income" is non-zero, ADD it to `income_details.client_rental_income` (or spouse if context says so). Skip "Total" / "No real estate holdings" / blank rows.
+- Gold & others — extract every row in `gold[]`. The firm xlsx template has a `4E_Gold_Others` sheet with columns "Asset | Current Value". Map "Asset" → `label`. Infer `kind`:
+    * "physical" / "coins" / "bars" → "physical"
+    * "jewellery" → "jewellery"
+    * "sovereign gold bond" / "SGB" → "sgb"
+    * "digital" / "etf" → "digital"
+    * else → "physical"
+  Silver coins / non-gold metals also go in `gold[]` (the schema is "Gold & others" — they're treated as the same asset class for return assumptions). Skip "Total" rows.
+- Emergency fund — populate `emergency_fund` (dict, NOT a list). The firm xlsx template has a `7_Emergency_Fund` sheet with rows "Emergency fund available? (Yes/No)", "Total Emergency Corpus", "Where is it parked?", "Monthly household expense (for calculation)", "Months of cover available". Map directly.
 - Goals: extract intent like "want to buy a 1.5cr home by 2030" → `{goal_name: "Home Purchase", kind: "house_purchase", target_year: 2030, target_amount: 15000000, is_target_in_today_money: true}`. Goal `kind` MUST be one of: child_education | child_marriage | retirement | house_purchase | foreign_travel | other.
 - Goals — TODAY'S COST vs FUTURE VALUE (CRITICAL — get this wrong and every projection is inflated 2-10x):
     * `target_amount` MUST be the cost in TODAY's rupees, NOT the inflation-adjusted future value. Then set `is_target_in_today_money: true`.
