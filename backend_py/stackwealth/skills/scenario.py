@@ -266,6 +266,22 @@ def _coerce_scalar_for_path(value: Any) -> Any:
         return value
 
 
+# Paths that point to LIST-typed fields the canvas reads from. plan_set
+# on these would silently wipe rows (LLM agent has been observed doing this
+# with an empty/partial list mid-conversation, especially right after an
+# upload). Mutating these MUST go through plan_add / plan_remove which
+# operate row-by-row and never lose data.
+APPEND_ONLY_LIST_PATHS: frozenset[str] = frozenset({
+    "financial_goals",
+    "mutual_funds",
+    "equity_stocks",
+    "fixed_income",
+    "real_estate",
+    "gold",
+    "assumptions.persons",
+})
+
+
 async def apply_set(args: dict[str, Any]) -> dict[str, Any]:
     async with _lock_for(args["household_id"]):
         return await _apply_set_locked(args)
@@ -276,19 +292,40 @@ async def _apply_set_locked(args: dict[str, Any]) -> dict[str, Any]:
     if not plan:
         return {"ok": False, "updated_path": args["path"]}
     plan_d = _to_dict(plan)
+    path = args["path"]
+
+    # Guard: plan_set on a whole append-only list path is almost always a
+    # data-loss bug (overwrites every existing row, including ones from
+    # the upload that just happened). Reject early with a clear hint.
+    if path in APPEND_ONLY_LIST_PATHS:
+        existing = get_path(plan_d, path) or []
+        if isinstance(existing, list):
+            return {
+                "ok": False,
+                "updated_path": path,
+                "error": (
+                    f"plan_set on '{path}' is blocked — it's a list field and would "
+                    f"wipe {len(existing)} existing row(s). Use plan_add to append a "
+                    f"new row, or plan_remove(id=...) to delete a specific one. To "
+                    f"update a field on an existing row, set the indexed path "
+                    f"(e.g. '{path}.0.<field>')."
+                ),
+                "blocked_existing_rows": len(existing),
+            }
+
     write_ok = True
     coerced_value = _coerce_scalar_for_path(args["value"])
-    if _enforce_source_priority(plan_d, args["path"], args.get("source_type", "user")):
-        write_ok = set_path(plan_d, args["path"], coerced_value)
+    if _enforce_source_priority(plan_d, path, args.get("source_type", "user")):
+        write_ok = set_path(plan_d, path, coerced_value)
         if write_ok:
-            _push_evidence(plan_d, args["path"], get_path(plan_d, args["path"]), args.get("source_type", "user"))
+            _push_evidence(plan_d, path, get_path(plan_d, path), args.get("source_type", "user"))
     if not write_ok:
         return {
             "ok": False,
-            "updated_path": args["path"],
-            "error": f"could not navigate path '{args['path']}' on plan",
+            "updated_path": path,
+            "error": f"could not navigate path '{path}' on plan",
         }
-    derived = _sync_fsi_from_breakdown(plan_d, args["path"])
+    derived = _sync_fsi_from_breakdown(plan_d, path)
     try:
         plan_d = recompute(plan_d)
     except ValidationError as ve:
@@ -299,15 +336,15 @@ async def _apply_set_locked(args: dict[str, Any]) -> dict[str, Any]:
         errs = "; ".join(f"{'.'.join(str(x) for x in e['loc'])}: {e['msg']}" for e in ve.errors()[:3])
         return {
             "ok": False,
-            "updated_path": args["path"],
+            "updated_path": path,
             "error": f"value rejected by schema: {errs}",
             "rejected_value": args["value"],
         }
     await save_plan(_from_dict(plan_d))
-    out: dict[str, Any] = {"ok": True, "updated_path": args["path"]}
+    out: dict[str, Any] = {"ok": True, "updated_path": path}
     if derived:
         out["derived"] = derived
-    warning = _maybe_warn_monthly_expenses(plan_d, args["path"], args["value"])
+    warning = _maybe_warn_monthly_expenses(plan_d, path, args["value"])
     if warning:
         out["warning"] = warning
     return out
@@ -502,6 +539,13 @@ async def _apply_add_locked(args: dict[str, Any]) -> dict[str, Any]:
             "error": f"row rejected by schema: {errs}",
             "rejected_row": row,
         }
+    # Breadcrumb evidence row so the audit trail shows what was added.
+    # Use a short label rather than the full row to keep the trail small.
+    label = row.get("goal_name") or row.get("fund_name") or row.get("stock_name") or row.get("instrument") or row.get("name") or row_id
+    _push_evidence(
+        plan_d, f"{args['path']}[+]", {"id": row_id, "label": label},
+        args.get("source_type", "user"),
+    )
     await save_plan(_from_dict(plan_d))
     return {"ok": True, "id": row_id}
 

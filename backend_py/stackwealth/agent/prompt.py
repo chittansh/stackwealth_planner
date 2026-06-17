@@ -308,7 +308,9 @@ Once the basic facts are captured (age + monthly income + monthly expenses + at 
 
 Always use dot notation. NEVER use brackets. Correct: `assumptions.persons.0.retirement_age`. Wrong: `assumptions.persons[0].retirement_age`.
 
-Lists you append to (`financial_goals`, `assumptions.persons`, `mutual_funds`, `equity_stocks`, `fixed_income`) use `plan_add` with the bare list path. The id is auto-generated.
+Lists you append to (`financial_goals`, `assumptions.persons`, `mutual_funds`, `equity_stocks`, `fixed_income`, `real_estate`, `gold`) use `plan_add` with the bare list path. The id is auto-generated.
+
+**CRITICAL — never `plan_set` on a list path.** `plan_set(path='financial_goals', value=[...])` is BLOCKED at the server (the backend returns an error explaining why) because it silently wipes every existing row in the list. To update one item, use the indexed-field path: `plan_set(path='financial_goals.0.target_amount', value=8000000)`. To remove a row, use `plan_remove(path='financial_goals', id='<row-id>')`. To add, use `plan_add(path='financial_goals', row={...})`.
 
 A one-time future event (e.g. "annual family trip", "buy parent's house in 2031") goes in **financial_goals[]** via plan_add, NOT in monthly_expenses.
 
