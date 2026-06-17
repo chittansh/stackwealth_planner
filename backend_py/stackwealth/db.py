@@ -246,12 +246,17 @@ async def _reset_pool() -> None:
 
 # Retry budget for transient pg errors during a single request. Each attempt
 # tears down the pool and rebuilds from scratch — Fly's `.internal` mesh
-# sometimes hands out connections that die during init, and a single retry
-# isn't always enough.
-# Retry budget per DB op. Each retry tears the pool's stale connection out via
-# `_reset_pool` and tries fresh. Keep this tight — 2 retries × 100ms backoff =
-# at most 200ms added per failing op, well under user-visible latency.
-_MAX_PG_RETRIES = 2
+# sometimes hands out connections that die during init.
+#
+# Bumped from 2 → 6 after a real-prod incident: during a single upload
+# (~30s), the mesh flapped for several consecutive seconds. With only 2
+# retries, save_plan exhausted them, fell back to in-memory mode, and
+# next get_plan read STALE data from PG when it came back up — rows added
+# during the flap were silently lost. With 6 retries + exponential
+# backoff (0.1, 0.2, 0.4, 0.8, 1.6, 3.2s = ~6.3s max budget) we ride
+# through the flap.
+_MAX_PG_RETRIES = 6
+_PG_BACKOFF_BASE_S = 0.1
 
 
 async def get_plan(household_id: str) -> Optional[PlanState]:
@@ -268,6 +273,13 @@ async def get_plan(household_id: str) -> Optional[PlanState]:
         try:
             async with _acquire_conn() as conn:
                 if conn is None:
+                    # `conn is None` means both pool AND direct connect
+                    # returned None. If DATABASE_URL is configured this is
+                    # a CONNECTIVITY issue — raise to engage the retry
+                    # loop. If DATABASE_URL is unset (dev / local) this
+                    # is by design — degrade to in-memory.
+                    if _database_url():
+                        raise ConnectionError("postgres acquire returned None")
                     if household_id not in _memory:
                         _memory[household_id] = empty_plan_state(household_id)
                     return _memory[household_id]
@@ -283,10 +295,11 @@ async def get_plan(household_id: str) -> Optional[PlanState]:
                     data = json.loads(data)
                 return PlanState.model_validate(data)
         except Exception as e:
-            if attempt < _MAX_PG_RETRIES and _is_transient_pg_error(e):
-                print(f"[db] transient pg err in get_plan (attempt {attempt+1}/{_MAX_PG_RETRIES+1}): {type(e).__name__}")
+            if attempt < _MAX_PG_RETRIES and (_is_transient_pg_error(e) or isinstance(e, ConnectionError)):
+                backoff = _PG_BACKOFF_BASE_S * (2 ** attempt)
+                print(f"[db] transient pg err in get_plan (attempt {attempt+1}/{_MAX_PG_RETRIES+1}): {type(e).__name__} — backoff {backoff:.2f}s")
                 await _reset_pool()
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(backoff)
                 continue
             raise
     return None  # unreachable
@@ -297,15 +310,25 @@ async def save_plan(plan: PlanState) -> None:
         try:
             async with _acquire_conn() as conn:
                 if conn is None:
+                    # See the matching block in get_plan: when DATABASE_URL
+                    # is configured, `conn is None` means the .internal
+                    # mesh is flapping. Raise so the retry loop engages
+                    # rather than silently writing to memory — otherwise
+                    # the next get_plan reads PG (when it comes back) and
+                    # the row appears to "vanish" because it was never
+                    # actually persisted.
+                    if _database_url():
+                        raise ConnectionError("postgres acquire returned None")
                     _memory[plan.household_id] = plan
                     return
                 await _save_plan_via_conn(conn, plan)
                 return
         except Exception as e:
-            if attempt < _MAX_PG_RETRIES and _is_transient_pg_error(e):
-                print(f"[db] transient pg err in save_plan (attempt {attempt+1}/{_MAX_PG_RETRIES+1}): {type(e).__name__}")
+            if attempt < _MAX_PG_RETRIES and (_is_transient_pg_error(e) or isinstance(e, ConnectionError)):
+                backoff = _PG_BACKOFF_BASE_S * (2 ** attempt)
+                print(f"[db] transient pg err in save_plan (attempt {attempt+1}/{_MAX_PG_RETRIES+1}): {type(e).__name__} — backoff {backoff:.2f}s")
                 await _reset_pool()
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(backoff)
                 continue
             raise
 

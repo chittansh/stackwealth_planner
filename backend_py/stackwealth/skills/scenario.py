@@ -546,7 +546,18 @@ async def _apply_add_locked(args: dict[str, Any]) -> dict[str, Any]:
         plan_d, f"{args['path']}[+]", {"id": row_id, "label": label},
         args.get("source_type", "user"),
     )
-    await save_plan(_from_dict(plan_d))
+    try:
+        await save_plan(_from_dict(plan_d))
+    except Exception as e:
+        # PG flap rode out the retry budget. Surface it explicitly rather
+        # than propagating an exception that would error the whole upload
+        # stream (and was the root of the "row appeared then vanished"
+        # bug — see db.py save_plan comment).
+        return {
+            "ok": False,
+            "error": f"db save failed: {type(e).__name__}: {e}",
+            "rejected_row": row,
+        }
     return {"ok": True, "id": row_id}
 
 
