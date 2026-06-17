@@ -149,11 +149,12 @@ def detect_plan_anomalies(plan: PlanState) -> list[dict[str, Any]]:
             # Compute current age if DOB available
             current_age = None
             if p.date_of_birth:
-                try:
-                    yr = int(p.date_of_birth.split("-")[-1])
-                    current_age = datetime.now().year - yr
-                except (ValueError, IndexError):
-                    pass
+                # Accept both DD-MM-YYYY and YYYY-MM-DD — the year is
+                # whichever 4-digit component looks like a real birth year.
+                parts = p.date_of_birth.replace("/", "-").split("-")
+                year_candidates = [int(x) for x in parts if x.isdigit() and len(x) == 4 and 1900 < int(x) < 2100]
+                if year_candidates:
+                    current_age = datetime.now().year - year_candidates[0]
             if current_age is not None:
                 yrs_to_retire = p.retirement_age - current_age
                 post_retire_years = (p.life_expectancy or 85) - p.retirement_age
