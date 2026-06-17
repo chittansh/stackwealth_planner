@@ -52,7 +52,7 @@ EXTRACTION_INSTRUCTIONS = """You are an Indian household financial-plan extracto
     "liquid_capital":   { "savings_account_balance"?, "idle_cash_for_investment"?, "fd_breakable_for_investment"? },
     "loans_liabilities": { "home_loan"? { outstanding_amount, emi, interest_rate, tenure_left }, "car_loan"?, "personal_loan"?, "credit_card_dues"? },
     "insurance_details": { "term_plan"? { "company"?, "cover_amount"?, "annual_premium"? }, "health_insurance"? { "company"?, "cover_amount"?, "annual_premium"? }, "family_floater"? { "company"?, "cover_amount"?, "annual_premium"? }, "ulip_or_endowment"? { "company"?, "cover_amount"?, "annual_premium"? } },
-    "financial_goals": [ { "goal_name", "kind" ("child_education" | "child_marriage" | "retirement" | "house_purchase" | "foreign_travel" | "other"), "target_year"?, "target_amount"?, "current_allocated_amount"?, "periodic_contribution"?, "contribution_frequency"? ("monthly" | "annual"), "priority"? } ],
+    "financial_goals": [ { "goal_name", "kind" ("child_education" | "child_marriage" | "retirement" | "house_purchase" | "foreign_travel" | "other"), "target_year"?, "target_amount"? (in TODAY's rupees — see Goals rules below), "is_target_in_today_money"? (bool — true if target_amount is today's cost; false ONLY if the source explicitly gives an already-inflated future-value figure with no today's cost), "inflation_assumed"? (decimal, e.g. 0.08 for 8%), "current_allocated_amount"?, "periodic_contribution"?, "contribution_frequency"? ("monthly" | "annual"), "priority"? } ],
     "mutual_funds":   [ { "fund_name", "current_value", "isin"?, "folio"? } ],
     "equity_stocks":  [ { "stock_name", "current_value", "quantity"?, "isin"? } ],
     "fixed_income":   [ { "instrument" ("FD" | "RD" | "PPF" | "EPF" | "Bonds" | "NPS"), "invested_amount"?, "current_value"?, "maturity_date"? } ],
@@ -94,7 +94,13 @@ Rules:
 - Portfolio aggregation: if the user mentions a portfolio total ("my portfolio is around 12L", "I have 50L in equities"), set `freedom_score_inputs.portfolio_current_value` to that absolute INR value. If they list individual MFs/stocks, also populate the `mutual_funds[]` / `equity_stocks[]` arrays.
 - Liquid: cash in savings / current accounts → `liquid_capital.savings_account_balance` AND `freedom_score_inputs.liquid_assets_current_value` (same total).
 - Loan tenure_left: numeric YEARS only. "12 years" → 12, "3 years 6 months" → 3.5. If credit card is paid in full each month, set `tenure_left` to 0 (not a string).
-- Goals: extract intent like "want to buy a 1.5cr home by 2030" → `{goal_name: "Home Purchase", kind: "house_purchase", target_year: 2030, target_amount: 15000000}`. Goal `kind` MUST be one of: child_education | child_marriage | retirement | house_purchase | foreign_travel | other.
+- Goals: extract intent like "want to buy a 1.5cr home by 2030" → `{goal_name: "Home Purchase", kind: "house_purchase", target_year: 2030, target_amount: 15000000, is_target_in_today_money: true}`. Goal `kind` MUST be one of: child_education | child_marriage | retirement | house_purchase | foreign_travel | other.
+- Goals — TODAY'S COST vs FUTURE VALUE (CRITICAL — get this wrong and every projection is inflated 2-10x):
+    * `target_amount` MUST be the cost in TODAY's rupees, NOT the inflation-adjusted future value. Then set `is_target_in_today_money: true`.
+    * When a structured source (e.g. an xlsx with columns) has BOTH "Today's Cost" AND "Future Value Needed" / "FV" / "Future Value", READ the today's cost — IGNORE the future value column entirely. The FV is a DERIVED computation, not an input.
+    * When the source has "Inflation Assumed" or similar (e.g. "8%"), populate `inflation_assumed` as a decimal (8% → 0.08, 6% → 0.06).
+    * In free-form text ("buy a 1.5cr home in 2030") the user almost always means today's money — set `is_target_in_today_money: true`.
+    * The only case for `is_target_in_today_money: false` is when the source EXPLICITLY says "₹X needed in 2030 (already inflation-adjusted)" / "future value of ₹X" without giving a separate today's-cost figure. This is rare.
 - Goal priority: use `essential | important | aspirational` only. Map "High" → "essential", "Medium" → "important", "Low" → "aspirational".
 - Don't invent values. If a field isn't clearly present, OMIT it from partial_state and add its dotted path to "missing".
 - Every field in partial_state SHOULD have a matching evidence row with a verbatim quote when possible. For derived/inferred values (e.g. FSI aggregates summed from breakdown), confidence may be lower but still emit the value.
