@@ -84,22 +84,34 @@ async def clients(limit: int = 25, offset: int = 0) -> JSONResponse:
                 "news_count": news_count,
             }
         )
-    return JSONResponse(content={
-        "rows": rows,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "has_more": offset + len(rows) < total,
-    })
+    return JSONResponse(
+        content={
+            "rows": rows,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(rows) < total,
+        },
+        # 15-second client cache. Browser-side caching means a click into a
+        # plan and back to /advisor/clients skips the round-trip entirely.
+        # Short enough that fresh writes are visible within seconds.
+        headers={"Cache-Control": "private, max-age=15"},
+    )
 
 
 @router.get("/highlights")
 async def highlights() -> JSONResponse:
+    """Cross-household highlight strip. Was serial (`await get_plan` in a
+    for-loop) which scaled linearly with client count and was the main
+    cause of the slow /advisor/clients initial paint. Now fans out the
+    plan-fetches with asyncio.gather and adds a short cache header so a
+    user navigating between dashboard tabs doesn't hammer the endpoint."""
     ids = await list_all_households()
     news = list_news()
+    plans = await asyncio.gather(*(get_plan(hid) for hid in ids))
+
     items: list[dict] = []
-    for hid in ids:
-        p = await get_plan(hid)
+    for hid, p in zip(ids, plans):
         if not p:
             continue
         fs = p.computed.freedom_score.final_score if p.computed.freedom_score else 0
@@ -134,4 +146,7 @@ async def highlights() -> JSONResponse:
             0,
             {"kind": "tax_window", "text": "FY-end window — review LTCG headroom across all clients."},
         )
-    return JSONResponse(content={"items": items})
+    return JSONResponse(
+        content={"items": items},
+        headers={"Cache-Control": "private, max-age=30"},
+    )
