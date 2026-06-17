@@ -79,10 +79,16 @@ ANALYTICAL APPROACH — before emitting any value, REASON about it:
     * Many templates have a TABLE like `Member | Name | Date of Birth | Marital | Retirement | Life Expectancy | City | Occupation` with rows for Client, Spouse, Child 1, Child 2, Father, Mother. Each row with a name + DOB is a person.
     * For Client + Spouse, emit BOTH into `assumptions.persons[]` with full {name, date_of_birth, retirement_age, life_expectancy}.
     * Children & dependents (Father/Mother) usually go into `personal_details.{number_of_children, dependents}` as summaries unless the household plan explicitly needs them as planning subjects — when in doubt, persons[] = primary earners only.
-- **Totals & subtotals — prefer footers over re-summing**:
-    * If a sheet has a "Total" / "Subtotal" / "Grand Total" row, USE that figure. Don't re-sum components — you'll double-count subtotals.
-    * E.g. an Expenses sheet with Essential subtotal ₹2,26,000 + Discretionary subtotal ₹5,000 + Loans subtotal ₹0 + TOTAL ₹2,31,000 → emit `monthly_expenses` aggregate = ₹2,31,000 (the TOTAL row), NOT ₹2,31,000 + ₹2,26,000 + ₹5,000.
-    * Watch for sectioned tables where row #N is a section header (not a data row): "A. Essential Spends" is a HEADER, not an expense line item.
+- **Totals & subtotals — NEVER emit a subtotal as a field value**:
+    * Subtotal / Total / Grand Total rows are AGGREGATES. They exist to verify your itemization, NOT to map into a field directly.
+    * Rule: itemize EVERY component line in its proper field. Never also dump a "Subtotal" into a generic field like `household_expenses`. Doing so double-counts (subtotal + components = 2× the truth).
+    * E.g. an Expenses sheet with line items {Rent 70k, Groceries 25k, Utilities 12k, School 40k, Insurance 40k, Medical 5k, Lifestyle 17k} that sum to a "Subtotal – Essential ₹2,26,000": map each line to its field (rent_or_emi=70k, groceries=25k, utilities=12k, school_fees=40k, insurance_premium=40k, medical=5k, travel_or_lifestyle=17k). The subtotal ₹2,26,000 goes NOWHERE — your itemization already sums to it.
+    * Watch for sectioned tables where row #N is a section header (not a data row): "A. Essential Spends", "B. Discretionary", "I. Gross Income", "III. Net Income" are HEADERS, not values. Skip them.
+    * Use the TOTAL footer as a SANITY CHECK only: sum your emitted components → if it doesn't equal the footer (within ₹2k tolerance), re-derive.
+- **`household_expenses` is a SPECIFIC line item, NOT a catchall aggregate**:
+    * It's for generic household consumption that doesn't fit elsewhere (cleaning supplies, daily-use items). It is NOT "all essential expenses combined".
+    * If a source uses "Household Expenses" as a CATEGORY HEADER with sub-line-items underneath, map the sub-line-items, not the header.
+    * Anything you can't map cleanly should be omitted (or stuffed into a single generic field with a one-time judgement call) — NEVER stack a subtotal on top of the per-component values.
 - **monthly_expenses is CONSUMPTION ONLY** (the single most-double-counted field):
     * IN: rent / groceries / utilities / school fees / medical / household / lifestyle / travel / insurance premium (consumption-side).
     * OUT — these are NOT monthly_expenses:
