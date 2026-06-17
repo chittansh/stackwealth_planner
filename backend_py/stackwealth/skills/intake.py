@@ -15,6 +15,7 @@ the TS contract exactly.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -303,7 +304,17 @@ async def _llm_extract(
             # API doesn't 400.
             if not user_blocks:
                 user_blocks.append({"type": "text", "text": "(no document content)"})
-            resp = claude.messages.create(
+            # The Anthropic SDK's `messages.create` is BLOCKING. Calling
+            # it directly from an async handler pins the whole asyncio
+            # event loop for the duration of the LLM call (~90s for a
+            # full xlsx). During that window even /health can't respond,
+            # which makes Fly's healthcheck time out, drop the machine
+            # from the load balancer, and surface "not listening on
+            # 0.0.0.0:4000" to fly-doctor. asyncio.to_thread offloads
+            # the blocking call to a worker thread so the event loop
+            # keeps serving other requests.
+            resp = await asyncio.to_thread(
+                claude.messages.create,
                 model=config.INTAKE_MODEL or "claude-haiku-4-5-20251001",
                 max_tokens=4096,
                 temperature=0,
@@ -340,7 +351,9 @@ async def _llm_extract(
                             "image_url": {"url": f"data:{image_mime or 'image/jpeg'};base64,{b64}"},
                         }
                     )
-                resp = oa.chat.completions.create(
+                # Same event-loop concern as the Claude path above.
+                resp = await asyncio.to_thread(
+                    oa.chat.completions.create,
                     model="gpt-4o",
                     response_format={"type": "json_object"},
                     temperature=0,
