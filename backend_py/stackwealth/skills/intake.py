@@ -59,6 +59,7 @@ EXTRACTION_INSTRUCTIONS = """You are an Indian household financial-plan extracto
     "real_estate":    [ { "label" (e.g. "Self-Occupied Villa (Gurgaon)"), "kind" ("residential" | "commercial" | "land" | "other"), "current_value", "earmarked_for_sale"? (bool), "expected_appreciation_pa"? (decimal) } ],
     "gold":           [ { "label" (e.g. "Sovereign Gold Bonds"), "kind" ("physical" | "sgb" | "digital" | "jewellery"), "current_value", "held_for_investment"? (bool, default true) } ],
     "emergency_fund": { "emergency_fund_available"? (bool), "total_emergency_corpus"? (INR), "where_is_it_parked"? (string), "monthly_household_expense_for_calculation"? (INR), "months_of_cover_available"? (decimal) },
+    "assumptions": { "persons"? [ { "name", "date_of_birth"? (DD-MM-YYYY), "life_expectancy"? (years, default 85), "retirement_age"? (AGE in years, NOT a calendar year) } ] },
     "freedom_score_inputs": { "age"?, "monthly_income"?, "monthly_expenses"?, "monthly_emi"?, "portfolio_current_value"?, "liquid_assets_current_value"?, "equity_allocation_percent"? }
   },
   "evidence": [ { "field": "<canonical.path>", "value": <same as in partial_state>, "confidence": 0..1, "evidence_quote": "<verbatim span from source>" } ],
@@ -66,7 +67,40 @@ EXTRACTION_INSTRUCTIONS = """You are an Indian household financial-plan extracto
 }
 
 Rules:
-- The document may be structured (template xlsx, bank statement, form) OR completely unstructured (a paragraph someone wrote, a screenshot, a voice transcript, a WhatsApp chat). Extract EVERY financial fact you can identify, regardless of formatting.
+- The document may be structured (template xlsx, bank statement, form) OR completely unstructured (a paragraph someone wrote, a screenshot, a voice transcript, a WhatsApp chat). Extract EVERY financial fact you can identify, regardless of formatting. Do NOT pattern-match on sheet names like `4A_Mutual_Funds`; rely on column-header SEMANTICS, content, and labels. The same household's data may arrive with sheets called `Mutual_Funds` or `mfs` or `Investments – MF` — analyze content, not tab names.
+
+ANALYTICAL APPROACH — before emitting any value, REASON about it:
+- **Year vs Age** (huge footgun on retirement_age):
+    * "Retirement Age 60", "I'll retire at 55", "retire by age 58" → these are AGES (small int, typically 50-65). Emit as `assumptions.persons[*].retirement_age` AND `personal_details.retirement_age_target`.
+    * "Retirement Year 2030", "Plan to retire in 2032", "Target year: 2035" → these are CALENDAR YEARS (typically 2025-2070). To get age: `retirement_age = retirement_year − birth_year`. Example: born 1990, "Retirement Year 2030" → retirement_age = 40. NEVER emit 2030 as retirement_age.
+    * Sanity check: if you're about to emit `retirement_age > 100` you've extracted a YEAR by mistake — convert it.
+    * Maturity dates, target years for goals, "born in YYYY" — these ARE legitimately calendar years, leave them as such.
+- **Multi-row Personal_Details tables** (one row = one person):
+    * Many templates have a TABLE like `Member | Name | Date of Birth | Marital | Retirement | Life Expectancy | City | Occupation` with rows for Client, Spouse, Child 1, Child 2, Father, Mother. Each row with a name + DOB is a person.
+    * For Client + Spouse, emit BOTH into `assumptions.persons[]` with full {name, date_of_birth, retirement_age, life_expectancy}.
+    * Children & dependents (Father/Mother) usually go into `personal_details.{number_of_children, dependents}` as summaries unless the household plan explicitly needs them as planning subjects — when in doubt, persons[] = primary earners only.
+- **Totals & subtotals — prefer footers over re-summing**:
+    * If a sheet has a "Total" / "Subtotal" / "Grand Total" row, USE that figure. Don't re-sum components — you'll double-count subtotals.
+    * E.g. an Expenses sheet with Essential subtotal ₹2,26,000 + Discretionary subtotal ₹5,000 + Loans subtotal ₹0 + TOTAL ₹2,31,000 → emit `monthly_expenses` aggregate = ₹2,31,000 (the TOTAL row), NOT ₹2,31,000 + ₹2,26,000 + ₹5,000.
+    * Watch for sectioned tables where row #N is a section header (not a data row): "A. Essential Spends" is a HEADER, not an expense line item.
+- **monthly_expenses is CONSUMPTION ONLY** (the single most-double-counted field):
+    * IN: rent / groceries / utilities / school fees / medical / household / lifestyle / travel / insurance premium (consumption-side).
+    * OUT — these are NOT monthly_expenses:
+        - Salary tax deductions, TDS, professional tax → ALREADY netted out of `client_salary_in_hand` (which is post-tax in-hand). DO NOT add them again to expenses.
+        - Provident Fund / EPF contributions → these are wealth-building, NOT consumption. Go in `monthly_investments` (or omit if already netted from salary).
+        - SIPs / PPF / NPS contributions → `monthly_investments.*`, never expenses.
+        - Loan EMIs → `monthly_expenses.other_emis` AND `loans_liabilities.*` (do not also sum into the "TOTAL expenses" figure if the source already separates loans).
+    * If the source has an "Income tab Deductions" section (taxes, PF, etc.) and the salary you're reading is "Net in-hand" / "Take Home" / "Net Monthly Income", IGNORE the deductions — they're already subtracted.
+    * Sanity check: `monthly_expenses` ≈ rent + groceries + utilities + lifestyle + medical + school + insurance_prem ≈ TOTAL EXPENDITURE footer (excluding loans). If your aggregate is >1.5× the footer, you've double-counted something — re-derive.
+- **Semantic synonyms — map any of these to the same canonical field**:
+    * "Net in-hand", "Take Home", "Net Monthly Income", "In-hand salary", "Post-tax salary" → `income_details.client_salary_in_hand` (note: this is monthly).
+    * "CTC", "Gross Salary", "Annual Package", "LPA" → these are GROSS or ANNUAL. If only CTC is given, divide by 12 AND subtract ~25% tax to estimate in-hand; better: ask the user. Don't put CTC directly into client_salary_in_hand.
+    * "Outstanding Principal", "Loan Outstanding", "Loan Balance" → `loans_liabilities.*.outstanding_amount`.
+    * "Cover Amount", "Sum Assured", "Sum Insured" → `insurance_details.*.cover_amount`.
+    * "Liquid Funds" / "Sweep FD" / "Savings A/c" → liquid_capital.* OR fixed_income depending on instrument.
+- **The document may be unstructured paragraph text** — treat sentences like rows. "I earn 5 lakh a month, spend 1.5 lakh, have 30 lakh in MFs and a 1 cr flat with a 40 lakh home loan" → extract every clause: salary 500000, expenses 150000, MF total 3000000, real_estate [{label:"Flat", kind:"residential", current_value:10000000}], home_loan.outstanding_amount=4000000.
+
+
 - All monetary values are monthly INR unless they're in goals / portfolios / loans (then absolute INR).
 - Indian number conversion (CRITICAL — get this wrong and the entire plan is off by 10x):
     * 1 thousand / 1k = 1000
