@@ -497,16 +497,45 @@ class MCResult(StrictModel):
 
 
 class NetWorth(StrictModel):
-    total: float = 0           # assets_total - unsecured debts
+    """Full net-worth snapshot with asset/loan breakdown.
+
+    Earlier the math excluded real_estate + gold from assets AND excluded
+    home_loan from debts — both halves cancelled out. That worked when
+    the schema didn't track real_estate / gold rows, but now that they
+    do, the user's primary residence (often the largest asset) was
+    invisible in net worth. This shape exposes every component so the
+    canvas can render the full breakdown and pair each secured loan with
+    its underlying asset.
+
+    Math:
+        gross_assets = liquid + investments + real_estate_total + gold_total
+        real_estate_equity = real_estate_total − home_loan_outstanding
+                             (clamped ≥ 0)
+        total = liquid + investments + real_estate_equity + gold_total
+                − unsecured_debts − car_loan_outstanding
+                (car_loan is subtracted as an unmatched secured debt
+                 since we don't yet schema-track the vehicle itself —
+                 once we add a vehicles[] list this becomes a paired
+                 equity calc just like real_estate)
+    """
+    total: float = 0
     liquid: float = 0
     non_liquid: float = 0
-    assets_total: float = 0
-    debts_total: float = 0     # UNSECURED only (personal loan + credit-card dues)
-    # Secured debts (home_loan, car_loan) — surfaced separately because the
-    # underlying asset offsets the liability and isn't tracked in
-    # `assets_total`. Counting these as net debt makes early-career
-    # households appear underwater on paper despite owning the car/house.
-    secured_debts: float = 0
+    assets_total: float = 0     # GROSS — includes real_estate + gold at face value
+
+    # Asset breakdown (new)
+    investments: float = 0      # MFs + stocks + fixed income (or fsi.portfolio fallback)
+    real_estate_total: float = 0  # Σ real_estate.current_value
+    gold_total: float = 0       # Σ gold.current_value
+    real_estate_equity: float = 0  # max(0, real_estate_total − home_loan_outstanding)
+
+    # Liability breakdown
+    debts_total: float = 0          # UNSECURED only (personal loan + credit-card dues)
+    secured_debts: float = 0        # home_loan + car_loan (back-compat / informational)
+    home_loan_outstanding: float = 0
+    car_loan_outstanding: float = 0
+    personal_loan_outstanding: float = 0
+    credit_card_outstanding: float = 0
 
 
 class NetWorthSeriesPoint(StrictModel):

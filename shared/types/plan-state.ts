@@ -296,9 +296,21 @@ export type NetWorth = {
   total: number;
   liquid: number;
   non_liquid: number;
-  assets_total: number;
-  debts_total: number;      // unsecured only (personal_loan + credit_card_dues)
-  secured_debts?: number;   // home_loan + car_loan — informational, not counted in `total`
+  assets_total: number;      // GROSS (includes real_estate + gold at face value)
+  debts_total: number;       // UNSECURED only (personal_loan + credit_card_dues)
+  secured_debts?: number;    // home_loan + car_loan — back-compat / informational
+
+  // Asset breakdown
+  investments?: number;
+  real_estate_total?: number;
+  gold_total?: number;
+  real_estate_equity?: number;  // max(0, real_estate_total − home_loan_outstanding)
+
+  // Liability breakdown (per-loan)
+  home_loan_outstanding?: number;
+  car_loan_outstanding?: number;
+  personal_loan_outstanding?: number;
+  credit_card_outstanding?: number;
 };
 
 export type DebtAmortRow = {

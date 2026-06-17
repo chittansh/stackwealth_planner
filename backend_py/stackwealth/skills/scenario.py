@@ -826,8 +826,28 @@ async def run_monte_carlo(args: dict[str, Any]) -> dict | MCResult:
 
 
 def _derive_net_worth(plan_d: dict) -> dict:
+    """Full asset/liability breakdown for the canvas.
+
+    The historical contract was: assets_total = liquid + investments, and
+    secured loans (home, car) were excluded from net worth on the theory
+    that we didn't have the matching asset value. Now that
+    `real_estate[]` and `gold[]` are first-class lists on the plan, the
+    house and gold ARE tracked. So:
+
+    - Real estate's current_value is added to assets.
+    - Gold's current_value is added to assets.
+    - Home loan's outstanding is paired against real_estate (net equity).
+    - Car loan stays as an unpaired secured debt (we don't yet track a
+      vehicles[] list — when we do, this gets the same pairing treatment).
+
+    The user's complaint that motivated this rewrite: their primary
+    residence (₹2-3Cr asset, often the household's largest) was
+    completely invisible in net worth.
+    """
     fsi = plan_d.get("freedom_score_inputs") or {}
     lc = plan_d.get("liquid_capital") or {}
+
+    # ── Liquid (cash-like) ────────────────────────────────────────────
     cash_from_sections = (
         (lc.get("savings_account_balance") or 0)
         + (lc.get("idle_cash_for_investment") or 0)
@@ -836,6 +856,7 @@ def _derive_net_worth(plan_d: dict) -> dict:
     )
     liquid = cash_from_sections if cash_from_sections > 0 else (fsi.get("liquid_assets_current_value") or 0)
 
+    # ── Investments (MFs + stocks + fixed income) ─────────────────────
     mf_total = sum((h.get("current_value") or 0) for h in plan_d.get("mutual_funds", []))
     eq_total = sum((h.get("current_value") or 0) for h in plan_d.get("equity_stocks", []))
     fi_total = sum((h.get("current_value") or 0) for h in plan_d.get("fixed_income", []))
@@ -844,31 +865,57 @@ def _derive_net_worth(plan_d: dict) -> dict:
         fsi.get("portfolio_current_value") or 0
     )
 
-    assets_total = liquid + investments
+    # ── Real estate + Gold (NEW — were missing from net worth) ────────
+    real_estate_total = sum((r.get("current_value") or 0) for r in plan_d.get("real_estate", []))
+    gold_total = sum((g.get("current_value") or 0) for g in plan_d.get("gold", []))
+
+    gross_assets = liquid + investments + real_estate_total + gold_total
+
+    # ── Liabilities ────────────────────────────────────────────────────
     l = plan_d.get("loans_liabilities") or {}
-    # Net-worth excludes SECURED loans (home, car) because we don't track
-    # the underlying asset's value separately — counting only the debt
-    # half of "₹9L car loan against a ₹9L car" makes a 22-year-old look
-    # ₹9L underwater on paper despite the car offsetting it. Unsecured
-    # debts (personal loan, credit-card dues) ARE net negatives and stay
-    # in `debts_total`. The full cashflow projection still handles the
-    # secured-loan EMIs via `monthly_emi` — only the today-snapshot
-    # net-worth math is corrected here.
-    unsecured_debts = (
-        ((l.get("personal_loan") or {}).get("outstanding_amount") or 0)
-        + ((l.get("credit_card_dues") or {}).get("outstanding_amount") or 0)
+    home_outstanding = float((l.get("home_loan") or {}).get("outstanding_amount") or 0)
+    car_outstanding = float((l.get("car_loan") or {}).get("outstanding_amount") or 0)
+    personal_outstanding = float((l.get("personal_loan") or {}).get("outstanding_amount") or 0)
+    cc_outstanding = float((l.get("credit_card_dues") or {}).get("outstanding_amount") or 0)
+    unsecured_debts = personal_outstanding + cc_outstanding
+    secured_debts = home_outstanding + car_outstanding
+
+    # ── Pairing: real_estate ↔ home_loan ──────────────────────────────
+    # Equity in the property = market value − outstanding mortgage,
+    # clamped ≥ 0 (if you owe more than it's worth you're not negative
+    # net-worth on net_worth.total — that money is already in the
+    # liability column).
+    real_estate_equity = max(0.0, real_estate_total - home_outstanding)
+
+    # ── Net worth total ──────────────────────────────────────────────
+    # = liquid + investments + real_estate_equity + gold
+    #   − unsecured_debts − car_loan_outstanding
+    # (car_loan is the only secured debt not paired with an asset; once
+    # we add vehicles[] this term goes away in favour of car equity.)
+    total = (
+        liquid
+        + investments
+        + real_estate_equity
+        + gold_total
+        - unsecured_debts
+        - car_outstanding
     )
-    secured_debts = (
-        ((l.get("home_loan") or {}).get("outstanding_amount") or 0)
-        + ((l.get("car_loan") or {}).get("outstanding_amount") or 0)
-    )
+
     return {
-        "total": assets_total - unsecured_debts,
-        "liquid": liquid,
-        "non_liquid": max(0, assets_total - liquid),
-        "assets_total": assets_total,
-        "debts_total": unsecured_debts,
-        "secured_debts": secured_debts,
+        "total": round(total),
+        "liquid": round(liquid),
+        "non_liquid": round(max(0, gross_assets - liquid)),
+        "assets_total": round(gross_assets),
+        "investments": round(investments),
+        "real_estate_total": round(real_estate_total),
+        "gold_total": round(gold_total),
+        "real_estate_equity": round(real_estate_equity),
+        "debts_total": round(unsecured_debts),
+        "secured_debts": round(secured_debts),
+        "home_loan_outstanding": round(home_outstanding),
+        "car_loan_outstanding": round(car_outstanding),
+        "personal_loan_outstanding": round(personal_outstanding),
+        "credit_card_outstanding": round(cc_outstanding),
     }
 
 
