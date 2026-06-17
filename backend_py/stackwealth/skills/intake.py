@@ -85,10 +85,23 @@ ANALYTICAL APPROACH — before emitting any value, REASON about it:
     * E.g. an Expenses sheet with line items {Rent 70k, Groceries 25k, Utilities 12k, School 40k, Insurance 40k, Medical 5k, Lifestyle 17k} that sum to a "Subtotal – Essential ₹2,26,000": map each line to its field (rent_or_emi=70k, groceries=25k, utilities=12k, school_fees=40k, insurance_premium=40k, medical=5k, travel_or_lifestyle=17k). The subtotal ₹2,26,000 goes NOWHERE — your itemization already sums to it.
     * Watch for sectioned tables where row #N is a section header (not a data row): "A. Essential Spends", "B. Discretionary", "I. Gross Income", "III. Net Income" are HEADERS, not values. Skip them.
     * Use the TOTAL footer as a SANITY CHECK only: sum your emitted components → if it doesn't equal the footer (within ₹2k tolerance), re-derive.
-- **`household_expenses` is a SPECIFIC line item, NOT a catchall aggregate**:
-    * It's for generic household consumption that doesn't fit elsewhere (cleaning supplies, daily-use items). It is NOT "all essential expenses combined".
+- **`household_expenses` is the RESIDUAL catchall — but NEVER for subtotals**:
+    * Use `household_expenses` for line items that don't fit a more specific field. Examples: "Transport & Commute", "Other Expenses (property tax, donations, hobby)", "Maid / driver", "Pet care", "Subscriptions", "Miscellaneous", "Entertainment" if not lifestyle-y.
     * If a source uses "Household Expenses" as a CATEGORY HEADER with sub-line-items underneath, map the sub-line-items, not the header.
-    * Anything you can't map cleanly should be omitted (or stuffed into a single generic field with a one-time judgement call) — NEVER stack a subtotal on top of the per-component values.
+    * NEVER put a Subtotal / Total / "Essential Total" row into `household_expenses` — that doubles up with itemized components.
+    * Sanity: after extraction, `sum(monthly_expenses.*)` MUST equal the TOTAL EXPENDITURE footer (within ₹2k). If it's short, you dropped some line items — add them to `household_expenses` as the residual. If it's over, you double-counted a subtotal — remove that.
+- **Common line-item → field mapping cheat sheet**:
+    * Rent / Maintenance / Society fees → `rent_or_emi`
+    * Groceries / Living Expense / Milk / Newspaper → `groceries`
+    * Utilities / Gas / Electricity / Phone / Internet / Water → `utilities`
+    * Children Education / School Fees / Tuition / Uniforms → `school_fees`
+    * Transport / Commute / Petrol / Car Maintenance / Cab → `household_expenses` (residual)
+    * Medical / Pharmacy / Doctor visits → `medical`
+    * Insurance Premium (Health, Life, Vehicle if expensed) → `insurance_premium` (sum them all)
+    * Lifestyle / Restaurants / Gym / Club / Gifts / Apparel → `travel_or_lifestyle`
+    * Vacation / Travel / Entertainment / Discretionary → `travel_or_lifestyle`
+    * Property Tax / Donations / Sports / Hobby / Other → `household_expenses` (residual)
+    * Maid / Driver / Cook / Domestic help → `household_expenses` (residual)
 - **monthly_expenses is CONSUMPTION ONLY** (the single most-double-counted field):
     * IN: rent / groceries / utilities / school fees / medical / household / lifestyle / travel / insurance premium (consumption-side).
     * OUT — these are NOT monthly_expenses:
