@@ -46,6 +46,101 @@ async def paydown(args: dict[str, Any]) -> dict | DebtPaydownOutput:
     return compute_debt_paydown(plan)
 
 
+def compute_debt_ratios(plan: PlanState) -> dict:
+    """Excel `Debt Mgt` decision logic — DSCR / DTI / DNI ratios.
+
+    DSCR = (annual_income − annual_living_expenses_excl_emi) / annual_EMI
+        threshold <1.25 → "reduce debt" advised.
+    DTI  = total_outstanding_debt / annual_income
+        threshold >0.50 → "high debt burden".
+    DNI  = total_outstanding_debt / total_assets
+        threshold >0.30 → "debt-heavy net-worth profile".
+    """
+    fsi = plan.freedom_score_inputs
+    annual_income = (fsi.monthly_income or 0) * 12
+    annual_expenses = (fsi.monthly_expenses or 0) * 12
+    annual_emi = (fsi.monthly_emi or 0) * 12
+    loans = plan.loans_liabilities
+    total_debt = sum(
+        (getattr(loans, k).outstanding_amount or 0) if getattr(loans, k, None) else 0
+        for k in ("home_loan", "car_loan", "personal_loan", "credit_card_dues")
+    )
+    nw = plan.computed.net_worth
+    total_assets = (nw.assets_total or 0)
+    income_for_debt = annual_income - annual_expenses
+    dscr = (income_for_debt / annual_emi) if annual_emi > 0 else None
+    dti = (total_debt / annual_income) if annual_income > 0 else None
+    dni = (total_debt / total_assets) if total_assets > 0 else None
+    return {
+        "dscr": round(dscr, 3) if dscr is not None else None,
+        "dscr_status": _ratio_status(dscr, healthy=lambda x: x >= 1.25, watch=lambda x: x >= 1.0),
+        "dti": round(dti, 3) if dti is not None else None,
+        "dti_status": _ratio_status(dti, healthy=lambda x: x <= 0.35, watch=lambda x: x <= 0.50, invert=True),
+        "dni": round(dni, 3) if dni is not None else None,
+        "dni_status": _ratio_status(dni, healthy=lambda x: x <= 0.20, watch=lambda x: x <= 0.30, invert=True),
+        "total_debt_outstanding": round(total_debt),
+        "annual_income": round(annual_income),
+        "annual_emi": round(annual_emi),
+        "income_available_for_debt_service": round(income_for_debt),
+    }
+
+
+def _ratio_status(value, *, healthy, watch, invert: bool = False) -> str:
+    if value is None:
+        return "n/a"
+    if healthy(value):
+        return "healthy"
+    if watch(value):
+        return "watch"
+    return "reduce debt" if not invert else "high"
+
+
+def compute_repayment_strategies(plan: PlanState) -> dict:
+    """Excel `Debt Mgt` repayment ordering — Avalanche / Snowball / Blizzard.
+
+    Avalanche: highest-rate loan first (saves most interest).
+    Snowball: smallest-balance first (psychological wins).
+    Blizzard: snowball until first cleared, then avalanche the rest.
+    """
+    loans = plan.loans_liabilities
+    rows = []
+    for key, label in (
+        ("home_loan", "Home loan"),
+        ("car_loan", "Car loan"),
+        ("personal_loan", "Personal loan"),
+        ("credit_card_dues", "Credit card dues"),
+    ):
+        block = getattr(loans, key, None)
+        if not block or not (block.outstanding_amount or 0):
+            continue
+        rate = block.interest_rate if block.interest_rate is not None else _DEFAULT_RATES_PCT[key]
+        rows.append({
+            "kind": key,
+            "label": label,
+            "outstanding": round(block.outstanding_amount or 0),
+            "emi": round(block.emi or 0),
+            "rate_pct": float(rate),
+        })
+    avalanche = sorted(rows, key=lambda r: -r["rate_pct"])
+    snowball = sorted(rows, key=lambda r: r["outstanding"])
+    if snowball:
+        blizzard = [snowball[0]] + sorted(snowball[1:], key=lambda r: -r["rate_pct"])
+    else:
+        blizzard = []
+    return {
+        "avalanche_order": [r["kind"] for r in avalanche],
+        "snowball_order":  [r["kind"] for r in snowball],
+        "blizzard_order":  [r["kind"] for r in blizzard],
+        "loans": rows,
+        "default_strategy": "avalanche",
+        "rationale": (
+            "Avalanche minimises total interest paid. Snowball is the right "
+            "default only when the household needs psychological momentum. "
+            "Blizzard combines both — clear the smallest loan first, then attack by rate."
+        ),
+    }
+
+
 def compute_debt_paydown(plan: PlanState) -> DebtPaydownOutput:
     start_year = datetime.now().year
     schedules: list[DebtSchedule] = []

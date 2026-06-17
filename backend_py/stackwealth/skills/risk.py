@@ -206,3 +206,229 @@ def compute_risk(plan: PlanState, w: dict[str, Any]) -> RiskOutput:
         key_warnings=warnings,
         goal_actions=goal_actions,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 17-question Risk Questionnaire — Excel `Risk Questannaire` tab
+#
+# Each Q has options scored 1–5. Total bucketed:
+#   17–34 → Conservative
+#   35–50 → Moderately Conservative
+#   51–67 → Moderate
+#   68–76 → Moderately Aggressive
+#   77–85 → Aggressive
+# ─────────────────────────────────────────────────────────────────────────
+
+RISK_QUESTIONNAIRE = [
+    # ── Section A: Investment knowledge ─────────────────────────────────
+    {"id": "Q1", "section": "knowledge",
+     "text": "How would you rate your investment knowledge?",
+     "options": [
+         {"label": "Beginner",       "score": 1},
+         {"label": "Some experience","score": 2},
+         {"label": "Average",        "score": 3},
+         {"label": "Above average",  "score": 4},
+         {"label": "Expert",         "score": 5}]},
+    {"id": "Q2", "section": "knowledge",
+     "text": "Which of these have you previously invested in?",
+     "options": [
+         {"label": "Only bank deposits",                     "score": 1},
+         {"label": "Bank deposits + insurance plans",        "score": 2},
+         {"label": "Mutual funds",                           "score": 3},
+         {"label": "Direct stocks",                          "score": 4},
+         {"label": "Derivatives / alternates / international","score": 5}]},
+    {"id": "Q3", "section": "knowledge",
+     "text": "How do you usually make investment decisions?",
+     "options": [
+         {"label": "I rely entirely on someone else",  "score": 1},
+         {"label": "Family / friend recommendation",   "score": 2},
+         {"label": "Advisor + my own check",           "score": 3},
+         {"label": "Mostly my own research",           "score": 4},
+         {"label": "Entirely self-directed",           "score": 5}]},
+
+    # ── Section B: Time horizon & life stage ────────────────────────────
+    {"id": "Q4", "section": "horizon",
+     "text": "What is your investment time horizon?",
+     "options": [
+         {"label": "Less than 1 year",  "score": 1},
+         {"label": "1–3 years",         "score": 2},
+         {"label": "3–5 years",         "score": 3},
+         {"label": "5–10 years",        "score": 4},
+         {"label": "More than 10 years","score": 5}]},
+    {"id": "Q5", "section": "horizon",
+     "text": "When do you expect to start drawing on these investments?",
+     "options": [
+         {"label": "Within 1 year",                        "score": 1},
+         {"label": "1–3 years",                            "score": 2},
+         {"label": "3–7 years",                            "score": 3},
+         {"label": "7–15 years",                           "score": 4},
+         {"label": "Only after retirement / never planned","score": 5}]},
+    {"id": "Q6", "section": "horizon",
+     "text": "Your current age bracket?",
+     "options": [
+         {"label": "55+",      "score": 1},
+         {"label": "45–55",    "score": 2},
+         {"label": "35–45",    "score": 3},
+         {"label": "25–35",    "score": 4},
+         {"label": "Under 25", "score": 5}]},
+
+    # ── Section C: Financial position ───────────────────────────────────
+    {"id": "Q7", "section": "position",
+     "text": "Stability of your primary income source?",
+     "options": [
+         {"label": "Highly volatile / contract",         "score": 1},
+         {"label": "Business / freelance",               "score": 2},
+         {"label": "Private salaried, mid stability",    "score": 3},
+         {"label": "Salaried, stable",                   "score": 4},
+         {"label": "Government / very secure",           "score": 5}]},
+    {"id": "Q8", "section": "position",
+     "text": "How many months of expenses do your emergency reserves cover?",
+     "options": [
+         {"label": "< 1 month",      "score": 1},
+         {"label": "1–3 months",     "score": 2},
+         {"label": "3–6 months",     "score": 3},
+         {"label": "6–12 months",    "score": 4},
+         {"label": "More than 12 months","score": 5}]},
+    {"id": "Q9", "section": "position",
+     "text": "Number of dependents you financially support?",
+     "options": [
+         {"label": "More than 4", "score": 1},
+         {"label": "3–4",         "score": 2},
+         {"label": "2",           "score": 3},
+         {"label": "1",           "score": 4},
+         {"label": "None",        "score": 5}]},
+    {"id": "Q10", "section": "position",
+     "text": "What share of your annual income do you save/invest?",
+     "options": [
+         {"label": "< 5%",       "score": 1},
+         {"label": "5–10%",      "score": 2},
+         {"label": "10–20%",     "score": 3},
+         {"label": "20–35%",     "score": 4},
+         {"label": "More than 35%","score": 5}]},
+    {"id": "Q11", "section": "position",
+     "text": "What % of net worth is in liquid investable assets (excluding home / vehicle)?",
+     "options": [
+         {"label": "< 10%",      "score": 1},
+         {"label": "10–25%",     "score": 2},
+         {"label": "25–50%",     "score": 3},
+         {"label": "50–75%",     "score": 4},
+         {"label": "More than 75%","score": 5}]},
+
+    # ── Section D: Willingness to take risk ─────────────────────────────
+    {"id": "Q12", "section": "willingness",
+     "text": "Which statement best describes your investment goal?",
+     "options": [
+         {"label": "Protect capital, beat inflation slightly", "score": 1},
+         {"label": "Steady income with some growth",           "score": 2},
+         {"label": "Balanced growth + income",                 "score": 3},
+         {"label": "Mostly long-term growth",                  "score": 4},
+         {"label": "Maximise long-term growth, accept big swings","score": 5}]},
+    {"id": "Q13", "section": "willingness",
+     "text": "Pick the portfolio you would be most comfortable owning over 10 years:",
+     "options": [
+         {"label": "Avg 5% return / worst-year -2%",   "score": 1},
+         {"label": "Avg 7% return / worst-year -8%",   "score": 2},
+         {"label": "Avg 9% return / worst-year -15%",  "score": 3},
+         {"label": "Avg 11% return / worst-year -25%", "score": 4},
+         {"label": "Avg 13% return / worst-year -35%", "score": 5}]},
+    {"id": "Q14", "section": "willingness",
+     "text": "If you had a windfall of ₹10 lakh, where would you put most of it?",
+     "options": [
+         {"label": "Bank FD / liquid funds",      "score": 1},
+         {"label": "Debt mutual funds / bonds",   "score": 2},
+         {"label": "Hybrid funds",                "score": 3},
+         {"label": "Equity mutual funds",         "score": 4},
+         {"label": "Direct stocks / alternates",  "score": 5}]},
+
+    # ── Section E: Risk perception & past reaction ──────────────────────
+    {"id": "Q15", "section": "perception",
+     "text": "If your portfolio fell 20% in one year, what would you do?",
+     "options": [
+         {"label": "Sell everything",                       "score": 1},
+         {"label": "Move part to safer assets",             "score": 2},
+         {"label": "Hold and wait",                         "score": 3},
+         {"label": "Hold and continue SIPs",                "score": 4},
+         {"label": "Invest more to average down",           "score": 5}]},
+    {"id": "Q16", "section": "perception",
+     "text": "How often do you check your portfolio?",
+     "options": [
+         {"label": "Daily — every move worries me",     "score": 1},
+         {"label": "Weekly",                            "score": 2},
+         {"label": "Monthly",                           "score": 3},
+         {"label": "Quarterly",                         "score": 4},
+         {"label": "Half-yearly or less",               "score": 5}]},
+    {"id": "Q17", "section": "perception",
+     "text": "Which of these have you personally lived through with your money invested?",
+     "options": [
+         {"label": "Never invested through a downturn",        "score": 1},
+         {"label": "I exited when markets fell",               "score": 2},
+         {"label": "I held, mostly nervous",                   "score": 3},
+         {"label": "I held calmly and recovered",              "score": 4},
+         {"label": "I invested more during the downturn",      "score": 5}]},
+]
+
+
+def _bucket_from_questionnaire_total(total: int) -> str:
+    if total <= 34:
+        return "Conservative"
+    if total <= 50:
+        return "Moderately Conservative"
+    if total <= 67:
+        return "Moderate"
+    if total <= 76:
+        return "Moderately Aggressive"
+    return "Aggressive"
+
+
+def compute_questionnaire_score(answers: dict[str, int]) -> dict:
+    """Score the 17-question instrument from Excel `Risk Questannaire`.
+
+    `answers` is a dict of {question_id → score} where score is the value
+    (1–5) of the option the user picked.
+
+    Returns total score, section breakdown, recommended profile, and a
+    list of any questions still missing (so the UI can prompt for them).
+    """
+    section_scores: dict[str, int] = {}
+    section_counts: dict[str, int] = {}
+    answered = 0
+    missing: list[str] = []
+    for q in RISK_QUESTIONNAIRE:
+        qid = q["id"]
+        sec = q["section"]
+        if qid in answers and isinstance(answers[qid], (int, float)):
+            score = int(answers[qid])
+            section_scores[sec] = section_scores.get(sec, 0) + score
+            section_counts[sec] = section_counts.get(sec, 0) + 1
+            answered += 1
+        else:
+            missing.append(qid)
+    total = sum(section_scores.values())
+    profile = _bucket_from_questionnaire_total(total) if not missing else None
+    # Normalised 0–100 score so it composes with capacity / willingness / need.
+    max_total = len(RISK_QUESTIONNAIRE) * 5  # 85
+    min_total = len(RISK_QUESTIONNAIRE) * 1  # 17
+    normalised = round(((total - min_total) / (max_total - min_total)) * 100, 1) if total else 0
+    return {
+        "answered": answered,
+        "total_questions": len(RISK_QUESTIONNAIRE),
+        "missing_question_ids": missing,
+        "section_scores": section_scores,
+        "section_question_counts": section_counts,
+        "total_score": total,
+        "normalised_score_0_100": normalised,
+        "recommended_profile": profile,
+        "is_complete": len(missing) == 0,
+    }
+
+
+async def questionnaire(args: dict[str, Any]) -> dict:
+    """Tool entry point — score a partial or complete questionnaire."""
+    plan = await get_plan(args["household_id"])
+    if not plan:
+        return {"error": "household_not_found"}
+    answers = args.get("answers") or {}
+    return {
+        "questionnaire": RISK_QUESTIONNAIRE,
+        "result": compute_questionnaire_score(answers),
+    }

@@ -53,6 +53,7 @@ from ..types import (
 from pydantic import ValidationError
 
 from .cashflow import compute_cashflow
+from .cfp import compute_cfp
 from .freedom import compute_freedom
 
 
@@ -854,5 +855,27 @@ def recompute(plan_d: dict) -> dict:
                 }
             )
     plan_d["computed"]["milestone_pins"] = pins
+
+    # ── Excel-faithful CFP snapshot (Finding 1 unification) ─────────────
+    # The legacy compute_cashflow + compute_freedom pair drove the canvas;
+    # compute_cfp is the firm's CFP-Excel-strict engine. Run it on every
+    # recompute and stash the result so the canvas, the PDF report, and
+    # the agent all see consistent numbers. Failures here are non-fatal —
+    # we don't want a CFP edge case to wipe out the rest of the snapshot.
+    try:
+        cfp_out = compute_cfp(plan_obj)
+        plan_d["computed"]["cfp"] = {
+            "summary": cfp_out.summary,
+            "goal_blocks": cfp_out.goal_blocks,
+            "retirement": cfp_out.retirement,
+            "insurance": cfp_out.insurance,
+            "yoy_cashflow": cfp_out.yoy_cashflow,
+            "debt": cfp_out.debt,
+            "tax_regime": cfp_out.tax_regime,
+            "constants_used": cfp_out.constants_used,
+        }
+    except Exception:
+        plan_d["computed"]["cfp"] = None
+
     plan_d["last_updated_at"] = datetime.now(timezone.utc).isoformat()
     return plan_d

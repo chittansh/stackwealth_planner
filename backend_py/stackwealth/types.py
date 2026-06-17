@@ -535,6 +535,10 @@ class ComputedSnapshot(StrictModel):
     monte_carlo: Optional[MCResult] = None
     debt_paydown: Optional[DebtPaydownOutput] = None
     milestone_pins: list[MilestonePin] = Field(default_factory=list)
+    # Excel-faithful CFP snapshot — populated on every recompute so the
+    # canvas, the PDF report, and the agent all see the same numbers the
+    # firm's `CFP_ng_080626.xlsx` model would produce.
+    cfp: Optional[dict] = None
 
 
 class ScenarioOp(StrictModel):

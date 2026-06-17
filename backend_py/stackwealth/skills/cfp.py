@@ -28,6 +28,8 @@ from typing import Any, Optional
 
 from ..db import get_plan
 from ..types import Goal, PlanState
+from .debt import compute_debt_ratios, compute_repayment_strategies
+from .tax import compute_tax_regime_comparison
 
 
 # ── Excel-encoded constants (Assumptions & Computation sheet) ─────────────
@@ -405,16 +407,85 @@ def compute_retirement_corpus(
     ))
 
     return {
+        "current_age": current_age,
+        "retirement_age": retirement_age,
+        "life_expectancy": life_expectancy,
         "years_to_retire": years_to_retire,
         "post_retire_years": post_retire_years,
+        # Aliases used by the canvas — keep both keys so legacy + new UIs read cleanly.
+        "years_post_retirement": post_retire_years,
+        "annual_expense_today": round(current_annual_expenses),
         "annual_expenses_at_retirement": round(annual_at_retire),
+        "annual_expense_at_retirement": round(annual_at_retire),
+        "pre_retire_return": round(post_retire_return, 4),
+        "post_retire_return": round(post_retire_return, 4),
+        "inflation_during_retirement": round(inflation, 4),
         "real_return_used": round(disc_rate, 4),
+        "real_return_during_retirement": round(disc_rate, 4),
         "corpus_required": round(corpus_required),
         "computation_trace": trace,
     }
 
 
 # ── Insurance computation (Insurance Computation tab) ────────────────────
+
+def compute_health_cover_required(
+    *,
+    annual_income: float,
+    family_kind: str,  # "single" | "couple" | "with_children" | "with_dependents"
+    is_metro: bool,
+) -> dict:
+    """Excel `Insurance Computation!G51-G65` — health cover required is the
+    HIGHER of:
+      (a) 50% of gross annual income, OR
+      (b) a profile-based table by family composition + metro top-up.
+
+    Profile table (lakhs):
+       single                       → 5L
+       couple                       → 10L
+       with_children                → 15L
+       with_dependents (extended)   → 20L
+    Metro households add +5L.
+    """
+    table = {
+        "single": 500_000,
+        "couple": 1_000_000,
+        "with_children": 1_500_000,
+        "with_dependents": 2_000_000,
+    }
+    profile_floor = table.get(family_kind, 1_000_000)
+    if is_metro:
+        profile_floor += 500_000
+    income_rule = 0.50 * (annual_income or 0)
+    required = max(profile_floor, income_rule)
+    return {
+        "required": round(required),
+        "profile_floor": profile_floor,
+        "income_rule_50pct": round(income_rule),
+        "family_kind": family_kind,
+        "metro_topup_applied": is_metro,
+        "computation_trace": [
+            _trace(
+                "Health cover — profile floor",
+                "table[family_kind] + (5L if metro else 0)",
+                {"family_kind": family_kind, "metro": is_metro},
+                profile_floor,
+            ),
+            _trace(
+                "Health cover — 50% of income rule",
+                "0.50 × annual_income",
+                {"annual_income": round(annual_income)},
+                round(income_rule),
+            ),
+            _trace(
+                "Health cover required",
+                "MAX(profile_floor, income_rule_50pct)",
+                {"profile_floor": profile_floor, "income_rule": round(income_rule)},
+                round(required),
+            ),
+        ],
+    }
+
 
 def compute_insurance_need(
     *,
@@ -612,6 +683,8 @@ class CFPOutput:
     yoy_cashflow: list[dict]
     constants_used: dict
     computation_trace: list[dict]
+    debt: dict = field(default_factory=dict)
+    tax_regime: dict = field(default_factory=dict)
 
 
 async def run_cfp(household_id: str) -> dict[str, Any]:
@@ -813,6 +886,31 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         round(corpus_shortfall),
     ))
 
+    # Additional monthly SIP needed to close the shortfall — Excel
+    # `Retirement Plan!B48` = PMT(post_tax_roi/12, years_to_retire*12, , -shortfall).
+    # Use the equity-hybrid post-tax return (10.5%) because Excel uses the
+    # SAME column for both the corpus discount rate and the SIP rate; fa_roi
+    # (holdings-weighted) isn't computed until later in the orchestrator and
+    # would conflate "what's needed to fund retirement" with "what existing
+    # mix yields" — they're different questions.
+    sip_pre_retire_rate = POST_TAX_RETURN["equity_hybrid"]
+    n_months = years_to_retire * 12
+    if corpus_shortfall > 0 and n_months > 0 and sip_pre_retire_rate > 0:
+        sip_required = abs(excel_pmt(sip_pre_retire_rate / 12, n_months, 0, -corpus_shortfall))
+    else:
+        sip_required = 0.0
+    retirement["required_monthly_sip"] = round(sip_required)
+    retirement["sip_rate_used"] = round(sip_pre_retire_rate, 4)
+    retirement["computation_trace"].append(_trace(
+        "Additional monthly SIP needed to close retirement shortfall",
+        "PMT(roi/12, years_to_retire*12, , -shortfall)",
+        {"roi": round(sip_pre_retire_rate, 4),
+         "years_to_retire": years_to_retire,
+         "shortfall": round(corpus_shortfall)},
+        round(sip_required),
+        unit="INR/mo",
+    ))
+
     # ── Insurance need ─────────────────────────────────────────────────
     loans = plan.loans_liabilities
     loans_outstanding = sum(
@@ -857,6 +955,38 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         return_rate=0.10,
         inflation=plan.assumptions.inflation or 0.06,
     )
+    # Finding 8 — Excel health-cover rule (was missing entirely).
+    persons = plan.assumptions.persons or []
+    n_persons = len(persons)
+    has_children = any(
+        p.date_of_birth and (current_year - int((p.date_of_birth or "0000")[-4:] or 0)) < 25
+        for p in persons[2:]
+    ) if n_persons > 2 else False
+    if n_persons <= 1:
+        family_kind = "single"
+    elif n_persons == 2:
+        family_kind = "couple"
+    elif has_children:
+        family_kind = "with_children"
+    else:
+        family_kind = "with_dependents"
+    is_metro = (plan.personal_details.city_type or "Non-metro") == "Metro"
+    health = compute_health_cover_required(
+        annual_income=annual_income, family_kind=family_kind, is_metro=is_metro,
+    )
+    existing_health = (
+        plan.insurance_details.health_insurance.cover_amount
+        if plan.insurance_details and plan.insurance_details.health_insurance
+        else 0
+    ) or 0
+    family_floater = (
+        plan.insurance_details.family_floater.cover_amount
+        if plan.insurance_details and plan.insurance_details.family_floater
+        else 0
+    ) or 0
+    health["existing_cover"] = round(existing_health + family_floater)
+    health["additional_cover_required"] = max(0, health["required"] - health["existing_cover"])
+    insurance["health"] = health
 
     # ── Year-by-year cashflow ──────────────────────────────────────────
     income_emp_monthly = (plan.income_details.client_salary_in_hand or 0) + (plan.income_details.spouse_salary_in_hand or 0)
@@ -976,6 +1106,44 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         "allocation_priority": ALLOCATION_PRIORITY,
     }
 
+    # ── Debt block (Excel `Debt Mgt`): ratios + repayment ordering ──────
+    ratios = compute_debt_ratios(plan)
+    strategies = compute_repayment_strategies(plan)
+    debt_block = {"ratios": ratios, "strategies": strategies}
+
+    # ── Tax regime block (Excel `Tax Comparison`) ───────────────────────
+    tax_regime_block = compute_tax_regime_comparison(plan)
+    summary["recommended_tax_regime"] = tax_regime_block.get("recommended_regime")
+    summary["annual_tax_savings_with_recommended"] = tax_regime_block.get("annual_savings_with_recommended")
+    trace.append(_trace(
+        "Tax regime — old vs new",
+        "Excel `Tax Comparison` — slabs FY 2025-26, 87A rebate, 4% cess",
+        {
+            "old_total_tax": tax_regime_block["old_regime"]["total_tax"],
+            "new_total_tax": tax_regime_block["new_regime"]["total_tax"],
+        },
+        f"Recommend {tax_regime_block['recommended_regime']} — saves ₹{tax_regime_block['annual_savings_with_recommended']:,}/yr",
+        unit="₹",
+    ))
+    summary["dscr"] = ratios.get("dscr")
+    summary["dti"] = ratios.get("dti")
+    summary["dni"] = ratios.get("dni")
+    summary["dscr_status"] = ratios.get("dscr_status")
+    summary["dti_status"] = ratios.get("dti_status")
+    summary["dni_status"] = ratios.get("dni_status")
+
+    trace.append(_trace(
+        "Debt ratios (DSCR / DTI / DNI)",
+        "Excel `Debt Mgt` thresholds — DSCR≥1.25, DTI≤0.5, DNI≤0.3",
+        {
+            "annual_income": ratios.get("annual_income"),
+            "annual_emi": ratios.get("annual_emi"),
+            "total_debt": ratios.get("total_debt_outstanding"),
+        },
+        f"DSCR={ratios.get('dscr')} | DTI={ratios.get('dti')} | DNI={ratios.get('dni')}",
+        unit="ratio",
+    ))
+
     return CFPOutput(
         summary=summary,
         goal_blocks=goal_blocks,
@@ -984,6 +1152,8 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         yoy_cashflow=yoy,
         constants_used=constants_used,
         computation_trace=trace,
+        debt=debt_block,
+        tax_regime=tax_regime_block,
     )
 
 

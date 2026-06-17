@@ -339,6 +339,64 @@ export type MilestonePin = {
   goal_id?: string;
 };
 
+export type CFPDebtRatios = {
+  dscr: number | null;
+  dscr_status: 'healthy' | 'watch' | 'reduce debt' | 'high' | 'n/a';
+  dti: number | null;
+  dti_status: 'healthy' | 'watch' | 'reduce debt' | 'high' | 'n/a';
+  dni: number | null;
+  dni_status: 'healthy' | 'watch' | 'reduce debt' | 'high' | 'n/a';
+  total_debt_outstanding: number;
+  annual_income: number;
+  annual_emi: number;
+  income_available_for_debt_service: number;
+};
+
+export type CFPRepaymentStrategies = {
+  avalanche_order: string[];
+  snowball_order: string[];
+  blizzard_order: string[];
+  loans: { kind: string; label: string; outstanding: number; emi: number; rate_pct: number }[];
+  default_strategy: 'avalanche' | 'snowball' | 'blizzard';
+  rationale: string;
+};
+
+export type CFPTaxRegime = {
+  fy: string;
+  annual_gross_income: number;
+  old_regime: {
+    standard_deduction: number;
+    deductions: { '80C': number; '80CCD_1B': number; '80D': number; '24b': number; HRA: number; total: number };
+    taxable_income: number;
+    tax_before_cess: number;
+    cess: number;
+    total_tax: number;
+    effective_rate: number;
+  };
+  new_regime: {
+    standard_deduction: number;
+    taxable_income: number;
+    tax_before_cess: number;
+    cess: number;
+    total_tax: number;
+    effective_rate: number;
+  };
+  recommended_regime: 'old' | 'new';
+  annual_savings_with_recommended: number;
+  rationale: string;
+};
+
+export type CFPSnapshot = {
+  summary: Record<string, unknown>;
+  goal_blocks: Record<string, unknown>[];
+  retirement: Record<string, unknown>;
+  insurance: Record<string, unknown>;
+  yoy_cashflow: Record<string, unknown>[];
+  debt: { ratios: CFPDebtRatios; strategies: CFPRepaymentStrategies };
+  tax_regime: CFPTaxRegime;
+  constants_used: Record<string, unknown>;
+};
+
 export type ComputedSnapshot = {
   headline_amount_at_horizon: number;
   horizon_years: number;
@@ -353,6 +411,7 @@ export type ComputedSnapshot = {
   monte_carlo?: MCResult;
   debt_paydown?: DebtPaydownOutput;
   milestone_pins: MilestonePin[];
+  cfp?: CFPSnapshot | null;
 };
 
 export type ScenarioMutation = {

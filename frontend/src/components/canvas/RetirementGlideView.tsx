@@ -44,6 +44,8 @@ export function RetirementGlideView({ plan }: { plan: PlanState | null }) {
   // hits zero AFTER retirement. Surface for transparency.
   const exhaustionRow = rows.find((r) => r.age >= retireAge && r.assets <= 0);
 
+  const cfpRet = plan.computed.cfp?.retirement as CfpRetirementBlock | undefined;
+
   return (
     <div className="flex flex-col gap-4">
       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -65,6 +67,8 @@ export function RetirementGlideView({ plan }: { plan: PlanState | null }) {
           accent={exhaustionRow ? 'bad' : 'good'}
         />
       </div>
+
+      {cfpRet && <RetirementCorpusBlock block={cfpRet} retireAge={retireAge} />}
 
       <div className="rounded-xl border border-zinc-200 bg-white p-5">
         <h3 className="text-sm font-medium text-zinc-700 mb-3">
@@ -162,6 +166,120 @@ function Stat({
       <div className="text-[10px] uppercase tracking-wide text-zinc-400">{label}</div>
       <div className={`text-lg font-semibold tabular-nums mt-0.5 ${accentClass}`}>{value}</div>
       {note && <div className="text-[10px] text-zinc-400 mt-0.5">{note}</div>}
+    </div>
+  );
+}
+
+type CfpRetirementBlock = {
+  current_age?: number;
+  retirement_age?: number;
+  life_expectancy?: number;
+  years_to_retire?: number;
+  years_post_retirement?: number;
+  annual_expense_today?: number;
+  annual_expense_at_retirement?: number;
+  pre_retire_return?: number;
+  post_retire_return?: number;
+  inflation_during_retirement?: number;
+  real_return_during_retirement?: number;
+  corpus_required?: number;
+  existing_retirement_assets_fv?: number;
+  corpus_shortfall_after_existing?: number;
+  required_monthly_sip?: number;
+};
+
+/** Mirrors the firm's `Retirement Plan` sheet — corpus math, existing FV,
+ * shortfall, and the additional monthly SIP to close the gap. */
+function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock; retireAge: number }) {
+  const required = block.corpus_required ?? 0;
+  const existingFV = block.existing_retirement_assets_fv ?? 0;
+  const shortfall = block.corpus_shortfall_after_existing ?? Math.max(0, required - existingFV);
+  const fundedPct = required > 0 ? Math.max(0, Math.min(100, (existingFV / required) * 100)) : 0;
+
+  return (
+    <div className="rounded-xl border border-zinc-200 bg-white p-5">
+      <h3 className="text-sm font-medium text-zinc-700 mb-1">Retirement corpus (Excel-faithful)</h3>
+      <p className="text-[11px] text-zinc-400 mb-4">
+        Mirrors <code className="text-[10px]">Retirement Plan</code> in the firm CFP workbook —
+        inflation-grown expenses at retirement, annuity-due PV of post-retirement years, netted
+        against EPF/PPF/NPS future value, and the additional monthly SIP that closes the gap.
+      </p>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+        <Cell label="Time to retire" value={`${block.years_to_retire ?? '—'} yrs`} />
+        <Cell label="Years post-retirement" value={`${block.years_post_retirement ?? '—'} yrs`} />
+        <Cell
+          label="Annual expense today"
+          value={formatINR(block.annual_expense_today ?? 0, { compact: true })}
+        />
+        <Cell
+          label={`Annual expense at age ${retireAge}`}
+          value={formatINR(block.annual_expense_at_retirement ?? 0, { compact: true })}
+        />
+        <Cell
+          label="Pre-retire return"
+          value={`${((block.pre_retire_return ?? 0) * 100).toFixed(1)}%`}
+        />
+        <Cell
+          label="Post-retire return"
+          value={`${((block.post_retire_return ?? 0) * 100).toFixed(1)}%`}
+        />
+        <Cell
+          label="Inflation in retirement"
+          value={`${((block.inflation_during_retirement ?? 0) * 100).toFixed(1)}%`}
+        />
+        <Cell
+          label="Inflation-adj real return"
+          value={`${((block.real_return_during_retirement ?? 0) * 100).toFixed(2)}%`}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
+        <Big label="Corpus required" value={formatINR(required, { compact: true })} />
+        <Big label="Existing retirement FV" value={formatINR(existingFV, { compact: true })} subtle />
+        <Big label="Shortfall" value={formatINR(shortfall, { compact: true })} accent={shortfall > 0 ? 'bad' : 'good'} />
+      </div>
+
+      <div className="mt-4">
+        <div className="flex justify-between text-[11px] text-zinc-500 mb-1">
+          <span>EPF / PPF / NPS coverage of required corpus</span>
+          <span className="tabular-nums">{fundedPct.toFixed(1)}%</span>
+        </div>
+        <div className="h-2 bg-zinc-100 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-[color:var(--color-accent,#5f7d56)]"
+            style={{ width: `${fundedPct}%` }}
+          />
+        </div>
+      </div>
+
+      {(block.required_monthly_sip ?? 0) > 0 && (
+        <div className="mt-4 rounded-md bg-zinc-50 border border-zinc-200 px-3 py-2 text-xs flex justify-between items-center">
+          <span className="text-zinc-500">Additional monthly SIP needed to close shortfall</span>
+          <span className="text-zinc-900 font-medium tabular-nums">
+            {formatINR(block.required_monthly_sip ?? 0)} /mo
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Cell({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex flex-col">
+      <span className="text-[10px] uppercase tracking-wide text-zinc-500">{label}</span>
+      <span className="tabular-nums text-zinc-800">{value}</span>
+    </div>
+  );
+}
+
+function Big({ label, value, subtle, accent }: { label: string; value: string; subtle?: boolean; accent?: 'good' | 'bad' }) {
+  const cls = accent === 'bad' ? 'text-rose-700' : accent === 'good' ? 'text-emerald-700' : subtle ? 'text-zinc-700' : 'text-zinc-900';
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-zinc-50/40 px-4 py-3">
+      <div className="text-[10px] uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className={`text-base font-semibold tabular-nums mt-0.5 ${cls}`}>{value}</div>
     </div>
   );
 }
