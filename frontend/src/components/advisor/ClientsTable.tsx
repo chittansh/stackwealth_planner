@@ -17,7 +17,7 @@ import { formatINR } from '@/lib/utils';
 import { createHousehold } from '@/lib/api';
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:4000';
-const PAGE_SIZE = 25;
+const PAGE_SIZE = 5;
 
 type Row = {
   household_id: string;

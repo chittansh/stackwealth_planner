@@ -1,12 +1,22 @@
 @import "tailwindcss";
 
+/* Enable Tailwind's `dark:` variant against an explicit attribute on
+   <html data-theme="dark">. Lets the RM choose a theme; we don't auto-
+   follow system because the matcha accent + UI density was designed
+   light-first and we want a deliberate switch. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 :root {
-  /* Monochrome palette: white primary + matcha as a very subtle accent.
-     Everything else is grayscale (zinc). No blues, no lavenders. */
+  /* LIGHT — monochrome surface with sparing matcha accent. */
   --color-bg: #ffffff;
   --color-fg: #18181b;
   --color-muted: #71717a;
   --color-line: rgba(0, 0, 0, 0.08);
+  --color-surface: #ffffff;
+  --color-surface-2: #fafafa;
+  --color-surface-soft: #f4f4f5;
+  --color-border: #e4e4e7;
+  --color-border-soft: #f4f4f5;
 
   /* Matcha — used sparingly: focus rings, Plan B series, single-digit highlights. */
   --color-accent: #87a17e;
@@ -14,6 +24,26 @@
   --color-accent-soft: #f0f4ed;
 
   --font-display: ui-sans-serif, system-ui, sans-serif;
+}
+
+[data-theme="dark"] {
+  /* DARK — deep neutral with matcha accent shifted slightly cooler so
+     it doesn't glow against the dark surface. Inverted line weights. */
+  --color-bg: #0c0c0e;
+  --color-fg: #fafafa;
+  --color-muted: #a1a1aa;
+  --color-line: rgba(255, 255, 255, 0.1);
+  --color-surface: #18181b;
+  --color-surface-2: #1f1f23;
+  --color-surface-soft: #26262b;
+  --color-border: #2a2a2f;
+  --color-border-soft: #1f1f23;
+
+  --color-accent: #9ab491;
+  --color-accent-2: #6f8b67;
+  --color-accent-soft: rgba(135, 161, 126, 0.16);
+
+  color-scheme: dark;
 }
 
 html, body, #__next {
@@ -55,3 +85,70 @@ input[type="range"] {
 .scrollbar-hidden::-webkit-scrollbar {
   display: none;
 }
+
+/* ───────────────────────────────────────────────────────────────────
+   Dark-mode bridging for legacy bg-white / text-zinc-* / border-zinc-*
+   utility classes used across the canvas.
+
+   Most surfaces in this app use Tailwind utilities directly (bg-white,
+   bg-zinc-50, text-zinc-700, border-zinc-200, etc.) rather than CSS
+   variables. Rather than rewrite every component, we override those
+   utilities in dark mode here so flipping the data-theme attribute
+   instantly re-skins the whole app. Individual components can still
+   opt out by using `dark:` variants.
+   ─────────────────────────────────────────────────────────────────── */
+[data-theme="dark"] .bg-white { background-color: var(--color-surface) !important; }
+[data-theme="dark"] .bg-zinc-50 { background-color: var(--color-surface-2) !important; }
+[data-theme="dark"] .bg-zinc-100 { background-color: var(--color-surface-soft) !important; }
+
+[data-theme="dark"] .text-zinc-900 { color: var(--color-fg) !important; }
+[data-theme="dark"] .text-zinc-800 { color: #e4e4e7 !important; }
+[data-theme="dark"] .text-zinc-700 { color: #d4d4d8 !important; }
+[data-theme="dark"] .text-zinc-600 { color: #a1a1aa !important; }
+[data-theme="dark"] .text-zinc-500 { color: #8b8b91 !important; }
+[data-theme="dark"] .text-zinc-400 { color: #71717a !important; }
+[data-theme="dark"] .text-zinc-300 { color: #52525b !important; }
+
+[data-theme="dark"] .border-zinc-100 { border-color: var(--color-border-soft) !important; }
+[data-theme="dark"] .border-zinc-200 { border-color: var(--color-border) !important; }
+[data-theme="dark"] .border-zinc-300 { border-color: #3f3f46 !important; }
+
+/* Hover states on light surfaces in dark mode need the inverted hover. */
+[data-theme="dark"] .hover\:bg-zinc-50:hover { background-color: var(--color-surface-2) !important; }
+[data-theme="dark"] .hover\:bg-zinc-100:hover { background-color: var(--color-surface-soft) !important; }
+
+/* Common alpha-tinted surfaces (bg-zinc-50/60, bg-white/70 etc.) */
+[data-theme="dark"] [class*="bg-zinc-50/"] { background-color: rgba(255, 255, 255, 0.04) !important; }
+[data-theme="dark"] [class*="bg-zinc-100/"] { background-color: rgba(255, 255, 255, 0.06) !important; }
+
+/* Status surfaces — keep the tonal meaning but soften saturation. */
+[data-theme="dark"] .bg-amber-50 { background-color: rgba(245, 158, 11, 0.14) !important; }
+[data-theme="dark"] .bg-amber-50\/60 { background-color: rgba(245, 158, 11, 0.10) !important; }
+[data-theme="dark"] .text-amber-700, [data-theme="dark"] .text-amber-800 { color: #fbbf24 !important; }
+[data-theme="dark"] .border-amber-200 { border-color: rgba(245, 158, 11, 0.30) !important; }
+
+[data-theme="dark"] .bg-rose-50 { background-color: rgba(244, 63, 94, 0.14) !important; }
+[data-theme="dark"] .text-rose-700, [data-theme="dark"] .text-rose-800 { color: #fb7185 !important; }
+[data-theme="dark"] .border-rose-200 { border-color: rgba(244, 63, 94, 0.30) !important; }
+
+[data-theme="dark"] .bg-emerald-50 { background-color: rgba(16, 185, 129, 0.14) !important; }
+[data-theme="dark"] .text-emerald-700 { color: #34d399 !important; }
+
+/* Dashed-border helpers (cards with `border-dashed border-zinc-200`). */
+[data-theme="dark"] .border-dashed { border-color: var(--color-border) !important; }
+
+/* Inputs / form elements */
+[data-theme="dark"] input, [data-theme="dark"] textarea {
+  background-color: var(--color-surface) !important;
+  color: var(--color-fg) !important;
+  border-color: var(--color-border) !important;
+}
+[data-theme="dark"] input::placeholder, [data-theme="dark"] textarea::placeholder {
+  color: #71717a !important;
+}
+[data-theme="dark"] input:focus, [data-theme="dark"] textarea:focus {
+  border-color: var(--color-accent) !important;
+}
+
+/* Code / mono labels */
+[data-theme="dark"] code { color: #c4b5fd; }

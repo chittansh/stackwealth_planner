@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Users, Combine, BookOpen, Newspaper } from 'lucide-react';
 import { IconRail } from './IconRail';
+import { ThemeToggle } from './ThemeToggle';
 import { Toast } from '@/components/ui/Toast';
 
 const NAV = [
@@ -19,9 +20,10 @@ export function AdvisorShell({ children }: { children: React.ReactNode }) {
     <div className="flex h-screen w-screen overflow-hidden bg-white">
       <IconRail householdId="advisor" />
       <aside className="w-[240px] border-r border-zinc-200 bg-white flex flex-col">
-        <div className="h-14 px-4 flex items-center border-b border-zinc-200">
+        <div className="h-14 px-4 flex items-center justify-between border-b border-zinc-200">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/stackwealth-logo.png" alt="stackwealth" className="h-6 w-auto select-none" />
+          <ThemeToggle />
         </div>
         <nav className="p-2 flex flex-col gap-0.5 text-sm">
           {NAV.map(({ href, label, Icon }) => (

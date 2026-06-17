@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { Dropdown } from '@/components/ui/Dropdown';
+import { ThemeToggle } from './ThemeToggle';
 import { QuickAddMenu } from './QuickAddMenu';
 import { fetchPlan, planSet } from '@/lib/api';
 import { firePlanChanged } from '@/lib/prompt';
@@ -161,6 +162,7 @@ export function TopBar({
       <QuickAddMenu householdId={householdId} />
 
       <div className="ml-auto flex items-center gap-2">
+        <ThemeToggle />
         <button
           onClick={downloadReport}
           className="inline-flex items-center gap-1.5 text-xs px-2.5 h-8 rounded-md border border-zinc-200 hover:bg-zinc-50 text-zinc-700"
