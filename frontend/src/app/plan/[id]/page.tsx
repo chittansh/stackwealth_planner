@@ -15,6 +15,7 @@ export default async function PlanPage({
   const view = (sp.view ?? 'net-worth') as
     | 'net-worth'
     | 'cash-flow'
+    | 'investments'
     | 'allocation'
     | 'goals'
     | 'insurance'

@@ -11,6 +11,7 @@ import { AllocationView } from './AllocationView';
 import { TaxView } from './TaxView';
 import { GoalsView } from './GoalsView';
 import { InsuranceView } from './InsuranceView';
+import { InvestmentsView } from './InvestmentsView';
 import { DebtPaydownView } from './DebtPaydownView';
 import { RetirementGlideView } from './RetirementGlideView';
 import { RiskAssessmentView } from './RiskAssessmentView';
@@ -30,6 +31,7 @@ export function CanvasRouter({
   view:
     | 'net-worth'
     | 'cash-flow'
+    | 'investments'
     | 'allocation'
     | 'goals'
     | 'insurance'
@@ -110,6 +112,11 @@ export function CanvasRouter({
       {view === 'cash-flow' && (
         <div className="mt-6">
           <CashFlowTable plan={plan} />
+        </div>
+      )}
+      {view === 'investments' && plan && (
+        <div className="mt-6">
+          <InvestmentsView plan={plan} />
         </div>
       )}
       {view === 'allocation' && (
