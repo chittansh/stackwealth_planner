@@ -9,7 +9,15 @@ import { AssistantMessage } from './AssistantMessage';
 import { AskInput } from './AskInput';
 import { RiskGate } from './RiskGate';
 import { ChatSwitcher } from './ChatSwitcher';
-import { streamChat, uploadFiles, resetChat, hydrateChat, type UploadSummary } from '@/lib/api';
+import {
+  streamChat,
+  uploadFiles,
+  resetChat,
+  hydrateChat,
+  listConversations,
+  fetchChatHistory,
+  type UploadSummary,
+} from '@/lib/api';
 import { firePlanChanged } from '@/lib/prompt';
 import { Sparkles, ListTodo, Plus } from 'lucide-react';
 import { useChatStore, type StoredMsg } from '@/lib/chatStore';
@@ -153,11 +161,55 @@ export function ChatPanel({ householdId }: { householdId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [householdId, store.activeChatId]);
 
+  // On household open, pull conversations + the most-recent chat's
+  // messages from the server. This is what makes chat history survive
+  // a refresh, a different browser, or a deploy — previously the only
+  // copy lived in localStorage.
+  //
+  // Behaviour:
+  //   - Server lists 0 conversations  → leave localStorage alone (fresh
+  //     household OR DB unconfigured locally).
+  //   - Server has conversations      → merge into store, switch to the
+  //     most recent (= what the user was last on), populate its
+  //     messages from server.
+  const [serverSynced, setServerSynced] = useState(false);
+  useEffect(() => {
+    if (!store.hydrated) return;
+    let cancelled = false;
+    (async () => {
+      const convos = await listConversations(householdId);
+      if (cancelled || convos.length === 0) {
+        setServerSynced(true);
+        return;
+      }
+      const mostRecent = convos[0]; // already sorted by last_active DESC
+      const serverMessages = await fetchChatHistory(householdId, mostRecent.chat_id);
+      if (cancelled) return;
+      store.syncFromServer({
+        conversations: convos.map((c) => ({
+          chat_id: c.chat_id,
+          title: c.title,
+          last_active: c.last_active,
+        })),
+        activeId: mostRecent.chat_id,
+        activeMessages: serverMessages.map((m) => ({
+          kind: m.role as 'user' | 'assistant',
+          text: m.text,
+        })),
+      });
+      setServerSynced(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [householdId, store.hydrated]);
+
   // When the active chat changes (or first hydrates from localStorage), push
   // the prose history to the backend so the agent has context. Skip if the
   // chat is empty or contains only the in-flight thinking pill.
   useEffect(() => {
-    if (!store.hydrated) return;
+    if (!store.hydrated || !serverSynced) return;
     const turns = store.messages
       .filter((m) => (m.kind === 'user' || m.kind === 'assistant') && typeof m.text === 'string' && m.text.trim())
       .map((m) => ({ role: m.kind as 'user' | 'assistant', text: m.text! }));
@@ -165,7 +217,7 @@ export function ChatPanel({ householdId }: { householdId: string }) {
     void hydrateChat(householdId, store.activeChatId, turns).catch(() => undefined);
     // Only re-hydrate when the chat ID flips (or mounts) — not on every message.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [householdId, store.activeChatId, store.hydrated]);
+  }, [householdId, store.activeChatId, serverSynced]);
 
   const handleSend = useCallback(
     async (text: string, attachments: File[]) => {

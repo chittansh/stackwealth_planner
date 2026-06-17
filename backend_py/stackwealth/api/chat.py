@@ -16,7 +16,12 @@ from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse
 
 from ..agent.planner import clear_convo_db, hydrate_convo, run_planner_turn
-from ..db import get_plan
+from ..db import (
+    _acquire_conn,
+    get_plan,
+    load_chat_history,
+    save_chat_message,
+)
 from ..validator import collect_numbers, validate_assistant_text
 
 router = APIRouter()
@@ -79,6 +84,69 @@ async def reset(id: str, chat_id: Optional[str] = None) -> dict:
     return {"ok": True}
 
 
+@router.get("/{id}/conversations")
+async def list_conversations(id: str) -> dict:
+    """List every conversation for this household: chat_id, derived
+    title (first user message, truncated), last activity timestamp.
+    Sorted most-recent-first so the FE can default to the top entry on
+    open. Empty list when DB is unconfigured (dev / local) — the FE
+    falls back to its localStorage cache."""
+    async with _acquire_conn() as conn:
+        if conn is None:
+            return {"conversations": []}
+        rows = await conn.fetch(
+            """
+            SELECT
+                chat_id,
+                MAX(created_at) AS last_active,
+                MIN(id) FILTER (WHERE role = 'user') AS first_user_id,
+                COUNT(*) AS message_count
+            FROM chat_messages
+            WHERE household_id = $1
+            GROUP BY chat_id
+            ORDER BY last_active DESC
+            LIMIT 100
+            """,
+            id,
+        )
+        # Pull each conversation's first user text in one round-trip.
+        titles: dict[str, str] = {}
+        first_ids = [r["first_user_id"] for r in rows if r["first_user_id"] is not None]
+        if first_ids:
+            title_rows = await conn.fetch(
+                "SELECT id, text FROM chat_messages WHERE id = ANY($1::bigint[])",
+                first_ids,
+            )
+            id_to_text = {r["id"]: r["text"] for r in title_rows}
+            for r in rows:
+                t = id_to_text.get(r["first_user_id"])
+                if t:
+                    line = t.strip().split("\n", 1)[0]
+                    titles[r["chat_id"]] = line[:60] + ("…" if len(line) > 60 else "")
+        return {
+            "conversations": [
+                {
+                    "chat_id": r["chat_id"],
+                    "title": titles.get(r["chat_id"]) or "New chat",
+                    "last_active": r["last_active"].isoformat() if r["last_active"] else None,
+                    "message_count": r["message_count"],
+                }
+                for r in rows
+            ]
+        }
+
+
+@router.get("/{id}/history")
+async def get_history(id: str, chat_id: Optional[str] = None, limit: int = 500) -> dict:
+    """Return chronological message history for a (household, chat) pair.
+    Defaults to chat_id='main' to match the save path. Used by the FE
+    to populate the chat panel when the user opens a household."""
+    messages = await load_chat_history(
+        household_id=id, chat_id=chat_id or "main", limit=limit
+    )
+    return {"chat_id": chat_id or "main", "messages": messages}
+
+
 @router.post("/{id}/hydrate")
 async def hydrate(id: str, request: Request, chat_id: Optional[str] = None) -> dict:
     body = await request.json()
@@ -98,6 +166,17 @@ async def chat(request: Request) -> EventSourceResponse:
     prior_plan = await get_plan(household_id)
     if prior_plan:
         collect_numbers(prior_plan.model_dump(mode="python"), seen_numbers)
+
+    # Persist the user message ASAP so a mid-turn disconnect or LLM error
+    # doesn't drop the input from history. Assistant text is saved after
+    # the LLM returns (below, after `validated` is computed).
+    if message.strip():
+        await save_chat_message(
+            household_id=household_id,
+            chat_id=chat_id or "main",
+            role="user",
+            text=message,
+        )
 
     async def event_stream() -> AsyncIterator[dict]:
         yield {"event": "status", "data": "thinking"}
@@ -151,6 +230,16 @@ async def chat(request: Request) -> EventSourceResponse:
                     "event": "message",
                     "data": json.dumps({"role": "assistant", "text": validated}),
                 }
+                # Persist the assistant turn so history survives reload /
+                # browser switch / backend redeploy. Failure is swallowed
+                # inside save_chat_message — don't fail the user-visible
+                # request over a transient PG hiccup.
+                await save_chat_message(
+                    household_id=household_id,
+                    chat_id=chat_id or "main",
+                    role="assistant",
+                    text=validated,
+                )
             yield {"event": "done", "data": "ok"}
         except Exception as err:
             yield {"event": "error", "data": json.dumps({"message": str(err)})}

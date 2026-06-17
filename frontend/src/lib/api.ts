@@ -173,6 +173,44 @@ export async function hydrateChat(
   }).then((r) => r.json());
 }
 
+export type ServerConversation = {
+  chat_id: string;
+  title: string;
+  last_active: string | null;
+  message_count: number;
+};
+
+/** List all conversations for a household, most-recent first. Returns
+ * empty array when DB is unconfigured (dev / local). */
+export async function listConversations(id: string): Promise<ServerConversation[]> {
+  try {
+    const r = await fetch(`${BASE}/api/chat/${id}/conversations`, { cache: 'no-store' });
+    if (!r.ok) return [];
+    const body = (await r.json()) as { conversations: ServerConversation[] };
+    return body.conversations ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export type ServerChatMessage = { role: 'user' | 'assistant'; text: string; turn: number | null };
+
+/** Load chronological message history for a (household, chat_id) pair. */
+export async function fetchChatHistory(
+  id: string,
+  chatId: string | undefined,
+): Promise<ServerChatMessage[]> {
+  try {
+    const qs = chatId ? `?chat_id=${encodeURIComponent(chatId)}` : '';
+    const r = await fetch(`${BASE}/api/chat/${id}/history${qs}`, { cache: 'no-store' });
+    if (!r.ok) return [];
+    const body = (await r.json()) as { messages: ServerChatMessage[] };
+    return body.messages ?? [];
+  } catch {
+    return [];
+  }
+}
+
 export type FeedbackBody = {
   trace_id: string;
   observation_id?: string;

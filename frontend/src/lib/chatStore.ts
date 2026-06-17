@@ -143,6 +143,44 @@ export function useChatStore(householdId: string) {
     setBucket((prev) => (prev.chats[id] ? { ...prev, active_chat_id: id } : prev));
   }, []);
 
+  /** Replace the entire bucket with a server-side hydration: a list of
+   * conversations (chat_id + title) and the messages for the
+   * most-recent one. Used on household open to "remember" the last
+   * conversation across browsers / devices / deploys. */
+  const syncFromServer = useCallback(
+    (args: {
+      conversations: { chat_id: string; title: string; last_active: string | null }[];
+      activeId: string;
+      activeMessages: StoredMsg[];
+    }) => {
+      setBucket((prev) => {
+        const chats: Record<string, ChatRecord> = {};
+        for (const c of args.conversations) {
+          // Preserve any locally-cached messages we already have for this
+          // chat so unsent / in-flight UI state isn't lost on rehydrate.
+          // For the activeId, the server's authoritative message list
+          // wins so the user sees their full history.
+          const existing = prev.chats[c.chat_id];
+          chats[c.chat_id] = {
+            id: c.chat_id,
+            title: c.title || 'New chat',
+            created_at: existing?.created_at ?? Date.now(),
+            updated_at: c.last_active ? new Date(c.last_active).getTime() : Date.now(),
+            messages: c.chat_id === args.activeId ? args.activeMessages : existing?.messages ?? [],
+          };
+        }
+        // Keep any locally-only chats that haven't synced yet (e.g. a
+        // brand-new "New chat" the user just opened with no DB rows).
+        for (const [id, record] of Object.entries(prev.chats)) {
+          if (!chats[id]) chats[id] = record;
+        }
+        const nextActive = chats[args.activeId] ? args.activeId : prev.active_chat_id;
+        return { active_chat_id: nextActive, chats };
+      });
+    },
+    [],
+  );
+
   const deleteChat = useCallback((id: string) => {
     setBucket((prev) => {
       const { [id]: _, ...rest } = prev.chats;
@@ -162,6 +200,7 @@ export function useChatStore(householdId: string) {
     setMessages,
     newChat,
     switchChat,
+    syncFromServer,
     deleteChat,
   };
 }
