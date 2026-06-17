@@ -10,6 +10,15 @@ export async function fetchPlan(id: string): Promise<PlanState> {
   return r.json();
 }
 
+export type Anomaly = {
+  severity: 'high' | 'medium' | 'low';
+  category: 'surplus' | 'income' | 'expense' | 'retirement' | 'insurance' | 'emergency' | 'data';
+  field: string;
+  value: unknown;
+  message: string;
+  question: string;
+};
+
 export type UploadSummary = {
   filename: string;
   parser_used: string;
@@ -18,6 +27,7 @@ export type UploadSummary = {
   fields_extracted: number;
   missing: string[];
   error?: string;
+  anomalies?: Anomaly[];
 };
 
 export type UploadStreamEvent =
@@ -29,6 +39,7 @@ export type UploadStreamEvent =
   | { event: 'row_added'; path: string; row_id?: string; label?: string }
   | { event: 'rejected'; path: string; reason: string }
   | { event: 'fsi_synced'; derived: Record<string, number>; filename: string }
+  | { event: 'anomalies_detected'; count: number }
   | { event: 'file_done'; summary: UploadSummary }
   | { event: 'done'; summaries: UploadSummary[] };
 

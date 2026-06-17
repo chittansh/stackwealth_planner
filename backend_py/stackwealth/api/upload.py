@@ -27,6 +27,8 @@ from typing import Any, AsyncIterator
 from fastapi import APIRouter, File, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
+from ..db import get_plan
+from ..skills.anomalies import detect_plan_anomalies
 from ..skills.intake import ingest
 from ..skills.scenario import apply_add, apply_set, confirm_field, force_fsi_sync
 
@@ -224,6 +226,18 @@ async def upload_files(
             derived = await force_fsi_sync(id)
             yield emit({"event": "fsi_synced", "derived": derived, "filename": filename})
 
+            # Post-upload anomaly scan. The agent's chat prompt reads
+            # `anomalies` out of the upload context and converts each
+            # high-severity finding into a question for the RM rather
+            # than silently producing a nonsensical plan.
+            try:
+                plan_after = await get_plan(id)
+                anomalies = detect_plan_anomalies(plan_after) if plan_after else []
+            except Exception:
+                anomalies = []
+            if anomalies:
+                yield emit({"event": "anomalies_detected", "count": len(anomalies)})
+
             summary = {
                 "filename": filename,
                 "parser_used": result.get("parser_used", ""),
@@ -233,6 +247,7 @@ async def upload_files(
                 "writes_applied": field_writes,
                 "missing": result.get("missing") or [],
                 "rejected": rejected,
+                "anomalies": anomalies,
             }
             summaries.append(summary)
             yield emit({"event": "file_done", "summary": summary})

@@ -270,11 +270,28 @@ export function ChatPanel({ householdId }: { householdId: string }) {
                 : `• ${s.filename} (parser=${s.parser_used}) — ${s.fields_extracted} field(s) extracted across [${s.sections_set.join(', ') || '—'}]; missing: ${s.missing.length ? s.missing.join(', ') : 'none'}`,
             )
             .join('\n');
+
+          // Anomaly findings from the post-upload sanity scan. Block of
+          // structured questions the agent should ASK the user (rather
+          // than narrating a broken plan as if it were fine). Sorted
+          // high → medium → low.
+          const allAnomalies = summaries.flatMap((s) => s.anomalies ?? []);
+          const sevOrder: Record<string, number> = { high: 0, medium: 1, low: 2 };
+          allAnomalies.sort((a, b) => (sevOrder[a.severity] ?? 2) - (sevOrder[b.severity] ?? 2));
+          const anomalyHint = allAnomalies.length
+            ? '\n\nANOMALIES DETECTED — please ASK the user about these before narrating the plan as fine:\n' +
+              allAnomalies
+                .map((a, i) => `  ${i + 1}. [${a.severity.toUpperCase()}/${a.category}] ${a.message}\n     → ASK: ${a.question}`)
+                .join('\n')
+            : '';
+          uploadHint = uploadHint + anomalyHint;
+
           const totalFields = summaries.reduce((n, s) => n + s.fields_extracted, 0);
           const totalRows = summaries.reduce((n, s) => n + (s.list_rows_added || 0), 0);
           const failed = summaries.some((s) => s.error || s.fields_extracted === 0);
           uploadFailedHard = totalFields === 0 && totalRows === 0;
           if (!uploadFailedHard) firePlanChanged();
+          const highAnomalies = allAnomalies.filter((a) => a.severity === 'high').length;
           setMessages((m) =>
             replaceTaggedStatus(m, 'upload', {
               kind: 'status',
@@ -282,7 +299,7 @@ export function ChatPanel({ householdId }: { householdId: string }) {
               done: !uploadFailedHard,
               error: uploadFailedHard,
               text: !uploadFailedHard
-                ? `Extracted ${totalFields} field${totalFields === 1 ? '' : 's'}${totalRows ? ` + ${totalRows} row${totalRows === 1 ? '' : 's'}` : ''} from ${summaries.length} file${summaries.length === 1 ? '' : 's'}${rejected ? ` · ${rejected} skipped` : ''}`
+                ? `Extracted ${totalFields} field${totalFields === 1 ? '' : 's'}${totalRows ? ` + ${totalRows} row${totalRows === 1 ? '' : 's'}` : ''} from ${summaries.length} file${summaries.length === 1 ? '' : 's'}${rejected ? ` · ${rejected} skipped` : ''}${highAnomalies > 0 ? ` · ${highAnomalies} anomal${highAnomalies === 1 ? 'y' : 'ies'} to verify` : ''}`
                 : failed
                 ? `Could not extract from ${summaries.length || attachments.length} file${(summaries.length || attachments.length) === 1 ? '' : 's'}. Re-export as JPEG / PNG / PDF / CSV and try again.`
                 : 'Upload processed (no fields extracted)',
