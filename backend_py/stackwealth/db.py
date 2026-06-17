@@ -245,18 +245,21 @@ async def _reset_pool() -> None:
 
 
 # Retry budget for transient pg errors during a single request. Each attempt
-# tears down the pool and rebuilds from scratch — Fly's `.internal` mesh
-# sometimes hands out connections that die during init.
+# tears down the pool and rebuilds from scratch.
 #
-# Bumped from 2 → 6 after a real-prod incident: during a single upload
-# (~30s), the mesh flapped for several consecutive seconds. With only 2
-# retries, save_plan exhausted them, fell back to in-memory mode, and
-# next get_plan read STALE data from PG when it came back up — rows added
-# during the flap were silently lost. With 6 retries + exponential
-# backoff (0.1, 0.2, 0.4, 0.8, 1.6, 3.2s = ~6.3s max budget) we ride
-# through the flap.
-_MAX_PG_RETRIES = 6
+# Trade-off here is real: too few retries and a 2-second mesh flap silently
+# loses data (see git history — Findings on the V2 upload). Too many and
+# each failing request blocks a uvicorn worker for so long that Fly's HTTP
+# health check times out, the machine drops out of the load balancer, and
+# the whole app cascades into "no healthy instances" 503s.
+#
+# Tuned: 3 retries, capped backoff (0.1 + 0.2 + 0.4 = 0.7s max wait per op).
+# A multi-row write that hits PG flap will spend at most ~700ms × N rows
+# retrying, but each individual request returns within ~1s — well inside
+# the 5s health-check timeout.
+_MAX_PG_RETRIES = 3
 _PG_BACKOFF_BASE_S = 0.1
+_PG_BACKOFF_MAX_S = 0.4
 
 
 async def get_plan(household_id: str) -> Optional[PlanState]:
@@ -296,7 +299,7 @@ async def get_plan(household_id: str) -> Optional[PlanState]:
                 return PlanState.model_validate(data)
         except Exception as e:
             if attempt < _MAX_PG_RETRIES and (_is_transient_pg_error(e) or isinstance(e, ConnectionError)):
-                backoff = _PG_BACKOFF_BASE_S * (2 ** attempt)
+                backoff = min(_PG_BACKOFF_MAX_S, _PG_BACKOFF_BASE_S * (2 ** attempt))
                 print(f"[db] transient pg err in get_plan (attempt {attempt+1}/{_MAX_PG_RETRIES+1}): {type(e).__name__} — backoff {backoff:.2f}s")
                 await _reset_pool()
                 await asyncio.sleep(backoff)
@@ -325,7 +328,7 @@ async def save_plan(plan: PlanState) -> None:
                 return
         except Exception as e:
             if attempt < _MAX_PG_RETRIES and (_is_transient_pg_error(e) or isinstance(e, ConnectionError)):
-                backoff = _PG_BACKOFF_BASE_S * (2 ** attempt)
+                backoff = min(_PG_BACKOFF_MAX_S, _PG_BACKOFF_BASE_S * (2 ** attempt))
                 print(f"[db] transient pg err in save_plan (attempt {attempt+1}/{_MAX_PG_RETRIES+1}): {type(e).__name__} — backoff {backoff:.2f}s")
                 await _reset_pool()
                 await asyncio.sleep(backoff)
