@@ -66,12 +66,6 @@ export function GoalsView({ plan }: { plan: PlanState | null }) {
           </ul>
           <div className="mt-3 ml-1 text-[11px] uppercase tracking-wide text-zinc-400">horizon · {today + horizon}</div>
         </div>
-        {plan.computed.risk_profile?.alignment_status === 'goal_risk_mismatch' && (
-          <div className="mt-4 rounded-lg bg-zinc-50 border border-zinc-200 p-3 text-xs text-zinc-600">
-            One or more goals require more risk than is prudent. Try: increase contribution · extend horizon · reduce
-            target · split into essential and aspirational layers.
-          </div>
-        )}
       </div>
 
       {goalBlocks.length > 0 && <GoalBlocksDetail goals={goals} blocks={goalBlocks} />}
@@ -236,8 +230,7 @@ function goalStatus(g: Goal, recommendedScore: number): { label: string; tone: '
   const r = estReqReturn(g);
   const need = r <= 0.06 ? 25 : r <= 0.08 ? 40 : r <= 0.10 ? 55 : r <= 0.12 ? 70 : r <= 0.14 ? 85 : 95;
   if (need <= recommendedScore - 10) return { label: 'on track', tone: 'matcha' };
-  if (need <= recommendedScore + 5) return { label: 'at risk', tone: 'muted' };
-  return { label: 'unrealistic', tone: 'dark' };
+  return { label: 'at risk', tone: 'muted' };
 }
 
 const REQ_RETURN_CEILING = 0.30;

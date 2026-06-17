@@ -40,18 +40,14 @@ export function RetirementGlideView({ plan }: { plan: PlanState | null }) {
   const terminalRow = rows[rows.length - 1];
   const drawdownYears = terminalRow.age - retireAge;
 
-  // Sanity check: did the corpus survive? It dies the year `assets` first
-  // hits zero AFTER retirement. Surface for transparency.
-  const exhaustionRow = rows.find((r) => r.age >= retireAge && r.assets <= 0);
-
   const cfpRet = plan.computed.cfp?.retirement as CfpRetirementBlock | undefined;
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <Stat label="Current age" value={`${startAge}`} note={`retire at ${retireAge}`} />
         <Stat
-          label={`Corpus at age ${retireAge}`}
+          label={`Net worth at ${retireAge}`}
           value={formatINR(retireRow?.total_net_worth ?? 0, { compact: true })}
           note={`year ${retireYear}`}
         />
@@ -59,12 +55,6 @@ export function RetirementGlideView({ plan }: { plan: PlanState | null }) {
           label={`Terminal (age ${terminalRow.age})`}
           value={formatINR(terminalRow.total_net_worth, { compact: true })}
           note={`${drawdownYears}y in retirement`}
-        />
-        <Stat
-          label="Corpus exhausted?"
-          value={exhaustionRow ? `Age ${exhaustionRow.age}` : 'No'}
-          note={exhaustionRow ? `year ${exhaustionRow.year}` : `survives all ${drawdownYears}y`}
-          accent={exhaustionRow ? 'bad' : 'good'}
         />
       </div>
 
