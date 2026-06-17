@@ -161,61 +161,62 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
         surplus = annual_income - annual_expenses - annual_emi - annual_tax
 
         # ── Asset evolution this year ─────────────────────────────────
-        # Two principles:
-        #   (1) SIPs the household is actually committing to ALWAYS grow
-        #       the portfolio (per RM feedback "SIPs should count as net
-        #       worth as the value increases"). The old `min(annual_sip,
-        #       surplus)` cap silently invested LESS than reality when
-        #       surplus was tight — Naga's ₹2.65L/mo SIP was being
-        #       truncated to ~₹1.66L/mo, under-counting NW growth by
-        #       ~₹12L/yr.
-        #   (2) If cashflow (income − expenses − EMI − tax) doesn't cover
-        #       SIPs + retirement expenses, the shortfall is drawn from
-        #       liquid first, then portfolio. That's how real households
-        #       fund overcommitted SIPs (from savings/bonus) or how a
-        #       retired household funds living expenses (drawdown).
+        # Principles (per RM feedback "savings shouldn't be ignored —
+        # while earning, SIPs accumulate as net worth; only retirement
+        # consumes the pool"):
+        #
+        # (A) WHILE EARNING: SIPs always grow the portfolio at the full
+        #     committed amount. Net positive surplus (income − expenses
+        #     − EMI − tax − SIP) accumulates in liquid as cash savings.
+        #     If the monthly surplus is mathematically smaller than the
+        #     committed SIP, we DON'T drain other pools to balance — the
+        #     model implicitly assumes unmodeled income (bonuses, gifts,
+        #     spouse top-ups, savings draw) covers the gap. That matches
+        #     the RM's mental model and avoids "SIPs silently get
+        #     consumed by my balance sheet" behaviour.
+        #
+        # (B) RETIRED: SIPs stop. Negative cashflow (income=0, expenses>0)
+        #     drains liquid → portfolio. That's the appropriate place to
+        #     consume the pool.
         if sip_explicit and earning:
-            # SIP scales at inflation + an optional step-up rate. Step-up
-            # captures the "I'll bump my SIP by 10%/yr as my income
-            # grows" commitment beyond inflation-matching.
+            # SIP scales at inflation + an optional step-up rate.
             step_up = plan.assumptions.sip_annual_step_up_pct or 0.0
             annual_sip = monthly_sip_total * 12 * ((1 + inflation + step_up) ** i)
             invested_this_year = annual_sip
+            # Only the POSITIVE leftover of surplus over SIP builds cash;
+            # never drain liquid to cover a SIP shortfall while still
+            # working — that erased the user's accumulated savings.
+            cash_added_this_year = max(0.0, surplus - annual_sip)
         elif earning:
             # No explicit SIPs declared → fall back to "invest all surplus"
             # so households that haven't broken down their investments
             # don't see their portfolio flatline.
             invested_this_year = max(0.0, surplus)
+            cash_added_this_year = 0.0
         else:
             # Retired — no new contributions.
             invested_this_year = 0.0
+            cash_added_this_year = 0.0
 
         # Compound BEFORE applying drawdown so the year's investment
         # return is on the opening balance, not on a freshly-spent figure.
         portfolio = portfolio * (1 + expected_return) + invested_this_year
-        liquid = liquid * (1 + cash_return)
+        liquid = liquid * (1 + cash_return) + cash_added_this_year
 
-        # Net cashflow into liquid this year (could be ±). When negative,
-        # it represents the shortfall that has to be drawn from existing
-        # pools. surplus − invested_this_year is the canonical formula:
-        #   • working with SIPs < surplus  → leftover stays in liquid
-        #   • working with SIPs > surplus  → shortfall drains liquid
-        #   • retired (surplus < 0)        → expense draws drain liquid
-        cash_change_this_year = surplus - invested_this_year
-        if cash_change_this_year >= 0:
-            liquid += cash_change_this_year
-        else:
-            shortfall = -cash_change_this_year
+        # Post-retirement drawdown: living expenses come out of liquid
+        # first, then portfolio. Only fires when NOT earning (we don't
+        # want pre-retirement years to silently consume the pool just
+        # because a particular month's surplus didn't cover the SIP).
+        if not earning and surplus < 0:
+            shortfall = -surplus
             from_liquid = min(liquid, shortfall)
             liquid -= from_liquid
             shortfall -= from_liquid
             if shortfall > 0:
                 from_portfolio = min(portfolio, shortfall)
                 portfolio -= from_portfolio
-                # If still short, household is mathematically over-
-                # extended this year — pools sit at 0 and the row honestly
-                # shows the shortfall (rather than the old code's silent
-                # "everything is fine" until a goal hits).
+                # If still short, household is mathematically broke —
+                # the row honestly shows zero rather than pretending.
 
         # Appreciate the non-financial asset pools this year.
         real_estate_pool *= (1 + re_appreciation)
