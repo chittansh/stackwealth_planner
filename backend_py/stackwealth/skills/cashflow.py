@@ -36,6 +36,18 @@ _DRAWDOWN_GOAL_KINDS = {
     "other",
 }
 
+# Goals that ACQUIRE A REAL ASSET in exchange for the cash outflow.
+# When these fire, cash leaves the portfolio but a physical asset of
+# equal value lands on the household balance sheet (and continues to
+# appreciate at real-estate rates). Without this, the projection
+# treated a ₹2.41Cr house purchase as a pure consumption hit and
+# cliffed net worth by ₹2.41Cr — but in reality the household still
+# owns the house. Education / marriage / travel / "other" remain
+# consumption (no offsetting asset).
+_ASSET_ACQUIRING_GOAL_KINDS = {
+    "house_purchase",
+}
+
 
 def _goal_target_in_year(g: Goal, current_year: int, default_inflation: float) -> float:
     """Inflation-adjusted goal amount, scaled from today to the target year.
@@ -94,6 +106,14 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
     # invested" model so existing households don't see regressions.
     portfolio = fsi.portfolio_current_value or 0
     liquid = fsi.liquid_assets_current_value or 0
+    # Real-estate pool — starts from today's holdings, appreciates yearly,
+    # and grows by the FV amount of every house_purchase goal that fires.
+    real_estate_pool = sum((r.current_value or 0) for r in (plan.real_estate or []))
+    # Gold pool — same idea (small fraction usually but worth tracking
+    # so we don't drop it from the visible NW curve).
+    gold_pool = sum((g.current_value or 0) for g in (plan.gold or []))
+    re_appreciation = plan.assumptions.growth.real_estate if plan.assumptions.growth.real_estate > 0 else 0.07
+    gold_appreciation = 0.07  # historical post-tax INR gold rate
     mi = plan.monthly_investments
     monthly_sip_total = 0.0
     # Every field in monthly_investments except insurance_premium is
@@ -197,10 +217,19 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
                 # shows the shortfall (rather than the old code's silent
                 # "everything is fine" until a goal hits).
 
-        # Goal drawdowns: tap liquid first (rational household behavior — use
-        # cash before redeeming investments), then portfolio for any shortfall.
+        # Appreciate the non-financial asset pools this year.
+        real_estate_pool *= (1 + re_appreciation)
+        gold_pool *= (1 + gold_appreciation)
+
+        # Goal drawdowns: tap liquid first (rational household behavior —
+        # use cash before redeeming investments), then portfolio for any
+        # shortfall. For ASSET-acquiring goals (house_purchase), the same
+        # amount is ADDED to the real-estate pool — the cash converted
+        # into a physical asset, not gone forever. For consumption goals
+        # (education / marriage / travel) the cash is genuinely spent.
         breakdown: list[CashFlowGoalOutflow] = []
         goal_outflow_total = 0.0
+        asset_acquired_this_year = 0.0
         for g in goals_by_year.get(year, []):
             amt = _goal_target_in_year(g, start_year, inflation)
             if amt <= 0:
@@ -209,6 +238,11 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
                 CashFlowGoalOutflow(goal_id=g.id, goal_name=g.goal_name, amount=round(amt))
             )
             goal_outflow_total += amt
+            if g.kind in _ASSET_ACQUIRING_GOAL_KINDS:
+                asset_acquired_this_year += amt
+
+        # Drain liquid → portfolio for the full goal cost (real cash
+        # leaves both buckets regardless of whether an asset is acquired).
         remaining = goal_outflow_total
         from_liquid = min(liquid, remaining)
         liquid -= from_liquid
@@ -216,7 +250,14 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
         from_portfolio = min(portfolio, remaining)
         portfolio -= from_portfolio
 
+        # Asset-acquiring goals: the cash is now a house, not lost.
+        # Add to the real-estate pool so the next-year appreciation
+        # compounds on it and total NW reflects the new asset.
+        real_estate_pool += asset_acquired_this_year
+
+        # Total NW = liquid + portfolio + real_estate + gold.
         assets = portfolio + liquid
+        total_net_worth = assets + real_estate_pool + gold_pool
 
         rows.append(
             CashFlowRow(
@@ -228,7 +269,7 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
                 taxes=round(annual_tax),
                 retirement_contributions=round(retirement_contrib),
                 other=0,
-                total_net_worth=round(assets),
+                total_net_worth=round(total_net_worth),
                 goal_outflow=round(goal_outflow_total),
                 goal_outflow_breakdown=breakdown,
             )
