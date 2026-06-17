@@ -34,6 +34,21 @@ from . import cfp as cfp_skill
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
+def _age_from_dob(dob: str | None) -> int | None:
+    """Robust DOB → current age. Accepts DD-MM-YYYY, YYYY-MM-DD, and
+    slash-separated variants. Returns None if no recognisable 4-digit
+    year is present. Was crashing PDF generation when the LLM emitted
+    ISO format ('1990-08-12') because the previous [-4:] trick read
+    '8-12' as the year and int() blew up."""
+    if not dob:
+        return None
+    parts = str(dob).replace("/", "-").split("-")
+    for p in parts:
+        if p.isdigit() and len(p) == 4 and 1900 < int(p) < 2100:
+            return datetime.now().year - int(p)
+    return None
+
+
 def _fmt_inr(n: float | int | None) -> str:
     """Indian-style grouping, no decimals. ₹1,25,000 not ₹125,000."""
     if n is None or not isinstance(n, (int, float)):
@@ -1304,19 +1319,15 @@ def _sandeep_s1_profile(plan: PlanState) -> str:
     p2 = persons[1] if len(persons) > 1 else None
     fsname_p1 = p1.name if p1 else (pd.full_name or "—")
     fsname_p2 = p2.name if p2 else "—"
-    p1_age = int((datetime.now().year) - int((p1.date_of_birth or "01-01-1990")[-4:])) if p1 and p1.date_of_birth else (fsi.age or "—")
-    p2_age = int((datetime.now().year) - int((p2.date_of_birth or "01-01-1990")[-4:])) if p2 and p2.date_of_birth else "—"
+    p1_age = (_age_from_dob(p1.date_of_birth) if p1 else None) or (fsi.age or "—")
+    p2_age = (_age_from_dob(p2.date_of_birth) if p2 else None) or "—"
     retire_year = (datetime.now().year + max(0, (pd.retirement_age_target or 60) - (fsi.age or 30)))
     years_to_retire = max(0, (pd.retirement_age_target or 60) - (fsi.age or 30))
 
     children_descr = []
     for person in persons[2:]:
-        a = "—"
-        if person.date_of_birth:
-            try:
-                a = str(int((datetime.now().year) - int(person.date_of_birth[-4:])))
-            except Exception:
-                pass
+        age = _age_from_dob(person.date_of_birth)
+        a = str(age) if age is not None else "—"
         children_descr.append(f"{person.name} (Age {a})")
     children_cell = " & ".join(children_descr) if children_descr else (
         f"{pd.number_of_children} children" if pd.number_of_children else "None"
