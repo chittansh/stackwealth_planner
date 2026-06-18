@@ -91,6 +91,7 @@ ANALYTICAL APPROACH — before emitting any value, REASON about it:
     * Use the TOTAL footer as a SANITY CHECK only: sum your emitted components → if it doesn't equal the footer (within ₹2k tolerance), re-derive.
 - **`household_expenses` is the RESIDUAL catchall — but NEVER for subtotals**:
     * Use `household_expenses` for line items that don't fit a more specific field. Examples: "Transport & Commute", "Other Expenses (property tax, donations, hobby)", "Maid / driver", "Pet care", "Subscriptions", "Miscellaneous", "Entertainment" if not lifestyle-y.
+    * **SUM the residuals — don't pick ONE.** If the source has BOTH "Transport 10000" AND "Other Expenses 12000" AND "Maid 5000", `household_expenses = 10000+12000+5000 = 27000`. NOT 12000. NOT 10000. The single most common extraction bug here is picking the LAST residual row seen and ignoring the others — this silently drops thousands of rupees of monthly spend from the projection.
     * If a source uses "Household Expenses" as a CATEGORY HEADER with sub-line-items underneath, map the sub-line-items, not the header.
     * NEVER put a Subtotal / Total / "Essential Total" row into `household_expenses` — that doubles up with itemized components.
     * Sanity: after extraction, `sum(monthly_expenses.*)` MUST equal the TOTAL EXPENDITURE footer (within ₹2k). If it's short, you dropped some line items — add them to `household_expenses` as the residual. If it's over, you double-counted a subtotal — remove that.
