@@ -67,6 +67,21 @@ def _database_url() -> Optional[str]:
     return url
 
 
+async def _validate_connection(conn: Any) -> None:
+    """Run a lightweight SELECT 1 on every connection asyncpg hands out
+    of the pool. If the connection is dead (Fly's `.internal` mesh
+    silently RSTs idle TCP), asyncpg catches the error, discards it,
+    and tries another connection. This is what stops the
+    "ConnectionDoesNotExistError: closed in the middle of operation"
+    flood — the pool was happily returning dead sockets to callers
+    who then blew up mid-query.
+
+    Cost: one extra round-trip per acquire (~1-3ms on a healthy
+    connection). Cheap insurance against the mesh's idle-RST
+    behaviour."""
+    await conn.execute("SELECT 1")
+
+
 async def _get_pool() -> Any | None:
     """Lazy pool. Per-request `asyncpg.connect()` was too slow (each fresh
     connect on Fly's `.internal` mesh adds 100-500ms, and a single chat turn
@@ -90,21 +105,23 @@ async def _get_pool() -> Any | None:
         try:
             _pool = await asyncpg.create_pool(
                 dsn=url,
-                # min_size=2 keeps a couple of warm connections ready —
-                # avoids the cold-start handshake tax on the first call
-                # to /health-protected endpoints. max_size=30 (was 10)
-                # absorbs the burst when /api/advisor/highlights does
-                # asyncio.gather(get_plan(hid) for hid in ids) — the old
-                # 10-slot pool was overflowing into pool.acquire timeouts
-                # which surfaced as a flood of 500s on the FE.
                 min_size=2,
                 max_size=30,
                 command_timeout=10,
                 timeout=15.0,
-                # Aggressive recycling — drop any idle connection after 30s so
-                # we don't acquire a silently-dead socket. Fly's `.internal`
-                # mesh RST's idle TCP connections without warning.
-                max_inactive_connection_lifetime=30.0,
+                # 10s recycle (was 30s). Fly's `.internal` mesh kills idle
+                # TCP within seconds, so a longer lifetime guarantees the
+                # pool hands out dead connections. Shorter = more churn but
+                # connections actually work when handed out.
+                max_inactive_connection_lifetime=10.0,
+                # Per-acquire health check. Asyncpg runs this on every
+                # pool.acquire() before returning a connection. If the
+                # connection is dead, asyncpg discards it and tries another
+                # — this is what catches the "closed in the middle of
+                # operation" connections that the mesh silently RSTs.
+                # Cost: one SELECT 1 per acquire (~few ms on a healthy
+                # connection). Worth it on a flapping network.
+                setup=_validate_connection,
                 ssl=False,
             )
         except Exception as e:
