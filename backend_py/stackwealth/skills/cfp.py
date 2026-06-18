@@ -847,6 +847,69 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
             )
 
     total_required_sip = sum(b["required_sip_monthly"] for b in goal_blocks)
+
+    # ── Credit existing SIPs toward goal funding ──────────────────────
+    # The user is already deploying monthly SIPs (mutual_funds, NPS, PPF,
+    # RD, direct equity, and the "other" bucket EPF/recurring buys land
+    # in). These contributions ARE wealth-building — they grow the same
+    # portfolio that funds the goals. Previously each goal_block was
+    # built with existing_goal_sip=0, so the engine demanded the FULL
+    # required SIP per goal again, on top of what was already running.
+    # That double-counted savings effort and inflated incremental_sip
+    # by the household's entire SIP commitment.
+    #
+    # Allocate the existing SIPs across goals proportionally to each
+    # goal's `required_sip_monthly`. The goal that needs the largest
+    # SIP gets the largest share of existing contributions. Each goal's
+    # `incremental_sip_monthly` becomes the NEW commitment needed on top
+    # of what's already running.
+    mi_for_credit = plan.monthly_investments
+    existing_sip_for_goals = 0.0
+    if mi_for_credit:
+        existing_sip_for_goals = float(
+            (mi_for_credit.mutual_fund_sip or 0)
+            + (mi_for_credit.nps or 0)
+            + (mi_for_credit.ppf or 0)
+            + (mi_for_credit.rd or 0)
+            + (mi_for_credit.direct_equity or 0)
+            + (mi_for_credit.other or 0)
+        )
+    if existing_sip_for_goals > 0 and total_required_sip > 0:
+        # Allocate up to each goal's required amount (a goal can't be
+        # "over-funded" by existing SIPs — surplus credit stays in the
+        # remaining pool to fund the next goal).
+        remaining_credit = existing_sip_for_goals
+        # Pass 1: proportional allocation by required-SIP share, capped
+        # at each goal's actual need.
+        for b in goal_blocks:
+            req = b["required_sip_monthly"] or 0
+            if req <= 0:
+                continue
+            share = req / total_required_sip
+            credit = min(req, share * existing_sip_for_goals)
+            b["existing_sip_monthly"] = round(credit)
+            b["incremental_sip_monthly"] = max(0, round(req - credit))
+            remaining_credit -= credit
+        # Pass 2: if some goals were fully covered by their share (so
+        # there's spillover credit), redistribute the leftover to goals
+        # that still have a gap.
+        if remaining_credit > 1:
+            still_short = [b for b in goal_blocks if b.get("incremental_sip_monthly", 0) > 0]
+            total_short = sum(b["incremental_sip_monthly"] for b in still_short)
+            if total_short > 0:
+                for b in still_short:
+                    extra_share = b["incremental_sip_monthly"] / total_short
+                    extra = min(b["incremental_sip_monthly"], extra_share * remaining_credit)
+                    b["existing_sip_monthly"] = round((b.get("existing_sip_monthly") or 0) + extra)
+                    b["incremental_sip_monthly"] = max(0, round(b["incremental_sip_monthly"] - extra))
+        trace.append(_trace(
+            "Existing SIPs credited toward goals",
+            "monthly_investments.* (ex. insurance) split proportionally across goals by required-SIP share",
+            {"existing_sip": round(existing_sip_for_goals), "total_required": round(total_required_sip)},
+            round(existing_sip_for_goals),
+            unit="INR/mo",
+        ))
+
     total_incremental_sip = sum(b["incremental_sip_monthly"] for b in goal_blocks)
     trace.append(_trace(
         "Total required SIP across all goals",
@@ -856,44 +919,52 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     ))
 
     # ── Surplus & affordability (Finding: "is the required SIP realistic?") ──
-    # The Excel model implicitly assumes the household can spare whatever
-    # the PMT formula demands. In reality SIPs are bounded by:
-    #     surplus_post_existing_sip = monthly_income − living_expenses
-    #                                 − loan_EMI − existing_monthly_SIPs
-    # When `total_required_sip > surplus_post_existing_sip`, the goals
-    # need either: (a) longer horizon, (b) lower target, (c) higher
-    # income, or (d) accepting partial funding. We compute a "feasible
-    # SIP" that proportionally rations the available surplus across goals
-    # by their required SIP share, so the user can see which goals would
-    # actually get fully funded vs partially under the constraint.
+    # The Excel model assumes the household can spare whatever PMT
+    # demands. In reality SIPs are bounded by monthly cashflow. We now
+    # report two views:
+    #   1. Goal coverage — existing SIPs (already credited per-goal above)
+    #      cover X% of the required PMT. The INCREMENTAL ask is what
+    #      remains to fully fund every goal.
+    #   2. Cashflow sustainability — surplus_pre_sip is the total room
+    #      for all SIPs combined. If existing SIPs already exceed it,
+    #      the household is funding the gap from savings/bonus.
     mi = plan.monthly_investments
     existing_sip_monthly = 0.0
     if mi:
         existing_sip_monthly = float(
             (mi.mutual_fund_sip or 0) + (mi.nps or 0) + (mi.ppf or 0)
-            + (mi.rd or 0) + (mi.direct_equity or 0)
+            + (mi.rd or 0) + (mi.direct_equity or 0) + (mi.other or 0)
         )
     surplus_pre_sip = monthly_income - monthly_expenses - monthly_emi
     surplus_post_existing_sip = surplus_pre_sip - existing_sip_monthly
     affordable_for_new_sip = max(0.0, surplus_post_existing_sip)
 
-    # Ration available surplus proportionally across goals' incremental need.
-    total_incremental = total_incremental_sip or 0
-    if total_incremental > 0 and affordable_for_new_sip < total_incremental:
-        ration_factor = affordable_for_new_sip / total_incremental
+    # Ration the available NEW-SIP headroom proportionally across each
+    # goal's INCREMENTAL need (after the existing-SIP credit above).
+    # Each goal's "feasible_sip_monthly" = existing_credit + rationed
+    # incremental — i.e. what TOTAL SIP it would receive in a realistic
+    # plan, not just the new ask.
+    if total_incremental_sip > 0 and affordable_for_new_sip < total_incremental_sip:
+        ration_factor = affordable_for_new_sip / total_incremental_sip
     else:
-        ration_factor = 1.0  # surplus covers required → no rationing
+        ration_factor = 1.0  # surplus covers the incremental ask → no rationing
 
     for b in goal_blocks:
+        req = b["required_sip_monthly"] or 0
+        existing_credit = b.get("existing_sip_monthly", 0) or 0
         inc = b.get("incremental_sip_monthly", 0) or 0
-        affordable = round(inc * ration_factor)
-        b["affordable_sip_monthly"] = affordable
-        b["sip_shortfall_monthly"] = max(0, inc - affordable)
-        # What fraction of the goal does the affordable SIP fund?
-        # Rough: ratio of affordable_sip to required_sip → funded share of
-        # the FV gap (since SIPs are linear in PMT formula at fixed rate
-        # and horizon, halving SIP roughly halves the corpus you accumulate).
-        b["funded_share_at_affordable_sip"] = round(ration_factor, 4) if inc > 0 else 1.0
+        # Feasible TOTAL SIP for this goal = existing share already
+        # flowing to it + the rationed slice of the incremental ask.
+        rationed_incremental = round(inc * ration_factor)
+        feasible_total = existing_credit + rationed_incremental
+        b["affordable_sip_monthly"] = feasible_total
+        b["sip_shortfall_monthly"] = max(0, req - feasible_total)
+        # Funded share against the FULL required SIP (not just the gap).
+        # An RM looking at this wants to see "this goal will reach X%
+        # of its target with my current + feasible-new SIPs."
+        b["funded_share_at_affordable_sip"] = (
+            min(1.0, feasible_total / req) if req > 0 else 1.0
+        )
 
     affordable_sip_total = round(sum(b["affordable_sip_monthly"] for b in goal_blocks))
     surplus_shortfall = max(0.0, total_incremental_sip - affordable_for_new_sip)
