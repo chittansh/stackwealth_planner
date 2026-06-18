@@ -326,7 +326,11 @@ async def _llm_extract(
             resp = await asyncio.to_thread(
                 claude.messages.create,
                 model=config.INTAKE_MODEL or "claude-haiku-4-5-20251001",
-                max_tokens=4096,
+                # Firm xlsx templates produce ~8–14k tokens of JSON; 4096
+                # truncated mid-document and the parser silently fell through
+                # to the no-llm fallback. 16k leaves headroom for the
+                # densest workbooks.
+                max_tokens=16384,
                 temperature=0,
                 system=[
                     {
@@ -342,6 +346,11 @@ async def _llm_extract(
                 messages=[{"role": "user", "content": user_blocks}],
             )
             raw = "".join(b.text for b in resp.content if hasattr(b, "text"))
+            if getattr(resp, "stop_reason", None) == "max_tokens":
+                print(
+                    f"[intake] claude hit max_tokens (output={resp.usage.output_tokens}); "
+                    "JSON likely truncated — consider raising max_tokens"
+                )
             out = _try_parse_json(raw)
         except Exception as e:
             print(f"[intake] claude failed: {e}")
