@@ -34,21 +34,26 @@ from .tax import compute_tax_regime_comparison
 
 # ── Excel-encoded constants (Assumptions & Computation sheet) ─────────────
 
-# Inflation table — see the "Assumptions & Computation" sheet, rows 5-12.
+# Inflation table — sourced from the firm's "Assumptions & Computation"
+# sheet rows 2-8. Values match the workbook cell-for-cell so YoY goal
+# withdrawals reconcile with the firm's hand-prepared plans. Earlier
+# defaults were higher (e.g. education 10%, lifestyle 25%) which silently
+# over-stated future goal costs by 20-40% by year-15 — confirmed against
+# the firm Excel's "Format for inputs for CFP_ng_180626.xlsx" reference.
 INFLATION_TABLE: dict[str, float] = {
-    "general": 0.07,
-    "education": 0.10,
-    "child_education": 0.10,
-    "wedding": 0.09,
-    "child_marriage": 0.09,
-    "medical": 0.12,
-    "lifestyle": 0.25,
-    "real_estate": 0.09,
-    "house_purchase": 0.09,
-    "vacation": 0.09,
-    "foreign_travel": 0.09,
-    "other": 0.07,
-    "retirement": 0.07,  # general for the corpus, post-retirement expense
+    "general": 0.07,                # firm: General Inflation (Household)
+    "education": 0.08,              # firm: Educational Inflation
+    "child_education": 0.08,
+    "wedding": 0.08,                # firm: Wedding Inflation
+    "child_marriage": 0.08,
+    "medical": 0.09,                # firm: Medical Inflation
+    "lifestyle": 0.20,              # firm: Personalised (Lifestyle) inflation
+    "real_estate": 0.08,            # firm: Real Estate Inflation
+    "house_purchase": 0.08,
+    "vacation": 0.08,               # firm: Vacation Inflation
+    "foreign_travel": 0.08,
+    "other": 0.07,                  # falls back to general
+    "retirement": 0.07,             # general for corpus + post-retirement spend
 }
 
 # Post-tax annual return by asset class — see rows 20-39 of the
@@ -743,14 +748,33 @@ def _holdings_weighted_post_tax_roi(plan: PlanState) -> tuple[float, dict[str, f
 
     Returns (rate, breakdown) — breakdown shows how each class contributed."""
     buckets: list[tuple[str, float, float]] = []  # (label, value, post_tax_rate)
+    # Equity defaults match the firm's standard CFP convention: when an
+    # equity holding (stock or MF) doesn't carry an explicit cap
+    # classification, assume large-cap / conservative. The previous
+    # "everything → hybrid (10.5%)" was too aggressive — for a typical
+    # advisor's client whose portfolio is mostly large-cap stocks and
+    # multi-cap funds, the firm-applied blended FA ROI sits closer to
+    # 6.4% than 7.9%. Tag-driven overrides (e.g. fund_name containing
+    # "small cap" / "midcap") win when present.
     for mf in plan.mutual_funds or []:
         v = float(mf.current_value or 0)
-        if v > 0:
-            buckets.append(("mutual_funds", v, POST_TAX_RETURN["equity_hybrid"]))
+        if v <= 0:
+            continue
+        name = (mf.fund_name or "").lower()
+        if "small" in name or "smallcap" in name:
+            r = POST_TAX_RETURN["equity_aggressive"]   # 12.25%
+        elif "mid" in name or "midcap" in name or "flexi" in name or "multi" in name:
+            r = POST_TAX_RETURN["equity_hybrid"]       # 10.5%
+        else:
+            r = POST_TAX_RETURN["equity_conservative"] # 8.75% — large-cap default
+        buckets.append(("mutual_funds", v, r))
     for eq in plan.equity_stocks or []:
         v = float(eq.current_value or 0)
         if v > 0:
-            buckets.append(("equity_stocks", v, POST_TAX_RETURN["equity_hybrid"]))
+            # Direct equity holdings — default to conservative (large-cap)
+            # since the firm's reference Excel applies the conservative
+            # post-tax rate (8.75%) to undifferentiated stock portfolios.
+            buckets.append(("equity_stocks", v, POST_TAX_RETURN["equity_conservative"]))
     for fi in plan.fixed_income or []:
         v = float(fi.current_value or 0)
         if v <= 0:
