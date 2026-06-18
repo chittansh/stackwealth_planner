@@ -640,24 +640,40 @@ def compute_yoy_cashflow(
         fa_close = fa_open + surplus - withdrawal + fa_returns
         nfa_close = nfa_open * (1 + non_financial_appreciation)
 
+        nfa_appreciation_this_yr = nfa_open * non_financial_appreciation
         rows.append({
             "year": year,
             "age": age,
+            # Income side
             "income_employment": round(annual_emp),
             "income_business": round(annual_biz),
             "income_rental": round(income_rent),
             "income_other": round(income_oth),
             "total_income": round(total_income),
+            # Outflow side
             "expenses": round(expense),
             "loan_repayment": round(annual_loan),
             "total_outflow": round(total_outflow),
             "surplus": round(surplus),
-            "goal_withdrawal": round(withdrawal),
-            "financial_asset_returns": round(fa_returns),
+            # Financial-asset waterfall (Excel cols O–V)
+            "fa_opening": round(fa_open),
+            "net_annual_cash_savings": round(surplus),
+            "major_withdrawals": round(-withdrawal) if withdrawal else 0,
+            "investment_returns": round(fa_returns),
+            "lumpsum_deposit_withdrawal": 0,    # Reserved for future "Knee surgery / Bonus / Reverse mortgage" annotations
+            "remarks": "",
             "financial_assets_closing": round(fa_close),
+            # Non-financial-asset waterfall (Excel cols X–AA)
+            "nfa_opening": round(nfa_open),
+            "nfa_addition": 0,                  # Future-purchases (e.g. a 2nd house bought from FA) — wired when goal_kind=house_purchase fires
+            "nfa_appreciation": round(nfa_appreciation_this_yr),
             "non_financial_assets_closing": round(nfa_close),
+            # Total
             "net_worth": round(fa_close + nfa_close),
             "net_worth_crore": round((fa_close + nfa_close) / 1e7, 2),
+            # Back-compat alias
+            "goal_withdrawal": round(withdrawal),
+            "financial_asset_returns": round(fa_returns),
         })
 
         # Roll-forward per-source.
