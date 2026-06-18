@@ -270,6 +270,13 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
                 taxes=round(annual_tax),
                 retirement_contributions=round(retirement_contrib),
                 other=0,
+                # Asset-class breakdown for the year-end snapshot.
+                # Canvas reads these to render the per-year composition
+                # of net worth across the projection.
+                liquid=round(liquid),
+                portfolio=round(portfolio),
+                real_estate=round(real_estate_pool),
+                gold=round(gold_pool),
                 total_net_worth=round(total_net_worth),
                 goal_outflow=round(goal_outflow_total),
                 goal_outflow_breakdown=breakdown,

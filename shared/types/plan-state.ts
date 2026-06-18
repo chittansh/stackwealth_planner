@@ -256,6 +256,12 @@ export type FreedomOutput = {
   required_medical_cover: number;
 };
 
+export type CashFlowGoalOutflow = {
+  goal_id: string;
+  goal_name: string;
+  amount: number;
+};
+
 export type CashFlowRow = {
   year: number;
   age: number;
@@ -266,6 +272,15 @@ export type CashFlowRow = {
   retirement_contributions: number;
   other: number;
   total_net_worth: number;
+  goal_outflow?: number;
+  goal_outflow_breakdown?: CashFlowGoalOutflow[];
+  /** Asset-class breakdown — populated from compute_cashflow's per-year
+   * end-state. `assets` (above) is liquid + portfolio. total_net_worth
+   * also includes real_estate + gold. */
+  liquid?: number;
+  portfolio?: number;
+  real_estate?: number;
+  gold?: number;
 };
 
 export type CashFlowProjection = {

@@ -406,6 +406,14 @@ class CashFlowRow(StrictModel):
     goal_outflow: float = 0
     # Per-goal breakdown for the canvas/PDF — empty when no goal hits this year.
     goal_outflow_breakdown: list[CashFlowGoalOutflow] = Field(default_factory=list)
+    # Asset-class breakdown for this year. `assets` field above is the
+    # sum of financial pools only (liquid + portfolio). `total_net_worth`
+    # adds real_estate + gold. These fields let the canvas show what
+    # each asset class is doing across the projection horizon.
+    liquid: float = 0
+    portfolio: float = 0
+    real_estate: float = 0
+    gold: float = 0
 
 
 class MonthlyStrip(StrictModel):
