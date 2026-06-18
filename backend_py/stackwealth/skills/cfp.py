@@ -1000,33 +1000,65 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         inflation=plan.assumptions.inflation or 0.07,
         post_retire_return=POST_TAX_RETURN["equity_hybrid"],
     )
-    # Net retirement-tagged assets out of the gross corpus to get the
-    # actual shortfall the new SIP needs to fund (Finding 4 — Excel's
-    # Assumptions sheet rows 94-103 do this netting).
+    # Net existing PROVISIONS out of the gross corpus to find the
+    # actual shortfall the new SIP needs to close. Two pieces:
+    #   (a) explicitly retirement-tagged assets (EPF/PPF/NPS) compounded
+    #       to retirement at their per-class rates. (Existing Finding 4
+    #       logic — Excel's Assumptions sheet rows 94-103.)
+    #   (b) the FUTURE VALUE of ongoing monthly SIPs over the working
+    #       horizon, compounded at the equity-hybrid post-tax rate.
+    #       Without this, the Retirement Glide reports a huge "additional
+    #       SIP needed" even though the household's existing SIPs are
+    #       already going to wealth — contradicting the goal-scenarios
+    #       view which already credits existing SIPs to goals.
     years_to_retire = max(0, retirement_age - current_age)
     ret_assets_fv, ret_assets_rows = _retirement_tagged_assets_fv(
         plan, years_to_retire=years_to_retire
     )
     retirement["existing_retirement_assets_fv"] = round(ret_assets_fv)
     retirement["existing_retirement_assets_breakdown"] = ret_assets_rows
-    corpus_shortfall = max(0.0, retirement["corpus_required"] - ret_assets_fv)
+
+    # FV of existing SIPs run to retirement. Standard FV-of-annuity:
+    #     FV = PMT × ((1+r)^n − 1) / r
+    # Use annual roi compounded over n years, with annual cashflow =
+    # monthly_sip × 12 (close enough; the exact monthly compounding only
+    # adds ~2% precision over decades).
+    mi_for_fv = plan.monthly_investments
+    monthly_sip_for_fv = 0.0
+    if mi_for_fv:
+        monthly_sip_for_fv = float(
+            (mi_for_fv.mutual_fund_sip or 0) + (mi_for_fv.nps or 0)
+            + (mi_for_fv.ppf or 0) + (mi_for_fv.rd or 0)
+            + (mi_for_fv.direct_equity or 0) + (mi_for_fv.other or 0)
+        )
+    sip_pre_retire_rate = POST_TAX_RETURN["equity_hybrid"]
+    if monthly_sip_for_fv > 0 and years_to_retire > 0 and sip_pre_retire_rate > 0:
+        annual_sip = monthly_sip_for_fv * 12
+        existing_sip_fv = annual_sip * (
+            ((1 + sip_pre_retire_rate) ** years_to_retire - 1) / sip_pre_retire_rate
+        )
+    else:
+        existing_sip_fv = 0.0
+    retirement["existing_sip_fv_at_retirement"] = round(existing_sip_fv)
+    retirement["monthly_sip_committed"] = round(monthly_sip_for_fv)
+
+    # Total provision = retirement-tagged assets + FV of ongoing SIPs
+    total_provision_fv = ret_assets_fv + existing_sip_fv
+    retirement["total_provision_at_retirement"] = round(total_provision_fv)
+
+    corpus_shortfall = max(0.0, retirement["corpus_required"] - total_provision_fv)
     retirement["corpus_shortfall_after_existing"] = round(corpus_shortfall)
     retirement["computation_trace"].append(_trace(
-        "Net existing retirement assets out of corpus need",
-        "shortfall = corpus_required − Σ FV(EPF/NPS/PPF tagged retirement)",
+        "Net existing provisions out of corpus need",
+        "shortfall = corpus_required − Σ FV(EPF/NPS/PPF) − FV(ongoing SIPs)",
         {"corpus_required": retirement["corpus_required"],
-         "retirement_assets_fv": round(ret_assets_fv)},
+         "retirement_assets_fv": round(ret_assets_fv),
+         "existing_sip_fv": round(existing_sip_fv)},
         round(corpus_shortfall),
     ))
 
     # Additional monthly SIP needed to close the shortfall — Excel
     # `Retirement Plan!B48` = PMT(post_tax_roi/12, years_to_retire*12, , -shortfall).
-    # Use the equity-hybrid post-tax return (10.5%) because Excel uses the
-    # SAME column for both the corpus discount rate and the SIP rate; fa_roi
-    # (holdings-weighted) isn't computed until later in the orchestrator and
-    # would conflate "what's needed to fund retirement" with "what existing
-    # mix yields" — they're different questions.
-    sip_pre_retire_rate = POST_TAX_RETURN["equity_hybrid"]
     n_months = years_to_retire * 12
     if corpus_shortfall > 0 and n_months > 0 and sip_pre_retire_rate > 0:
         sip_required = abs(excel_pmt(sip_pre_retire_rate / 12, n_months, 0, -corpus_shortfall))

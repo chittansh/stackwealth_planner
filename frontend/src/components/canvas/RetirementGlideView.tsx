@@ -174,6 +174,9 @@ type CfpRetirementBlock = {
   real_return_during_retirement?: number;
   corpus_required?: number;
   existing_retirement_assets_fv?: number;
+  existing_sip_fv_at_retirement?: number;
+  monthly_sip_committed?: number;
+  total_provision_at_retirement?: number;
   corpus_shortfall_after_existing?: number;
   required_monthly_sip?: number;
 };
@@ -182,9 +185,12 @@ type CfpRetirementBlock = {
  * shortfall, and the additional monthly SIP to close the gap. */
 function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock; retireAge: number }) {
   const required = block.corpus_required ?? 0;
-  const existingFV = block.existing_retirement_assets_fv ?? 0;
-  const shortfall = block.corpus_shortfall_after_existing ?? Math.max(0, required - existingFV);
-  const fundedPct = required > 0 ? Math.max(0, Math.min(100, (existingFV / required) * 100)) : 0;
+  const existingAssetsFV = block.existing_retirement_assets_fv ?? 0;
+  const existingSipFV = block.existing_sip_fv_at_retirement ?? 0;
+  const monthlySipCommitted = block.monthly_sip_committed ?? 0;
+  const totalProvision = block.total_provision_at_retirement ?? existingAssetsFV + existingSipFV;
+  const shortfall = block.corpus_shortfall_after_existing ?? Math.max(0, required - totalProvision);
+  const fundedPct = required > 0 ? Math.max(0, Math.min(100, (totalProvision / required) * 100)) : 0;
 
   return (
     <div className="rounded-xl border border-zinc-200 bg-white p-5">
@@ -192,7 +198,8 @@ function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock
       <p className="text-[11px] text-zinc-400 mb-4">
         Mirrors <code className="text-[10px]">Retirement Plan</code> in the firm CFP workbook —
         inflation-grown expenses at retirement, annuity-due PV of post-retirement years, netted
-        against EPF/PPF/NPS future value, and the additional monthly SIP that closes the gap.
+        against EPF/PPF/NPS FV + the future value of ongoing SIPs, with the additional monthly SIP
+        that closes any remaining gap.
       </p>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
@@ -226,13 +233,44 @@ function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
         <Big label="Corpus required" value={formatINR(required, { compact: true })} />
-        <Big label="Existing retirement FV" value={formatINR(existingFV, { compact: true })} subtle />
-        <Big label="Shortfall" value={formatINR(shortfall, { compact: true })} accent={shortfall > 0 ? 'bad' : 'good'} />
+        <Big
+          label="Provisioned at retirement"
+          value={formatINR(totalProvision, { compact: true })}
+          subtle
+        />
+        <Big
+          label="Shortfall"
+          value={formatINR(shortfall, { compact: true })}
+          accent={shortfall > 0 ? 'bad' : 'good'}
+        />
       </div>
+
+      {/* Breakdown of provisioning sources */}
+      {(existingAssetsFV > 0 || existingSipFV > 0) && (
+        <div className="mt-3 rounded-md bg-zinc-50/40 border border-zinc-100 p-3 text-xs">
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1.5">
+            How the {formatINR(totalProvision, { compact: true })} is provisioned
+          </div>
+          {existingAssetsFV > 0 && (
+            <div className="flex items-baseline justify-between py-0.5">
+              <span className="text-zinc-700">EPF / PPF / NPS already held, compounded to {retireAge}</span>
+              <span className="text-zinc-900 tabular-nums">{formatINR(existingAssetsFV, { compact: true })}</span>
+            </div>
+          )}
+          {existingSipFV > 0 && (
+            <div className="flex items-baseline justify-between py-0.5">
+              <span className="text-zinc-700">
+                FV of ongoing SIPs ({formatINR(monthlySipCommitted, { compact: true })}/mo continued through {retireAge})
+              </span>
+              <span className="text-zinc-900 tabular-nums">{formatINR(existingSipFV, { compact: true })}</span>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="mt-4">
         <div className="flex justify-between text-[11px] text-zinc-500 mb-1">
-          <span>EPF / PPF / NPS coverage of required corpus</span>
+          <span>Coverage of required corpus</span>
           <span className="tabular-nums">{fundedPct.toFixed(1)}%</span>
         </div>
         <div className="h-2 bg-zinc-100 rounded-full overflow-hidden">
