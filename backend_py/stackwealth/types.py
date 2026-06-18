@@ -27,7 +27,7 @@ GoalKind = Literal[
     "other",
 ]
 Priority = Literal["essential", "important", "aspirational"]
-Instrument = Literal["FD", "RD", "PPF", "EPF", "Bonds", "NPS"]
+Instrument = Literal["FD", "RD", "PPF", "EPF", "Bonds", "NPS", "NSC", "PostOffice", "SukanyaSamriddhi", "Other"]
 LongOrTrade = Literal["long_term", "trading"]
 SourceType = Literal[
     "user",
@@ -284,7 +284,13 @@ class Assumptions(StrictModel):
     growth: Growth = Field(default_factory=Growth)
     income_growth: IncomeGrowth = Field(default_factory=IncomeGrowth)
     taxes: Taxes = Field(default_factory=Taxes)
-    inflation: float = 0.06
+    # 7% matches the firm's reference Excel `YoY Cash Flow` row 5 J$5 — the
+    # expense growth rate used across all firm-issued client plans. The
+    # previous default (6%) silently under-projected expenses by ~1pp/yr
+    # compounding to ~20% lower expenses by retirement vs the firm's
+    # workbook. Per-client overrides via `Inflation Assumed` columns in
+    # the goals sheet still take precedence.
+    inflation: float = 0.07
     # Annual SIP step-up *over and above* inflation. 0.0 means SIP scales
     # with inflation only (real SIP rupees flat). 0.10 means SIP grows by
     # inflation + 10 percentage points each year — i.e. the household

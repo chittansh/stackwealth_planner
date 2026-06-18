@@ -765,9 +765,16 @@ def _holdings_weighted_post_tax_roi(plan: PlanState) -> tuple[float, dict[str, f
         elif "nps" in inst:
             r = POST_TAX_RETURN["nps"]
             label = "nps"
+        elif "sukanya" in inst:
+            r = POST_TAX_RETURN["sukanya"]
+            label = "sukanya"
         elif "nsc" in inst or "bond" in inst:
             r = POST_TAX_RETURN["bonds"]
             label = "bonds_nsc"
+        elif "postoffice" in inst or "post office" in inst or "posa" in inst:
+            # Post Office Savings A/c — similar rate band to bank FD post-tax.
+            r = POST_TAX_RETURN["bank_fd"]
+            label = "post_office"
         else:
             r = POST_TAX_RETURN["bank_fd"]
             label = "fd"
