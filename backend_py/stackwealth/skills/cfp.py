@@ -44,14 +44,19 @@ INFLATION_TABLE: dict[str, float] = {
     "general": 0.07,                # firm: General Inflation (Household)
     "education": 0.08,              # firm: Educational Inflation
     "child_education": 0.08,
-    "wedding": 0.08,                # firm: Wedding Inflation
-    "child_marriage": 0.08,
+    "wedding": 0.08,                # firm: Wedding Inflation (literal weddings)
+    # Empirical from firm's reference workbook: child_marriage goals are
+    # priced at general inflation (7%), not wedding inflation. The 8%
+    # "Wedding Inflation" row in the firm's Assumptions sheet is reserved
+    # for explicit wedding-ceremony goals; downstream child-marriage
+    # withdrawals on the YoY tab are computed at 7%.
+    "child_marriage": 0.07,
     "medical": 0.09,                # firm: Medical Inflation
     "lifestyle": 0.20,              # firm: Personalised (Lifestyle) inflation
     "real_estate": 0.08,            # firm: Real Estate Inflation
     "house_purchase": 0.08,
-    "vacation": 0.08,               # firm: Vacation Inflation
-    "foreign_travel": 0.08,
+    "vacation": 0.07,               # firm YoY uses general inflation here
+    "foreign_travel": 0.07,         # same — empirically 7% in firm Excel
     "other": 0.07,                  # falls back to general
     "retirement": 0.07,             # general for corpus + post-retirement spend
 }

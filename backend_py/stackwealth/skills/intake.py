@@ -443,6 +443,7 @@ def _row_is_blank(row: tuple) -> bool:
 
 
 async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
+    expense_footer_total: float | None = None
     try:
         from openpyxl import load_workbook
 
@@ -460,6 +461,17 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
                 if _row_is_blank(row):
                     continue
                 sheet_lines.append(",".join("" if c is None else str(c) for c in row))
+                # Capture the "Total Expenditure" footer on the expenses
+                # sheet so we can reconcile against the LLM's extraction
+                # downstream. The firm template's expense sheet name is
+                # exactly "3_Expenses " (trailing space) but we match any
+                # sheet whose name starts with "3_" or contains "expense".
+                if expense_footer_total is None and ("expense" in sn.lower() or sn.lower().startswith("3_")):
+                    label = next((str(c) for c in row if isinstance(c, str)), "").lower()
+                    if "total expenditure" in label or "total expenses" in label:
+                        nums = [c for c in row if isinstance(c, (int, float)) and c > 1000]
+                        if nums:
+                            expense_footer_total = float(max(nums))
             if not sheet_lines:
                 continue
             chunks.append(f"## Sheet: {sn}")
@@ -467,9 +479,39 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
         text = "\n".join(chunks)
     except Exception as e:
         return {**_empty_result("xlsx:failed"), "missing": [str(e)]}
-    return await _llm_extract(
+    result = await _llm_extract(
         text=text, source_type="xlsx", filename=filename, parser_label="xlsx:llm"
     )
+
+    # Deterministic safety net: if the workbook's "Total Expenditure" footer
+    # is materially higher than the sum of LLM-extracted monthly_expenses,
+    # the LLM dropped a line item (most commonly "Transport & Commute" or
+    # a second "Other Expenses" row). Auto-balance by adding the missing
+    # delta to household_expenses — the firm's residual catch-all. This
+    # prevents silent under-projection of lifetime expenses by 10-15%.
+    if expense_footer_total and result.get("partial_state"):
+        me = result["partial_state"].get("monthly_expenses") or {}
+        if isinstance(me, dict):
+            extracted = sum(v for v in me.values() if isinstance(v, (int, float)))
+            shortfall = expense_footer_total - extracted
+            # Only patch if the shortfall is real (>₹2k) and plausible
+            # (<half of footer — beyond that, the LLM has bigger problems).
+            if 2000 < shortfall < expense_footer_total / 2:
+                me["household_expenses"] = float(me.get("household_expenses") or 0) + shortfall
+                result["partial_state"]["monthly_expenses"] = me
+                ev = result.get("evidence") or []
+                ev.append({
+                    "field_path": "monthly_expenses.household_expenses",
+                    "value": me["household_expenses"],
+                    "source_text": f"Auto-reconciled to match Total Expenditure footer ₹{expense_footer_total:,.0f}",
+                    "confidence": 0.6,
+                    "source_type": "xlsx",
+                    "source_file": filename or "",
+                    "extractor": "xlsx_footer_reconciler",
+                })
+                result["evidence"] = ev
+                print(f"[intake] xlsx expense reconciliation: LLM sum ₹{extracted:,.0f} vs footer ₹{expense_footer_total:,.0f}; added ₹{shortfall:,.0f} to household_expenses")
+    return result
 
 
 async def _parse_csv(buf: bytes, filename: str) -> dict[str, Any]:
