@@ -179,6 +179,8 @@ type CfpRetirementBlock = {
   total_provision_at_retirement?: number;
   corpus_shortfall_after_existing?: number;
   required_monthly_sip?: number;
+  retirement_annual_expense_today?: number;
+  used_planned_retirement_expense?: boolean;
 };
 
 /** Mirrors the firm's `Retirement Plan` sheet — corpus math, existing FV,
@@ -206,8 +208,15 @@ function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock
         <Cell label="Time to retire" value={`${block.years_to_retire ?? '—'} yrs`} />
         <Cell label="Years post-retirement" value={`${block.years_post_retirement ?? '—'} yrs`} />
         <Cell
-          label="Annual expense today"
-          value={formatINR(block.annual_expense_today ?? 0, { compact: true })}
+          label={
+            block.used_planned_retirement_expense
+              ? 'Planned retirement spend (from goal)'
+              : 'Annual expense today'
+          }
+          value={formatINR(
+            block.retirement_annual_expense_today ?? block.annual_expense_today ?? 0,
+            { compact: true },
+          )}
         />
         <Cell
           label={`Annual expense at age ${retireAge}`}

@@ -835,10 +835,18 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     ))
 
     # ── Goal blocks ────────────────────────────────────────────────────
+    # `kind=retirement` goals are handled SEPARATELY by the dedicated
+    # corpus calculation below — they represent the ANNUAL post-
+    # retirement expense, not a one-time spend. Including them here
+    # would double-count: the goal-block treats target_amount as a
+    # single FV outflow, while the corpus calc treats it as a
+    # multi-year annuity. The corpus path is the right one.
     asset_pool = _build_asset_pool(plan)
     goal_blocks: list[dict] = []
     goal_outflows_by_year: dict[int, float] = {}
     for g in plan.financial_goals:
+        if g.kind == "retirement":
+            continue
         block = compute_goal_block(g, current_year=current_year, asset_pool=asset_pool)
         goal_blocks.append(block)
         if block["target_year"] and block["future_value_needed"]:
@@ -992,14 +1000,55 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     # Excel uses the equity_hybrid (10.5%) post-tax return for the
     # retirement-corpus discounting. See Retirement Plan tab cell E23 →
     # Assumptions sheet E22.
+    #
+    # PLANNED retirement annual expense: if the household entered a
+    # `kind=retirement` goal with a target_amount, that's the firm's
+    # planned ANNUAL POST-RETIREMENT spend (per the Excel template's
+    # "Retirement Cost" row, nature=Annual). Use it instead of current
+    # monthly_expenses × 12, because retirement spend is usually LOWER
+    # (no EMI, no school fees, less lifestyle). Falling through to
+    # current expenses systematically over-estimates the corpus.
+    retire_goal = next(
+        (g for g in plan.financial_goals if g.kind == "retirement" and (g.target_amount or 0) > 0),
+        None,
+    )
+    if retire_goal is not None:
+        planned_annual = float(retire_goal.target_amount or 0)
+        if retire_goal.is_target_in_today_money:
+            retire_annual_expense_today = planned_annual
+        else:
+            # target_amount was given in target-year rupees; discount back to today
+            infl_g = (
+                retire_goal.inflation_assumed
+                if retire_goal.inflation_assumed is not None
+                else (plan.assumptions.inflation or 0.07)
+            )
+            n_back = max(0, (retire_goal.target_year or current_year + 10) - current_year)
+            retire_annual_expense_today = planned_annual / ((1 + infl_g) ** n_back)
+        trace.append(_trace(
+            "Planned retirement annual expense (from retirement goal)",
+            "kind=retirement goal's target_amount, discounted to today's rupees if needed",
+            {"goal_name": retire_goal.goal_name,
+             "raw_target": planned_annual,
+             "is_today_money": retire_goal.is_target_in_today_money},
+            round(retire_annual_expense_today),
+            unit="INR/yr",
+        ))
+    else:
+        # No retirement goal entered → default to current expenses
+        # carried into retirement (conservative).
+        retire_annual_expense_today = annual_expenses
+
     retirement = compute_retirement_corpus(
         current_age=current_age,
         retirement_age=retirement_age,
         life_expectancy=life_expectancy,
-        current_annual_expenses=annual_expenses,
+        current_annual_expenses=retire_annual_expense_today,
         inflation=plan.assumptions.inflation or 0.07,
         post_retire_return=POST_TAX_RETURN["equity_hybrid"],
     )
+    retirement["used_planned_retirement_expense"] = bool(retire_goal is not None)
+    retirement["retirement_annual_expense_today"] = round(retire_annual_expense_today)
     # Net existing PROVISIONS out of the gross corpus to find the
     # actual shortfall the new SIP needs to close. Two pieces:
     #   (a) explicitly retirement-tagged assets (EPF/PPF/NPS) compounded
