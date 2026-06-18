@@ -415,6 +415,20 @@ async def _parse_pdf(buf: bytes, filename: str) -> dict[str, Any]:
     )
 
 
+def _row_is_blank(row: tuple) -> bool:
+    """A row is blank if every cell is None or an empty-string after
+    stripping. Excel templates have hundreds of trailing empty rows
+    that we don't want to ship to the LLM — they eat the 80K-char
+    truncation budget that should go to actual data."""
+    for c in row:
+        if c is None:
+            continue
+        if isinstance(c, str) and not c.strip():
+            continue
+        return False
+    return True
+
+
 async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
     try:
         from openpyxl import load_workbook
@@ -423,9 +437,20 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
         chunks: list[str] = []
         for sn in wb.sheetnames:
             ws = wb[sn]
-            chunks.append(f"## Sheet: {sn}")
+            # Only include sheets with at least one non-blank row, and
+            # skip blank rows within a sheet. The firm's templates pad
+            # every tab to 1000+ rows; without filtering, the goals
+            # sheet alone consumed ~44KB of the 80KB LLM input budget
+            # for empty cells, starving the other tabs.
+            sheet_lines: list[str] = []
             for row in ws.iter_rows(values_only=True):
-                chunks.append(",".join("" if c is None else str(c) for c in row))
+                if _row_is_blank(row):
+                    continue
+                sheet_lines.append(",".join("" if c is None else str(c) for c in row))
+            if not sheet_lines:
+                continue
+            chunks.append(f"## Sheet: {sn}")
+            chunks.extend(sheet_lines)
         text = "\n".join(chunks)
     except Exception as e:
         return {**_empty_result("xlsx:failed"), "missing": [str(e)]}
