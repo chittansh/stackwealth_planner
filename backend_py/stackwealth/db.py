@@ -67,19 +67,12 @@ def _database_url() -> Optional[str]:
     return url
 
 
-async def _validate_connection(conn: Any) -> None:
-    """Run a lightweight SELECT 1 on every connection asyncpg hands out
-    of the pool. If the connection is dead (Fly's `.internal` mesh
-    silently RSTs idle TCP), asyncpg catches the error, discards it,
-    and tries another connection. This is what stops the
-    "ConnectionDoesNotExistError: closed in the middle of operation"
-    flood — the pool was happily returning dead sockets to callers
-    who then blew up mid-query.
-
-    Cost: one extra round-trip per acquire (~1-3ms on a healthy
-    connection). Cheap insurance against the mesh's idle-RST
-    behaviour."""
-    await conn.execute("SELECT 1")
+# Rate-limit the "pool acquire failed" log so a single mesh flap doesn't
+# carpet-bomb the log with one line per concurrent request. We only need
+# to see the FIRST one in a burst to know something happened — the retry
+# loop / direct-connect fallback handles the actual recovery.
+_last_pool_fail_log_ts: float = 0.0
+_POOL_FAIL_LOG_INTERVAL_S: float = 30.0
 
 
 async def _get_pool() -> Any | None:
@@ -109,19 +102,18 @@ async def _get_pool() -> Any | None:
                 max_size=30,
                 command_timeout=10,
                 timeout=15.0,
-                # 10s recycle (was 30s). Fly's `.internal` mesh kills idle
-                # TCP within seconds, so a longer lifetime guarantees the
-                # pool hands out dead connections. Shorter = more churn but
-                # connections actually work when handed out.
-                max_inactive_connection_lifetime=10.0,
-                # Per-acquire health check. Asyncpg runs this on every
-                # pool.acquire() before returning a connection. If the
-                # connection is dead, asyncpg discards it and tries another
-                # — this is what catches the "closed in the middle of
-                # operation" connections that the mesh silently RSTs.
-                # Cost: one SELECT 1 per acquire (~few ms on a healthy
-                # connection). Worth it on a flapping network.
-                setup=_validate_connection,
+                # 5s recycle. Fly's `.internal` mesh silently half-closes
+                # idle TCP within seconds — anything older than this is a
+                # likely dead socket. We deliberately do NOT install a
+                # per-acquire SELECT 1 setup hook: on a dead socket the
+                # mesh doesn't send a RST, so the SELECT 1 blocks for
+                # the full command_timeout (10s) per connection, which
+                # then cascades into pool.acquire() timeouts for every
+                # concurrent caller. Lazy detection via the retry loop
+                # below is faster — a dead-conn query fails immediately
+                # with ConnectionDoesNotExistError, we tear down the
+                # pool, rebuild, and retry within a few hundred ms.
+                max_inactive_connection_lifetime=5.0,
                 ssl=False,
             )
         except Exception as e:
@@ -148,7 +140,12 @@ class _PgConn:
         pool = await _get_pool()
         if pool is not None:
             try:
-                self._cm = pool.acquire(timeout=10.0)
+                # 3s acquire timeout (was 10s). On a healthy pool, acquire
+                # returns in microseconds; the only reason we'd wait this
+                # long is the pool is mid-flap. Fail fast so the
+                # direct-connect fallback can serve the request inside
+                # Fly's 5s health-check budget.
+                self._cm = pool.acquire(timeout=3.0)
                 self.conn = await self._cm.__aenter__()
                 return self.conn
             except Exception as e:
@@ -156,7 +153,14 @@ class _PgConn:
                 # mesh — fall through to a direct connect so this single
                 # request doesn't get silently routed to in-memory mode (which
                 # would lose data on a multi-machine deployment).
-                print(f"[db] pool acquire failed, falling back to direct connect: {type(e).__name__}")
+                global _last_pool_fail_log_ts
+                now = asyncio.get_event_loop().time()
+                if now - _last_pool_fail_log_ts > _POOL_FAIL_LOG_INTERVAL_S:
+                    print(f"[db] pool acquire failed, falling back to direct connect: {type(e).__name__} (suppressing duplicate logs for {int(_POOL_FAIL_LOG_INTERVAL_S)}s)")
+                    _last_pool_fail_log_ts = now
+                # Tear the pool down on a flap so the *next* request rebuilds
+                # from scratch instead of hitting the same stale sockets.
+                await _reset_pool()
                 self._cm = None
                 self.conn = None
 
