@@ -595,6 +595,7 @@ def compute_yoy_cashflow(
     financial_asset_roi: float = None,   # S$5 — holdings-weighted (see compute_cfp)
     non_financial_appreciation: float = 0.07,  # Z$5 — real estate / gold blend
     goal_outflows_by_year: dict[int, float] | None = None,
+    lumpsum_events_by_year: dict[int, list[tuple[float, str]]] | None = None,
 ) -> list[dict]:
     """Excel's `YoY Cash Flow` sheet — row-by-row. Each year:
         income_source[y]  = income_source[y-1] × (1 + per_source_growth)
@@ -609,6 +610,7 @@ def compute_yoy_cashflow(
     if financial_asset_roi is None:
         financial_asset_roi = BLENDED_ROI_POST_TAX
     goal_outflows_by_year = goal_outflows_by_year or {}
+    lumpsum_events_by_year = lumpsum_events_by_year or {}
 
     rows: list[dict] = []
     income_emp = monthly_income_employment * 12
@@ -635,9 +637,20 @@ def compute_yoy_cashflow(
 
         withdrawal = float(goal_outflows_by_year.get(year, 0))
 
-        # Mid-year compounding (Excel S6 convention).
+        # Lumpsum one-off events (Excel `Lumpsum Further deposit /
+        # (Withdrawal)` column). Positive = deposit into FA at year-end,
+        # negative = withdrawal from FA. Multiple events in the same
+        # year are summed; labels are concatenated for the remarks cell.
+        lumpsum_evs = lumpsum_events_by_year.get(year, [])
+        lumpsum_total = float(sum(amt for amt, _ in lumpsum_evs))
+        lumpsum_remark = " · ".join(lbl for _, lbl in lumpsum_evs if lbl) if lumpsum_evs else ""
+
+        # Mid-year compounding (Excel S6 convention). Lumpsum hits at
+        # year-end (compounded for the remainder of the year, simplified
+        # to zero — matches Excel's column V where the lumpsum is added
+        # AFTER the return-on-mid-year-cash formula, not before).
         fa_returns = (fa_open + surplus / 2 - withdrawal) * financial_asset_roi
-        fa_close = fa_open + surplus - withdrawal + fa_returns
+        fa_close = fa_open + surplus - withdrawal + fa_returns + lumpsum_total
         nfa_close = nfa_open * (1 + non_financial_appreciation)
 
         nfa_appreciation_this_yr = nfa_open * non_financial_appreciation
@@ -660,8 +673,8 @@ def compute_yoy_cashflow(
             "net_annual_cash_savings": round(surplus),
             "major_withdrawals": round(-withdrawal) if withdrawal else 0,
             "investment_returns": round(fa_returns),
-            "lumpsum_deposit_withdrawal": 0,    # Reserved for future "Knee surgery / Bonus / Reverse mortgage" annotations
-            "remarks": "",
+            "lumpsum_deposit_withdrawal": round(lumpsum_total) if lumpsum_total else 0,
+            "remarks": lumpsum_remark,
             "financial_assets_closing": round(fa_close),
             # Non-financial-asset waterfall (Excel cols X–AA)
             "nfa_opening": round(nfa_open),
@@ -1250,6 +1263,16 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
 
     # Per-source income growth from plan assumptions (Finding 3).
     ig = plan.assumptions.income_growth
+
+    # Bucket lumpsum events by year so the yoy engine can fold them in.
+    lumpsum_by_year: dict[int, list[tuple[float, str]]] = {}
+    for ev in (plan.assumptions.lumpsum_events or []):
+        if ev.amount == 0:
+            continue
+        lumpsum_by_year.setdefault(int(ev.year), []).append(
+            (float(ev.amount), ev.label or "")
+        )
+
     yoy = compute_yoy_cashflow(
         horizon_years=min(40, max(life_expectancy - current_age, 10)),
         start_year=current_year,
@@ -1271,6 +1294,7 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         financial_asset_roi=fa_roi,
         non_financial_appreciation=POST_TAX_RETURN["real_estate"],
         goal_outflows_by_year=goal_outflows_by_year,
+        lumpsum_events_by_year=lumpsum_by_year,
     )
 
     # ── Summary ────────────────────────────────────────────────────────

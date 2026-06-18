@@ -154,6 +154,16 @@ export type Person = {
   retirement_age?: number | null;
 };
 
+export type LumpsumEvent = {
+  id: string;
+  /** Calendar year, e.g. 2031. */
+  year: number;
+  /** Positive = deposit into FA, negative = withdrawal. INR. */
+  amount: number;
+  /** Free-text label rendered in the Excel cashflow's "Remarks" column. */
+  label?: string | null;
+};
+
 export type Assumptions = {
   persons: Person[];
   growth: { cash: number; investment: number; real_estate: number; vehicle: number };
@@ -161,6 +171,10 @@ export type Assumptions = {
   income_growth?: { employment: number; business: number; rental: number; other: number };
   taxes: { federal: number; state: number; capital_gains: number };
   inflation: number;
+  /** Annual SIP step-up over and above inflation. */
+  sip_annual_step_up_pct?: number;
+  /** One-off cashflow events — bonuses, surgeries, asset sales, etc. */
+  lumpsum_events?: LumpsumEvent[];
 };
 
 export type RealEstateHolding = {

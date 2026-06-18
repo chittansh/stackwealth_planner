@@ -60,7 +60,10 @@ EXTRACTION_INSTRUCTIONS = """You are an Indian household financial-plan extracto
     "real_estate":    [ { "label" (e.g. "Self-Occupied Villa (Gurgaon)"), "kind" ("residential" | "commercial" | "land" | "other"), "current_value", "earmarked_for_sale"? (bool), "expected_appreciation_pa"? (decimal) } ],
     "gold":           [ { "label" (e.g. "Sovereign Gold Bonds"), "kind" ("physical" | "sgb" | "digital" | "jewellery"), "current_value", "held_for_investment"? (bool, default true) } ],
     "emergency_fund": { "emergency_fund_available"? (bool), "total_emergency_corpus"? (INR), "where_is_it_parked"? (string), "monthly_household_expense_for_calculation"? (INR), "months_of_cover_available"? (decimal) },
-    "assumptions": { "persons"? [ { "name", "date_of_birth"? (DD-MM-YYYY), "life_expectancy"? (years, default 85), "retirement_age"? (AGE in years, NOT a calendar year) } ] },
+    "assumptions": {
+      "persons"? [ { "name", "date_of_birth"? (DD-MM-YYYY), "life_expectancy"? (years, default 85), "retirement_age"? (AGE in years, NOT a calendar year) } ],
+      "lumpsum_events"? [ { "year" (calendar year, e.g. 2031), "amount" (INR, positive = deposit/inflow, negative = withdrawal/outflow), "label" (short description like "Bonus expected", "Knee surgery", "Reverse mortgage payout", "Sale proceeds") } ]
+    },
     "freedom_score_inputs": { "age"?, "monthly_income"?, "monthly_expenses"?, "monthly_emi"?, "portfolio_current_value"?, "liquid_assets_current_value"?, "equity_allocation_percent"? }
   },
   "evidence": [ { "field": "<canonical.path>", "value": <same as in partial_state>, "confidence": 0..1, "evidence_quote": "<verbatim span from source>" } ],
@@ -165,6 +168,13 @@ ANALYTICAL APPROACH — before emitting any value, REASON about it:
     * else → "physical"
   Silver coins / non-gold metals also go in `gold[]` (the schema is "Gold & others" — they're treated as the same asset class for return assumptions). Skip "Total" rows.
 - Emergency fund — populate `emergency_fund` (dict, NOT a list). The firm xlsx template has a `7_Emergency_Fund` sheet with rows "Emergency fund available? (Yes/No)", "Total Emergency Corpus", "Where is it parked?", "Monthly household expense (for calculation)", "Months of cover available". Map directly.
+- Lumpsum events — one-off year-specific cashflows that DON'T fit goals or recurring expenses. Use `assumptions.lumpsum_events[]`. Examples:
+    * "Expecting a 5 lakh bonus in 2027" → `{year: 2027, amount: 500000, label: "Bonus expected"}`
+    * "Knee surgery planned in 2031 will cost about 3 lakh" → `{year: 2031, amount: -300000, label: "Knee surgery"}`
+    * "Will sell apartment for 60 lakh in 2035" → `{year: 2035, amount: 6000000, label: "Apartment sale proceeds"}`
+    * "Plan reverse mortgage of 20 lakh in retirement 2045" → `{year: 2045, amount: 2000000, label: "Reverse mortgage"}`
+    * Sign convention: POSITIVE = cash INFLOW (deposit), NEGATIVE = cash OUTFLOW (one-off expense).
+  Don't confuse these with goals (those have target_year + target_amount + kind), regular monthly expenses (those go in monthly_expenses), or income (steady streams go in income_details).
 - Goals: extract intent like "want to buy a 1.5cr home by 2030" → `{goal_name: "Home Purchase", kind: "house_purchase", target_year: 2030, target_amount: 15000000, is_target_in_today_money: true}`. Goal `kind` MUST be one of: child_education | child_marriage | retirement | house_purchase | foreign_travel | other.
 - Goals — TODAY'S COST vs FUTURE VALUE (CRITICAL — get this wrong and every projection is inflated 2-10x):
     * `target_amount` MUST be the cost in TODAY's rupees, NOT the inflation-adjusted future value. Then set `is_target_in_today_money: true`.

@@ -264,6 +264,21 @@ class Taxes(StrictModel):
     capital_gains: float = 0.125
 
 
+class LumpsumEvent(StrictModel):
+    """One-off deposit or withdrawal in a specific calendar year.
+
+    Mirrors the Excel YoY Cash Flow tab's "Lumpsum Further deposit /
+    (Withdrawal)" column with the adjacent "Remarks" text. Positive
+    `amount` adds to financial assets that year (bonus expected, sale
+    proceeds, reverse mortgage payout); negative withdraws (knee
+    surgery, dependent expense, anything unmodelled in regular
+    expenses)."""
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    year: int                  # Calendar year, e.g. 2031
+    amount: float              # Positive = deposit, negative = withdrawal (INR)
+    label: Optional[str] = None  # "Bonus expected", "Knee surgery", "Reverse mortgage"
+
+
 class Assumptions(StrictModel):
     persons: list[Person] = Field(default_factory=list)
     growth: Growth = Field(default_factory=Growth)
@@ -278,6 +293,9 @@ class Assumptions(StrictModel):
     # forward. Scenarios card / agent mutations target this field to model
     # "Plan B with 10%/yr step-up".
     sip_annual_step_up_pct: float = 0.0
+    # One-off events that hit the YoY Cash Flow's lumpsum column —
+    # bonuses, surgeries, asset sales, reverse mortgage payouts, etc.
+    lumpsum_events: list[LumpsumEvent] = Field(default_factory=list)
 
 
 class FreedomScoreInputs(StrictModel):
