@@ -1273,6 +1273,42 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
             (float(ev.amount), ev.label or "")
         )
 
+    # Fixed-income maturities surface as REMARK-ONLY events (amount=0). The
+    # matured instrument is already inside the FA pool and grows via the
+    # blended ROI, so injecting it as a real lumpsum would double-count.
+    # We still want the advisor to see WHEN each instrument matures on the
+    # YoY cashflow — that's the user's "lumpsum is also there" ask. Each
+    # maturity becomes a labelled zero-amount event in the remarks column.
+    for fi in plan.fixed_income or []:
+        if not fi.maturity_date:
+            continue
+        # maturity_date may be a date / datetime / string. Best-effort year extract.
+        m_year: int | None = None
+        try:
+            m_year = int(getattr(fi.maturity_date, "year", None) or 0) or None
+        except Exception:
+            m_year = None
+        if not m_year:
+            s = str(fi.maturity_date)
+            for token in s.replace("-", " ").replace("/", " ").split():
+                if token.isdigit() and len(token) == 4:
+                    m_year = int(token)
+                    break
+        if not m_year or m_year < current_year:
+            continue
+        val = float(fi.current_value or 0)
+        if val <= 0:
+            continue
+        # Round to lakh for readability in the remarks column.
+        if val >= 1e7:
+            disp = f"₹{val/1e7:.1f} Cr"
+        elif val >= 1e5:
+            disp = f"₹{val/1e5:.1f} L"
+        else:
+            disp = f"₹{round(val):,}"
+        label = f"{fi.instrument or 'FD'} matures ({disp})"
+        lumpsum_by_year.setdefault(m_year, []).append((0.0, label))
+
     yoy = compute_yoy_cashflow(
         horizon_years=min(40, max(life_expectancy - current_age, 10)),
         start_year=current_year,

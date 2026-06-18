@@ -174,6 +174,8 @@ ANALYTICAL APPROACH — before emitting any value, REASON about it:
     * "Will sell apartment for 60 lakh in 2035" → `{year: 2035, amount: 6000000, label: "Apartment sale proceeds"}`
     * "Plan reverse mortgage of 20 lakh in retirement 2045" → `{year: 2045, amount: 2000000, label: "Reverse mortgage"}`
     * Sign convention: POSITIVE = cash INFLOW (deposit), NEGATIVE = cash OUTFLOW (one-off expense).
+    * **Bonus expected for investment** — if `6_Liquid_Capital` (or similar) has a row labelled "Bonus Expected for Investment" with a non-empty amount, emit a lumpsum_event for the CURRENT year with that amount and label "Bonus expected for investment". If the amount is empty/blank, OMIT the event.
+    * **Do NOT** emit lumpsum_events for fixed-income instrument maturities (FD/Bond/NSC/PPF/EPF/NPS rows in `4C_Fixed_Income`). Those are pool transfers, not new money — they're already inside the FA portfolio and the engine grows them at instrument-specific ROIs. Capture them via `fixed_income[].maturity_date` only.
   Don't confuse these with goals (those have target_year + target_amount + kind), regular monthly expenses (those go in monthly_expenses), or income (steady streams go in income_details).
 - Goals: extract intent like "want to buy a 1.5cr home by 2030" → `{goal_name: "Home Purchase", kind: "house_purchase", target_year: 2030, target_amount: 15000000, is_target_in_today_money: true}`. Goal `kind` MUST be one of: child_education | child_marriage | retirement | house_purchase | foreign_travel | other.
 - Goals — TODAY'S COST vs FUTURE VALUE (CRITICAL — get this wrong and every projection is inflated 2-10x):
