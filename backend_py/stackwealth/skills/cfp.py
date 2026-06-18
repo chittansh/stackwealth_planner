@@ -596,6 +596,7 @@ def compute_yoy_cashflow(
     non_financial_appreciation: float = 0.07,  # Z$5 — real estate / gold blend
     goal_outflows_by_year: dict[int, float] | None = None,
     lumpsum_events_by_year: dict[int, list[tuple[float, str]]] | None = None,
+    fa_transfers_out_by_year: dict[int, float] | None = None,
 ) -> list[dict]:
     """Excel's `YoY Cash Flow` sheet — row-by-row. Each year:
         income_source[y]  = income_source[y-1] × (1 + per_source_growth)
@@ -611,6 +612,7 @@ def compute_yoy_cashflow(
         financial_asset_roi = BLENDED_ROI_POST_TAX
     goal_outflows_by_year = goal_outflows_by_year or {}
     lumpsum_events_by_year = lumpsum_events_by_year or {}
+    fa_transfers_out_by_year = fa_transfers_out_by_year or {}
 
     rows: list[dict] = []
     income_emp = monthly_income_employment * 12
@@ -645,12 +647,23 @@ def compute_yoy_cashflow(
         lumpsum_total = float(sum(amt for amt, _ in lumpsum_evs))
         lumpsum_remark = " · ".join(lbl for _, lbl in lumpsum_evs if lbl) if lumpsum_evs else ""
 
+        # Fixed-income maturities: at the maturity year, the instrument
+        # leaves the FA pool (it's been cashed out) and re-enters as a
+        # Lumpsum inflow. Net effect on fa_close is small (~M × ROI lost
+        # for that one year because the principal sits as cash, not in
+        # the interest-bearing pool, for the maturity year). Without this
+        # transfer, emitting the maturity as a positive lumpsum would
+        # double-count: instrument keeps growing inside fa_open AND we'd
+        # inject the same money on top.
+        fa_transfer_out = float(fa_transfers_out_by_year.get(year, 0))
+        fa_open_effective = fa_open - fa_transfer_out
+
         # Mid-year compounding (Excel S6 convention). Lumpsum hits at
         # year-end (compounded for the remainder of the year, simplified
         # to zero — matches Excel's column V where the lumpsum is added
         # AFTER the return-on-mid-year-cash formula, not before).
-        fa_returns = (fa_open + surplus / 2 - withdrawal) * financial_asset_roi
-        fa_close = fa_open + surplus - withdrawal + fa_returns + lumpsum_total
+        fa_returns = (fa_open_effective + surplus / 2 - withdrawal) * financial_asset_roi
+        fa_close = fa_open_effective + surplus - withdrawal + fa_returns + lumpsum_total
         nfa_close = nfa_open * (1 + non_financial_appreciation)
 
         nfa_appreciation_this_yr = nfa_open * non_financial_appreciation
@@ -1273,12 +1286,14 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
             (float(ev.amount), ev.label or "")
         )
 
-    # Fixed-income maturities surface as REMARK-ONLY events (amount=0). The
-    # matured instrument is already inside the FA pool and grows via the
-    # blended ROI, so injecting it as a real lumpsum would double-count.
-    # We still want the advisor to see WHEN each instrument matures on the
-    # YoY cashflow — that's the user's "lumpsum is also there" ask. Each
-    # maturity becomes a labelled zero-amount event in the remarks column.
+    # Fixed-income maturities are MODELLED as pool transfers, not new money:
+    # at maturity year, the instrument's current_value leaves the FA pool
+    # (it's been cashed out) and re-enters via a positive Lumpsum inflow.
+    # The fa_transfers_out_by_year dict makes this explicit so fa_close
+    # stays consistent (instead of double-counting growth on an already-
+    # matured asset). The user sees the actual maturity amount in the
+    # Lumpsum column AND the instrument label in Remarks.
+    fa_transfers_out_by_year: dict[int, float] = {}
     for fi in plan.fixed_income or []:
         if not fi.maturity_date:
             continue
@@ -1299,15 +1314,9 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         val = float(fi.current_value or 0)
         if val <= 0:
             continue
-        # Round to lakh for readability in the remarks column.
-        if val >= 1e7:
-            disp = f"₹{val/1e7:.1f} Cr"
-        elif val >= 1e5:
-            disp = f"₹{val/1e5:.1f} L"
-        else:
-            disp = f"₹{round(val):,}"
-        label = f"{fi.instrument or 'FD'} matures ({disp})"
-        lumpsum_by_year.setdefault(m_year, []).append((0.0, label))
+        label = f"{fi.instrument or 'FD'} matures"
+        lumpsum_by_year.setdefault(m_year, []).append((val, label))
+        fa_transfers_out_by_year[m_year] = fa_transfers_out_by_year.get(m_year, 0) + val
 
     yoy = compute_yoy_cashflow(
         horizon_years=min(40, max(life_expectancy - current_age, 10)),
@@ -1331,6 +1340,7 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         non_financial_appreciation=POST_TAX_RETURN["real_estate"],
         goal_outflows_by_year=goal_outflows_by_year,
         lumpsum_events_by_year=lumpsum_by_year,
+        fa_transfers_out_by_year=fa_transfers_out_by_year,
     )
 
     # ── Summary ────────────────────────────────────────────────────────
