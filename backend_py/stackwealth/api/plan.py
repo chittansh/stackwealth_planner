@@ -24,10 +24,28 @@ def _json(data: Any, status: int = 200) -> Response:
 
 @router.get("/{id}")
 async def read_plan(id: str) -> Response:
-    plan = await get_plan(id)
+    # Graceful-degrade on transient PG flap (mesh dropping connections
+    # mid-operation). The retry loop inside get_plan already burns its
+    # budget; if it raises ConnectionError we surface a 503 with a
+    # Retry-After header so the FE polls back instead of showing a
+    # broken state from the 500 traceback. Brief outages become a
+    # short loading state, not a hard error.
+    try:
+        plan = await get_plan(id)
+    except ConnectionError:
+        return JSONResponse(
+            content={"error": "database_unavailable", "retry_after_seconds": 2},
+            status_code=503,
+            headers={"Retry-After": "2"},
+        )
     if not plan:
         plan = empty_plan_state(id)
-        await save_plan(plan)
+        try:
+            await save_plan(plan)
+        except ConnectionError:
+            # Save failed but we can still hand back the in-memory blank
+            # so the canvas renders; next mutation will retry the save.
+            pass
     return _json(plan)
 
 

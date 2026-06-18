@@ -90,8 +90,15 @@ async def _get_pool() -> Any | None:
         try:
             _pool = await asyncpg.create_pool(
                 dsn=url,
-                min_size=0,
-                max_size=10,
+                # min_size=2 keeps a couple of warm connections ready —
+                # avoids the cold-start handshake tax on the first call
+                # to /health-protected endpoints. max_size=30 (was 10)
+                # absorbs the burst when /api/advisor/highlights does
+                # asyncio.gather(get_plan(hid) for hid in ids) — the old
+                # 10-slot pool was overflowing into pool.acquire timeouts
+                # which surfaced as a flood of 500s on the FE.
+                min_size=2,
+                max_size=30,
                 command_timeout=10,
                 timeout=15.0,
                 # Aggressive recycling — drop any idle connection after 30s so

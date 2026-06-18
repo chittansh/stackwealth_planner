@@ -5,7 +5,15 @@ import type { PlanState } from '@/types/plan-state';
 const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:4000';
 
 export async function fetchPlan(id: string): Promise<PlanState> {
-  const r = await fetch(`${BASE}/api/plan/${id}`, { cache: 'no-store' });
+  // Backend may return 503 with Retry-After header on transient PG
+  // flaps. Retry once after the suggested delay (or 2s default) so a
+  // brief mesh blip doesn't surface as a hard error in the canvas.
+  let r = await fetch(`${BASE}/api/plan/${id}`, { cache: 'no-store' });
+  if (r.status === 503) {
+    const retryAfter = Number(r.headers.get('Retry-After') ?? '2');
+    await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
+    r = await fetch(`${BASE}/api/plan/${id}`, { cache: 'no-store' });
+  }
   if (!r.ok) throw new Error(`fetchPlan ${r.status}`);
   return r.json();
 }
