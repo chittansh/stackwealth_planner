@@ -164,54 +164,86 @@ type CfpRetirementBlock = {
   current_age?: number;
   retirement_age?: number;
   life_expectancy?: number;
+  spouse_current_age?: number | null;
+  spouse_life_expectancy?: number | null;
+  spouse_age_at_retirement?: number | null;
+  horizon_basis?: 'spouse_lifetime' | 'self_lifetime';
   years_to_retire?: number;
   years_post_retirement?: number;
+  post_retire_years?: number;
   annual_expense_today?: number;
   annual_expense_at_retirement?: number;
+  annual_expenses_at_retirement?: number;
+  retirement_annual_expense_today?: number;
   pre_retire_return?: number;
   post_retire_return?: number;
+  corpus_discount_return?: number;
+  sip_funding_return?: number;
   inflation_during_retirement?: number;
   real_return_during_retirement?: number;
+  // Corpus
+  corpus_recurring?: number;
+  one_time_spend_today?: number;
+  one_time_spend_years?: number;
+  one_time_spend_fv?: number;
   corpus_required?: number;
-  existing_retirement_assets_fv?: number;
-  existing_sip_fv_at_retirement?: number;
-  monthly_sip_committed?: number;
+  // Provision + shortfall
+  projected_existing_corpus_fv?: number;
   total_provision_at_retirement?: number;
+  corpus_shortfall_recurring?: number;
+  corpus_shortfall_one_time?: number;
   corpus_shortfall_after_existing?: number;
+  // SIP
+  sip_recurring_monthly?: number;
+  sip_one_time_monthly?: number;
+  gross_monthly_sip?: number;
+  ongoing_retirement_sip_monthly?: number;
   required_monthly_sip?: number;
-  retirement_annual_expense_today?: number;
   used_planned_retirement_expense?: boolean;
 };
 
-/** Mirrors the firm's `Retirement Plan` sheet — corpus math, existing FV,
- * shortfall, and the additional monthly SIP to close the gap. */
+/** Cell-for-cell mirror of the firm's `Retirement Plan` tab — corpus
+ * (recurring annuity + one-time spend), the projected value of earmarked
+ * assets, the shortfall, and the additional monthly SIP to close it. */
 function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock; retireAge: number }) {
-  const required = block.corpus_required ?? 0;
-  const existingAssetsFV = block.existing_retirement_assets_fv ?? 0;
-  const existingSipFV = block.existing_sip_fv_at_retirement ?? 0;
-  const monthlySipCommitted = block.monthly_sip_committed ?? 0;
-  const totalProvision = block.total_provision_at_retirement ?? existingAssetsFV + existingSipFV;
-  const shortfall = block.corpus_shortfall_after_existing ?? Math.max(0, required - totalProvision);
-  const fundedPct = required > 0 ? Math.max(0, Math.min(100, (totalProvision / required) * 100)) : 0;
+  const recurring = block.corpus_recurring ?? 0;
+  const oneTimeFV = block.one_time_spend_fv ?? 0;
+  const required = block.corpus_required ?? recurring + oneTimeFV;
+  const projected = block.projected_existing_corpus_fv ?? block.total_provision_at_retirement ?? 0;
+  const shortfall = block.corpus_shortfall_after_existing ?? Math.max(0, required - projected);
+  const fundedPct = required > 0 ? Math.max(0, Math.min(100, (projected / required) * 100)) : 0;
+
+  const grossSip = block.gross_monthly_sip ?? 0;
+  const ongoingSip = block.ongoing_retirement_sip_monthly ?? 0;
+  const additionalSip = block.required_monthly_sip ?? Math.max(0, grossSip - ongoingSip);
+
+  const spouseHorizon = block.horizon_basis === 'spouse_lifetime';
+  const annualAtRetire = block.annual_expenses_at_retirement ?? block.annual_expense_at_retirement ?? 0;
+  const discountReturn = block.corpus_discount_return ?? block.post_retire_return ?? 0;
+  const sipReturn = block.sip_funding_return ?? 0;
 
   return (
     <div className="rounded-xl border border-zinc-200 bg-white p-5">
       <h3 className="text-sm font-medium text-zinc-700 mb-1">Retirement corpus (Excel-faithful)</h3>
       <p className="text-[11px] text-zinc-400 mb-4">
         Mirrors <code className="text-[10px]">Retirement Plan</code> in the firm CFP workbook —
-        inflation-grown expenses at retirement, annuity-due PV of post-retirement years, netted
-        against EPF/PPF/NPS FV + the future value of ongoing SIPs, with the additional monthly SIP
-        that closes any remaining gap.
+        living expenses (excl. school fees) grown to retirement, the annuity-due PV of the
+        post-retirement years{spouseHorizon ? " sized to the spouse's lifetime" : ''}, plus any
+        one-time post-retirement spend. Funded against the projected value of earmarked assets, with
+        the additional monthly SIP that closes the gap.
       </p>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
         <Cell label="Time to retire" value={`${block.years_to_retire ?? '—'} yrs`} />
-        <Cell label="Years post-retirement" value={`${block.years_post_retirement ?? '—'} yrs`} />
+        <Cell
+          label={spouseHorizon ? 'Post-retirement (spouse lifetime)' : 'Years post-retirement'}
+          value={`${block.post_retire_years ?? block.years_post_retirement ?? '—'} yrs`}
+        />
         <Cell
           label={
             block.used_planned_retirement_expense
               ? 'Planned retirement spend (from goal)'
-              : 'Annual expense today'
+              : 'Retirement living expense (today)'
           }
           value={formatINR(
             block.retirement_annual_expense_today ?? block.annual_expense_today ?? 0,
@@ -220,16 +252,10 @@ function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock
         />
         <Cell
           label={`Annual expense at age ${retireAge}`}
-          value={formatINR(block.annual_expense_at_retirement ?? 0, { compact: true })}
+          value={formatINR(annualAtRetire, { compact: true })}
         />
-        <Cell
-          label="Pre-retire return"
-          value={`${((block.pre_retire_return ?? 0) * 100).toFixed(1)}%`}
-        />
-        <Cell
-          label="Post-retire return"
-          value={`${((block.post_retire_return ?? 0) * 100).toFixed(1)}%`}
-        />
+        <Cell label="Corpus discount return" value={`${(discountReturn * 100).toFixed(2)}%`} />
+        <Cell label="SIP funding return" value={`${(sipReturn * 100).toFixed(1)}%`} />
         <Cell
           label="Inflation in retirement"
           value={`${((block.inflation_during_retirement ?? 0) * 100).toFixed(1)}%`}
@@ -240,11 +266,38 @@ function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock
         />
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
+      {spouseHorizon && (
+        <p className="mt-2 text-[10px] text-zinc-400">
+          Horizon = spouse life expectancy {block.spouse_life_expectancy ?? '—'} − spouse age{' '}
+          {block.spouse_age_at_retirement ?? '—'} at your retirement.
+        </p>
+      )}
+
+      {/* Corpus build-up */}
+      <div className="mt-4 rounded-md bg-zinc-50/40 border border-zinc-100 p-3 text-xs">
+        <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1.5">
+          Corpus required = {formatINR(required, { compact: true })}
+        </div>
+        <div className="flex items-baseline justify-between py-0.5">
+          <span className="text-zinc-700">Recurring spend (annuity due over post-retirement years)</span>
+          <span className="text-zinc-900 tabular-nums">{formatINR(recurring, { compact: true })}</span>
+        </div>
+        {oneTimeFV > 0 && (
+          <div className="flex items-baseline justify-between py-0.5">
+            <span className="text-zinc-700">
+              One-time post-retirement spend
+              {block.one_time_spend_today ? ` (${formatINR(block.one_time_spend_today, { compact: true })} today)` : ''}
+            </span>
+            <span className="text-zinc-900 tabular-nums">{formatINR(oneTimeFV, { compact: true })}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
         <Big label="Corpus required" value={formatINR(required, { compact: true })} />
         <Big
-          label="Provisioned at retirement"
-          value={formatINR(totalProvision, { compact: true })}
+          label="Earmarked assets at retirement"
+          value={formatINR(projected, { compact: true })}
           subtle
         />
         <Big
@@ -253,29 +306,6 @@ function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock
           accent={shortfall > 0 ? 'bad' : 'good'}
         />
       </div>
-
-      {/* Breakdown of provisioning sources */}
-      {(existingAssetsFV > 0 || existingSipFV > 0) && (
-        <div className="mt-3 rounded-md bg-zinc-50/40 border border-zinc-100 p-3 text-xs">
-          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1.5">
-            How the {formatINR(totalProvision, { compact: true })} is provisioned
-          </div>
-          {existingAssetsFV > 0 && (
-            <div className="flex items-baseline justify-between py-0.5">
-              <span className="text-zinc-700">EPF / PPF / NPS already held, compounded to {retireAge}</span>
-              <span className="text-zinc-900 tabular-nums">{formatINR(existingAssetsFV, { compact: true })}</span>
-            </div>
-          )}
-          {existingSipFV > 0 && (
-            <div className="flex items-baseline justify-between py-0.5">
-              <span className="text-zinc-700">
-                FV of ongoing SIPs ({formatINR(monthlySipCommitted, { compact: true })}/mo continued through {retireAge})
-              </span>
-              <span className="text-zinc-900 tabular-nums">{formatINR(existingSipFV, { compact: true })}</span>
-            </div>
-          )}
-        </div>
-      )}
 
       <div className="mt-4">
         <div className="flex justify-between text-[11px] text-zinc-500 mb-1">
@@ -290,12 +320,23 @@ function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock
         </div>
       </div>
 
-      {(block.required_monthly_sip ?? 0) > 0 && (
-        <div className="mt-4 rounded-md bg-zinc-50 border border-zinc-200 px-3 py-2 text-xs flex justify-between items-center">
-          <span className="text-zinc-500">Additional monthly SIP needed to close shortfall</span>
-          <span className="text-zinc-900 font-medium tabular-nums">
-            {formatINR(block.required_monthly_sip ?? 0)} /mo
-          </span>
+      {/* SIP build-down: gross − ongoing = additional */}
+      {grossSip > 0 && (
+        <div className="mt-4 rounded-md bg-zinc-50 border border-zinc-200 px-3 py-2.5 text-xs space-y-1">
+          <div className="flex justify-between">
+            <span className="text-zinc-500">Gross monthly SIP needed</span>
+            <span className="text-zinc-700 tabular-nums">{formatINR(grossSip)} /mo</span>
+          </div>
+          {ongoingSip > 0 && (
+            <div className="flex justify-between">
+              <span className="text-zinc-500">Less: SIPs already ongoing</span>
+              <span className="text-zinc-700 tabular-nums">− {formatINR(ongoingSip)} /mo</span>
+            </div>
+          )}
+          <div className="flex justify-between border-t border-zinc-200 pt-1 mt-1">
+            <span className="text-zinc-600 font-medium">Additional monthly SIP to reach goal</span>
+            <span className="text-zinc-900 font-semibold tabular-nums">{formatINR(additionalSip)} /mo</span>
+          </div>
         </div>
       )}
     </div>

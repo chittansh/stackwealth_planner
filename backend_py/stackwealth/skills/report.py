@@ -1679,15 +1679,37 @@ def _sandeep_s4_goals(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
         f'<td class="num">{_fmt_trace_value(s["value"], s["unit"])}</td></tr>'
         for s in r["computation_trace"]
     )
+    _horizon_note = (
+        f"spouse's lifetime — wife alive to {r.get('spouse_life_expectancy', '—')}, "
+        f"age {r.get('spouse_age_at_retirement', '—')} at your retirement"
+        if r.get("horizon_basis") == "spouse_lifetime"
+        else "your own lifetime"
+    )
+    _one_time_row = (
+        f"<tr><td>One-Time Post-Retirement Spend (grown to year)</td>"
+        f"<td class=\"num\">{_fmt_inr(r['one_time_spend_fv'])}</td></tr>"
+        if r.get("one_time_spend_fv") else ""
+    )
     retirement_block = f"""
     <h3>4.{len(cfp.goal_blocks)+2}  Retirement Goal — Detailed Calculation</h3>
+    <p class="muted" style="margin-bottom:1mm;">Cell-for-cell port of the firm's <code>Retirement Plan</code> tab —
+    corpus discounted at {r.get('corpus_discount_return', 0)*100:.2f}% (conservative post-tax), SIP funded at
+    {r.get('sip_funding_return', 0)*100:.1f}% (hybrid post-tax), horizon sized to {_horizon_note}.</p>
     <table>
       <tbody>
         <tr><td>Years to Retirement</td><td class="num">{r['years_to_retire']}</td></tr>
         <tr><td>Post-Retirement Horizon</td><td class="num">{r['post_retire_years']} years</td></tr>
-        <tr><td>Annual Expenses at Retirement (inflation-adjusted)</td><td class="num">{_fmt_inr(r['annual_expenses_at_retirement'])}</td></tr>
-        <tr><td>Real Return Used (Post-Retire)</td><td class="num">{r['real_return_used']*100:.2f}%</td></tr>
-        <tr style="font-weight:600;background:#f4f4f5;"><td>Required Retirement Corpus</td><td class="num">{_fmt_inr(r['corpus_required'])}</td></tr>
+        <tr><td>Retirement Living Expense (today, excl. school fees)</td><td class="num">{_fmt_inr(r.get('retirement_annual_expense_today', 0))}</td></tr>
+        <tr><td>Annual Expenses at Retirement (inflation-grown)</td><td class="num">{_fmt_inr(r['annual_expenses_at_retirement'])}</td></tr>
+        <tr><td>Inflation-Adjusted Real Return (Post-Retire)</td><td class="num">{r['real_return_used']*100:.2f}%</td></tr>
+        <tr><td>Corpus for Recurring Spend (annuity due)</td><td class="num">{_fmt_inr(r.get('corpus_recurring', 0))}</td></tr>
+        {_one_time_row}
+        <tr style="font-weight:600;background:#f4f4f5;"><td>Total Retirement Corpus Required</td><td class="num">{_fmt_inr(r['corpus_required'])}</td></tr>
+        <tr><td>Projected Value of Earmarked Assets at Retirement</td><td class="num">{_fmt_inr(r.get('projected_existing_corpus_fv', 0))}</td></tr>
+        <tr><td>Shortfall in Corpus</td><td class="num">{_fmt_inr(r.get('corpus_shortfall_after_existing', 0))}</td></tr>
+        <tr><td>Gross Monthly SIP Needed</td><td class="num">{_fmt_inr(r.get('gross_monthly_sip', 0))}</td></tr>
+        <tr><td>Less: SIPs Already Ongoing</td><td class="num">{_fmt_inr(r.get('ongoing_retirement_sip_monthly', 0))}</td></tr>
+        <tr style="font-weight:600;background:#f4f4f5;"><td>Additional Monthly SIP to Reach Goal</td><td class="num">{_fmt_inr(r.get('required_monthly_sip', 0))}</td></tr>
       </tbody>
     </table>
     <p class="muted" style="margin-top:1mm;">Step-by-step (Excel-faithful):</p>

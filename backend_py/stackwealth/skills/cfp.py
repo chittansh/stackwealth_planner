@@ -368,71 +368,233 @@ def _bucket_return_key(bucket: str) -> str:
 
 def compute_retirement_corpus(
     *,
-    current_age: int,
-    retirement_age: int,
-    life_expectancy: int,
-    current_annual_expenses: float,
+    current_age: float,
+    retirement_age: float,
+    life_expectancy: float,
+    retirement_annual_expenses_today: float,
     inflation: float = 0.07,
-    # Default 10.5% matches Excel `Retirement Plan!E23` → `Assumptions!E22`
-    # (equity_hybrid post-tax). Earlier 0.07 collapsed the real rate to 0
-    # and made the corpus equal expense × years — a footgun for any
-    # non-default caller.
-    post_retire_return: float = 0.105,
+    # Excel `Retirement Plan!E22` → `Assumptions!E23` = equity-CONSERVATIVE
+    # (large-cap) post-tax = 8.75%. This is the rate the corpus annuity is
+    # discounted at — NOT the 10.5% hybrid rate (that one funds the SIP, see
+    # `sip_funding_return`). The earlier code conflated the two and used
+    # 10.5% for the discount, which understated the required corpus.
+    corpus_discount_return: float = 0.0875,
+    # Spouse inputs — when both are present the corpus is sized to the
+    # SPOUSE's lifetime (Excel E14/E15: "providing for his wife's lifetime
+    # also"), which is the whole premise of the firm's Retirement Plan tab.
+    spouse_current_age: Optional[float] = None,
+    spouse_life_expectancy: Optional[float] = None,
+    # One-time post-retirement spend (Excel E26-E29) — e.g. a legacy gift /
+    # orphanage donation. Inflated to its target year and funded by a
+    # separate SIP.
+    one_time_spend_today: float = 0.0,
+    one_time_spend_years: Optional[float] = None,
+    one_time_spend_inflation: Optional[float] = None,
+    # FV of assets already earmarked for retirement, compounded to the
+    # retirement date (Excel C36 = `10_Financial_Goals!Y21`).
+    projected_existing_corpus_fv: float = 0.0,
+    # Excel `Retirement Plan!C40` → `Assumptions!E22` = equity-HYBRID post-tax
+    # = 10.5%. The accumulation rate used to size the monthly SIP.
+    sip_funding_return: float = 0.105,
+    # SIPs already running toward retirement (Excel E43) — netted off the
+    # gross SIP to give the *additional* monthly commitment needed.
+    ongoing_retirement_sip_monthly: float = 0.0,
 ) -> dict:
-    """Excel's Retirement Plan tab — annuity-due PV approach.
-    Mirror of:
-        E21 = FV(inflation, years_to_retire, , -current_annual_expenses)
-        E25 = ((1 + return) / (1 + inflation)) - 1
-        E26 = PV(disc_rate, post_retire_years, -annual_at_retire, 0, 1)
+    """Cell-for-cell port of the firm's `Retirement Plan` tab.
+
+    Section 1 — corpus required (rows 7-30):
+        E10  years_to_retire     = retirement_age − current_age
+        E14  spouse_age_at_ret   = retirement_age − (current_age − spouse_age)
+        E15  post_retire_years   = spouse_life_exp − spouse_age_at_ret   (wife's lifetime)
+        E20  annual_at_retire    = FV(inflation, E10, , −retire_expense_today)
+        E24  real_return         = ((1+corpus_discount_return)/(1+inflation)) − 1
+        E25  corpus_recurring    = PV(E24, E15, −E20, 0, 1)              (annuity due)
+        E29  one_time_fv         = FV(inflation, one_time_years, , −one_time_today)
+        E30  corpus_required     = E25 + E29
+
+    Section 2 — additional SIP (rows 35-44):
+        C37  shortfall_recurring = E25 − projected_existing_corpus_fv
+        D37  shortfall_one_time  = E29
+        C41  sip_recurring       = PMT(sip_funding_return/12, E10*12, 0, −C37)
+        D41  sip_one_time        = PMT(sip_funding_return/12, one_time_years*12, 0, −D37)
+        E41  gross_monthly_sip   = C41 + D41
+        E44  required_monthly_sip = E41 − ongoing_retirement_sip_monthly
     """
     trace: list[dict] = []
-    years_to_retire = max(0, retirement_age - current_age)
-    post_retire_years = max(0, life_expectancy - retirement_age)
+    years_to_retire = max(0.0, retirement_age - current_age)               # E10
 
-    annual_at_retire = excel_fv(inflation, years_to_retire, 0, -current_annual_expenses)
+    # ── Post-retirement horizon — spouse lifetime when a spouse exists ───
+    if spouse_current_age is not None and spouse_life_expectancy is not None:
+        spouse_age_at_retire = retirement_age - (current_age - spouse_current_age)  # E14
+        post_retire_years = max(0.0, spouse_life_expectancy - spouse_age_at_retire) # E15
+        horizon_basis = "spouse_lifetime"
+        trace.append(_trace(
+            "Spouse's age at the time of retirement",
+            "retirement_age − (current_age − spouse_current_age)",
+            {"retirement_age": round(retirement_age, 1), "current_age": round(current_age, 1),
+             "spouse_current_age": round(spouse_current_age, 1)},
+            round(spouse_age_at_retire, 1),
+            unit="years",
+        ))
+        trace.append(_trace(
+            "Years to be served post-retirement (spouse's lifetime)",
+            "spouse_life_expectancy − spouse_age_at_retirement",
+            {"spouse_life_expectancy": spouse_life_expectancy,
+             "spouse_age_at_retirement": round(spouse_age_at_retire, 1)},
+            round(post_retire_years, 1),
+            unit="years",
+        ))
+    else:
+        spouse_age_at_retire = None
+        post_retire_years = max(0.0, life_expectancy - retirement_age)
+        horizon_basis = "self_lifetime"
+        trace.append(_trace(
+            "Years to be served post-retirement (self lifetime)",
+            "life_expectancy − retirement_age",
+            {"life_expectancy": life_expectancy, "retirement_age": round(retirement_age, 1)},
+            round(post_retire_years, 1),
+            unit="years",
+        ))
+
+    # ── Section 1: corpus required ───────────────────────────────────────
+    annual_at_retire = excel_fv(inflation, years_to_retire, 0, -retirement_annual_expenses_today)  # E20
     trace.append(_trace(
-        "Annual expenses at retirement (inflation-adjusted)",
-        "FV(inflation, years_to_retire, , -current_annual_expenses)",
-        {"inflation": round(inflation, 4), "years_to_retire": years_to_retire,
-         "current_annual_expenses": round(current_annual_expenses)},
+        "Living expense at retirement (inflation-grown)",
+        "FV(inflation, years_to_retire, , −retirement_expense_today)",
+        {"inflation": round(inflation, 4), "years_to_retire": round(years_to_retire, 1),
+         "retirement_expense_today": round(retirement_annual_expenses_today)},
         round(annual_at_retire),
     ))
 
-    disc_rate = ((1 + post_retire_return) / (1 + inflation)) - 1
+    real_return = ((1 + corpus_discount_return) / (1 + inflation)) - 1                   # E24
     trace.append(_trace(
-        "Inflation-adjusted real return (post-retirement)",
-        "((1+post_retire_return)/(1+inflation)) - 1",
-        {"post_retire_return": round(post_retire_return, 4), "inflation": round(inflation, 4)},
-        round(disc_rate, 4),
+        "Inflation-adjusted real return during retirement",
+        "((1+corpus_discount_return)/(1+inflation)) − 1",
+        {"corpus_discount_return": round(corpus_discount_return, 4), "inflation": round(inflation, 4)},
+        round(real_return, 4),
         unit="%",
     ))
 
-    corpus_required = abs(excel_pv(disc_rate, post_retire_years, -annual_at_retire, 0, when=1))
+    corpus_recurring = abs(excel_pv(real_return, post_retire_years, -annual_at_retire, 0, when=1))  # E25
     trace.append(_trace(
-        "Required retirement corpus",
-        "PV(disc_rate, post_retire_years, -annual_at_retire, 0, 1)",
-        {"disc_rate": round(disc_rate, 4), "post_retire_years": post_retire_years,
+        "Retirement corpus for recurring spend (annuity due)",
+        "PV(real_return, post_retire_years, −annual_at_retire, 0, 1)",
+        {"real_return": round(real_return, 4), "post_retire_years": round(post_retire_years, 1),
          "annual_at_retire": round(annual_at_retire)},
+        round(corpus_recurring),
+    ))
+
+    # One-time post-retirement spend (E26-E29).
+    ot_infl = one_time_spend_inflation if one_time_spend_inflation is not None else inflation
+    ot_years = float(one_time_spend_years) if one_time_spend_years is not None else 0.0
+    if one_time_spend_today > 0 and ot_years > 0:
+        one_time_fv = excel_fv(ot_infl, ot_years, 0, -one_time_spend_today)                          # E29
+        trace.append(_trace(
+            "One-time post-retirement spend, grown to its target year",
+            "FV(inflation, one_time_years, , −one_time_spend_today)",
+            {"inflation": round(ot_infl, 4), "one_time_years": round(ot_years, 1),
+             "one_time_spend_today": round(one_time_spend_today)},
+            round(one_time_fv),
+        ))
+    else:
+        one_time_fv = 0.0
+
+    corpus_required = corpus_recurring + one_time_fv                                                  # E30
+    trace.append(_trace(
+        "Total retirement corpus needed (recurring + one-time)",
+        "corpus_recurring + one_time_fv",
+        {"corpus_recurring": round(corpus_recurring), "one_time_fv": round(one_time_fv)},
         round(corpus_required),
     ))
 
+    # ── Section 2: additional SIP to close the gap ───────────────────────
+    shortfall_recurring = max(0.0, corpus_recurring - projected_existing_corpus_fv)                   # C37
+    shortfall_one_time = max(0.0, one_time_fv)                                                        # D37
+    trace.append(_trace(
+        "Shortfall in recurring corpus (net of earmarked assets' FV)",
+        "corpus_recurring − projected_existing_corpus_fv",
+        {"corpus_recurring": round(corpus_recurring),
+         "projected_existing_corpus_fv": round(projected_existing_corpus_fv)},
+        round(shortfall_recurring),
+    ))
+
+    n_rec = round(years_to_retire)                                                                    # C39
+    n_ot = round(ot_years)                                                                            # D39
+    if shortfall_recurring > 0 and n_rec > 0 and sip_funding_return > 0:
+        sip_recurring = abs(excel_pmt(sip_funding_return / 12, n_rec * 12, 0, -shortfall_recurring))  # C41
+    else:
+        sip_recurring = 0.0
+    if shortfall_one_time > 0 and n_ot > 0 and sip_funding_return > 0:
+        sip_one_time = abs(excel_pmt(sip_funding_return / 12, n_ot * 12, 0, -shortfall_one_time))     # D41
+    else:
+        sip_one_time = 0.0
+
+    gross_monthly_sip = sip_recurring + sip_one_time                                                  # E41
+    trace.append(_trace(
+        "Gross additional monthly SIP (recurring + one-time)",
+        "PMT(sip_funding_return/12, years*12, 0, −shortfall)  summed over both plans",
+        {"sip_funding_return": round(sip_funding_return, 4),
+         "sip_recurring": round(sip_recurring), "sip_one_time": round(sip_one_time)},
+        round(gross_monthly_sip),
+        unit="INR/mo",
+    ))
+
+    required_monthly_sip = max(0.0, gross_monthly_sip - ongoing_retirement_sip_monthly)               # E44
+    if ongoing_retirement_sip_monthly > 0:
+        trace.append(_trace(
+            "Additional SIP needed after netting ongoing SIPs",
+            "gross_monthly_sip − ongoing_retirement_sip",
+            {"gross_monthly_sip": round(gross_monthly_sip),
+             "ongoing_retirement_sip": round(ongoing_retirement_sip_monthly)},
+            round(required_monthly_sip),
+            unit="INR/mo",
+        ))
+
+    total_shortfall = shortfall_recurring + shortfall_one_time
+
     return {
-        "current_age": current_age,
-        "retirement_age": retirement_age,
+        "current_age": round(current_age, 1),
+        "retirement_age": round(retirement_age, 1),
         "life_expectancy": life_expectancy,
-        "years_to_retire": years_to_retire,
-        "post_retire_years": post_retire_years,
-        # Aliases used by the canvas — keep both keys so legacy + new UIs read cleanly.
-        "years_post_retirement": post_retire_years,
-        "annual_expense_today": round(current_annual_expenses),
+        "spouse_current_age": round(spouse_current_age, 1) if spouse_current_age is not None else None,
+        "spouse_life_expectancy": spouse_life_expectancy,
+        "spouse_age_at_retirement": round(spouse_age_at_retire, 1) if spouse_age_at_retire is not None else None,
+        "horizon_basis": horizon_basis,
+        "years_to_retire": round(years_to_retire, 1),
+        "post_retire_years": round(post_retire_years, 1),
+        "years_post_retirement": round(post_retire_years, 1),  # alias for canvas
+        # Expenses
+        "annual_expense_today": round(retirement_annual_expenses_today),
+        "retirement_annual_expense_today": round(retirement_annual_expenses_today),
         "annual_expenses_at_retirement": round(annual_at_retire),
         "annual_expense_at_retirement": round(annual_at_retire),
-        "pre_retire_return": round(post_retire_return, 4),
-        "post_retire_return": round(post_retire_return, 4),
+        # Rates
         "inflation_during_retirement": round(inflation, 4),
-        "real_return_used": round(disc_rate, 4),
-        "real_return_during_retirement": round(disc_rate, 4),
+        "corpus_discount_return": round(corpus_discount_return, 4),
+        "pre_retire_return": round(corpus_discount_return, 4),   # alias
+        "post_retire_return": round(corpus_discount_return, 4),  # alias
+        "real_return_used": round(real_return, 4),
+        "real_return_during_retirement": round(real_return, 4),
+        "sip_funding_return": round(sip_funding_return, 4),
+        "sip_rate_used": round(sip_funding_return, 4),
+        # Corpus
+        "corpus_recurring": round(corpus_recurring),
+        "one_time_spend_today": round(one_time_spend_today),
+        "one_time_spend_years": round(ot_years, 1),
+        "one_time_spend_fv": round(one_time_fv),
         "corpus_required": round(corpus_required),
+        # Provision + shortfall
+        "projected_existing_corpus_fv": round(projected_existing_corpus_fv),
+        "total_provision_at_retirement": round(projected_existing_corpus_fv),
+        "corpus_shortfall_recurring": round(shortfall_recurring),
+        "corpus_shortfall_one_time": round(shortfall_one_time),
+        "corpus_shortfall_after_existing": round(total_shortfall),
+        # SIP
+        "sip_recurring_monthly": round(sip_recurring),
+        "sip_one_time_monthly": round(sip_one_time),
+        "gross_monthly_sip": round(gross_monthly_sip),
+        "ongoing_retirement_sip_monthly": round(ongoing_retirement_sip_monthly),
+        "required_monthly_sip": round(required_monthly_sip),
         "computation_trace": trace,
     }
 
@@ -828,35 +990,36 @@ def _holdings_weighted_post_tax_roi(plan: PlanState) -> tuple[float, dict[str, f
     return weighted, breakdown
 
 
-def _retirement_tagged_assets_fv(
-    plan: PlanState, *, years_to_retire: int
-) -> tuple[float, list[dict]]:
-    """Future-value of assets earmarked for retirement (EPF, NPS, and any
-    fixed-income explicitly tagged retirement). Mirrors the Excel netting
-    on Assumptions rows 94-103 — `corpus_required − FV(retirement assets)`.
-    Returns (total_fv, breakdown_rows)."""
-    if years_to_retire <= 0:
-        return 0.0, []
-    rows: list[dict] = []
-    fv_total = 0.0
-    for fi in plan.fixed_income or []:
-        v = float(fi.current_value or 0)
-        if v <= 0:
+def _age_from_dob(dob: Optional[str], today: datetime) -> Optional[float]:
+    """Fractional age in years from a date-of-birth string. Mirrors the
+    firm Excel's `(today − DOB) / 365.25` so ages like 35.79 reconcile to
+    the rupee. Accepts ISO (YYYY-MM-DD), DD-MM-YYYY, or DD/MM/YYYY; returns
+    None when the date can't be parsed."""
+    if not dob:
+        return None
+    s = str(dob).strip().split(" ")[0]
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d", "%m/%d/%Y"):
+        try:
+            d = datetime.strptime(s, fmt)
+            return max(0.0, (today - d).days / 365.25)
+        except ValueError:
             continue
-        inst = (fi.instrument or "").lower()
-        if "epf" in inst:
-            r = POST_TAX_RETURN["epf"]
-        elif "nps" in inst:
-            r = POST_TAX_RETURN["nps"]
-        elif "ppf" in inst:
-            r = POST_TAX_RETURN["ppf"]
-        else:
-            continue
-        fv = v * ((1 + r) ** years_to_retire)
-        fv_total += fv
-        rows.append({"label": f"{fi.instrument} (today ₹{round(v):,})",
-                     "rate": round(r, 4), "fv_at_retirement": round(fv)})
-    return fv_total, rows
+    return None
+
+
+def _spouse_fractional_age_and_le(
+    plan: PlanState, today: datetime
+) -> tuple[Optional[float], Optional[int]]:
+    """Spouse's fractional age + life expectancy from the second Person row.
+    Returns (None, None) when no spouse is recorded so the retirement corpus
+    falls back to the self-lifetime horizon."""
+    persons = plan.assumptions.persons or []
+    if len(persons) < 2:
+        return None, None
+    spouse = persons[1]
+    le = int(spouse.life_expectancy) if spouse.life_expectancy else None
+    age = _age_from_dob(spouse.date_of_birth, today)
+    return age, le
 
 
 def _spouse_age_and_life_expectancy(
@@ -887,10 +1050,21 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
 
     fsi = plan.freedom_score_inputs
     pd = plan.personal_details
-    current_year = datetime.now().year
-    current_age = fsi.age or 30
+    now = datetime.now()
+    current_year = now.year
     retirement_age = pd.retirement_age_target or 60
     life_expectancy = (plan.assumptions.persons[0].life_expectancy if plan.assumptions.persons else 85)
+    # Fractional current age from DOB (Excel uses `(today−DOB)/365.25`) so the
+    # retirement corpus reconciles to the rupee. Falls back to the integer
+    # `fsi.age` when no DOB is on file.
+    current_age_frac = _age_from_dob(
+        (plan.assumptions.persons[0].date_of_birth if plan.assumptions.persons else None)
+        or pd.date_of_birth,
+        now,
+    )
+    current_age = current_age_frac if current_age_frac is not None else float(fsi.age or 30)
+    # Calendar year the client retires (used to classify post-retirement goals).
+    retirement_year = current_year + round(max(0.0, retirement_age - current_age))
 
     monthly_income = fsi.monthly_income or 0
     monthly_expenses = fsi.monthly_expenses or 0
@@ -922,8 +1096,17 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     asset_pool = _build_asset_pool(plan)
     goal_blocks: list[dict] = []
     goal_outflows_by_year: dict[int, float] = {}
+    # Non-retirement, one-time goals whose target year falls AT/AFTER the
+    # retirement year are post-retirement spends (Excel `Retirement Plan`
+    # E26-E29 / `10_Financial_Goals` row 20 — e.g. a legacy gift). They are
+    # routed into the retirement corpus (FV + their own SIP) rather than the
+    # regular goal-funding list, so they're funded once, not twice.
+    post_retirement_one_time: list[Goal] = []
     for g in plan.financial_goals:
         if g.kind == "retirement":
+            continue
+        if (g.target_year or 0) >= retirement_year:
+            post_retirement_one_time.append(g)
             continue
         block = compute_goal_block(g, current_year=current_year, asset_pool=asset_pool)
         goal_blocks.append(block)
@@ -1074,18 +1257,18 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
             unit="INR/mo",
         ))
 
-    # ── Retirement corpus (gross) ─────────────────────────────────────
-    # Excel uses the equity_hybrid (10.5%) post-tax return for the
-    # retirement-corpus discounting. See Retirement Plan tab cell E23 →
-    # Assumptions sheet E22.
+    # ── Retirement corpus (Excel `Retirement Plan` tab) ───────────────
+    # Inputs that mirror the firm's workbook, cell-for-cell:
+    #   • discount the corpus annuity at 8.75% (Assumptions E23, conservative)
+    #   • fund the SIP at 10.5% (Assumptions E22, hybrid)
+    #   • size the horizon to the SPOUSE's lifetime (E14/E15)
+    #   • retirement living expense excludes children's school fees (E18)
+    #   • add a one-time post-retirement spend (E26-E29) when one is present
     #
-    # PLANNED retirement annual expense: if the household entered a
-    # `kind=retirement` goal with a target_amount, that's the firm's
-    # planned ANNUAL POST-RETIREMENT spend (per the Excel template's
-    # "Retirement Cost" row, nature=Annual). Use it instead of current
-    # monthly_expenses × 12, because retirement spend is usually LOWER
-    # (no EMI, no school fees, less lifestyle). Falling through to
-    # current expenses systematically over-estimates the corpus.
+    # PLANNED retirement annual expense (E18 in today's rupees): prefer an
+    # advisor-entered `kind=retirement` goal target; otherwise derive it
+    # from current living expenses MINUS children's school fees (the firm's
+    # default — school fees fall away once children are independent).
     retire_goal = next(
         (g for g in plan.financial_goals if g.kind == "retirement" and (g.target_amount or 0) > 0),
         None,
@@ -1095,7 +1278,6 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         if retire_goal.is_target_in_today_money:
             retire_annual_expense_today = planned_annual
         else:
-            # target_amount was given in target-year rupees; discount back to today
             infl_g = (
                 retire_goal.inflation_assumed
                 if retire_goal.inflation_assumed is not None
@@ -1106,102 +1288,105 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         trace.append(_trace(
             "Planned retirement annual expense (from retirement goal)",
             "kind=retirement goal's target_amount, discounted to today's rupees if needed",
-            {"goal_name": retire_goal.goal_name,
-             "raw_target": planned_annual,
+            {"goal_name": retire_goal.goal_name, "raw_target": planned_annual,
              "is_today_money": retire_goal.is_target_in_today_money},
             round(retire_annual_expense_today),
             unit="INR/yr",
         ))
     else:
-        # No retirement goal entered → default to current expenses
-        # carried into retirement (conservative).
-        retire_annual_expense_today = annual_expenses
+        # Excel E18 = (current monthly living expense − children's education) × 12.
+        school_fees_monthly = float(plan.monthly_expenses.school_fees or 0)
+        retire_monthly = max(0.0, monthly_expenses - school_fees_monthly)
+        retire_annual_expense_today = retire_monthly * 12
+        trace.append(_trace(
+            "Retirement living expense today (current expense − school fees)",
+            "(monthly_expenses − school_fees) × 12",
+            {"monthly_expenses": round(monthly_expenses),
+             "school_fees": round(school_fees_monthly)},
+            round(retire_annual_expense_today),
+            unit="INR/yr",
+        ))
+
+    # Spouse horizon (E14/E15) — present only when a spouse Person is on file.
+    spouse_age_frac, spouse_le = _spouse_fractional_age_and_le(plan, now)
+
+    years_to_retire = max(0.0, retirement_age - current_age)
+    n_rec = round(years_to_retire)
+
+    # One-time post-retirement spend (E26-E29) from goals routed out above.
+    ot_today, ot_years, ot_infl = 0.0, None, None
+    if post_retirement_one_time:
+        rep = max(post_retirement_one_time, key=lambda g: float(g.target_amount or 0))
+        for g in post_retirement_one_time:
+            cost = float(g.target_amount or 0)
+            if g.is_target_in_today_money is False and g.target_year:
+                infl_g = g.inflation_assumed if g.inflation_assumed is not None else (plan.assumptions.inflation or 0.07)
+                cost = cost / ((1 + infl_g) ** max(0, g.target_year - current_year))
+            ot_today += cost
+        ot_years = max(0, (rep.target_year or retirement_year) - current_year)
+        ot_infl = rep.inflation_assumed if rep.inflation_assumed is not None else (plan.assumptions.inflation or 0.07)
+        trace.append(_trace(
+            "Post-retirement one-time spend routed into corpus",
+            "Σ today-cost of non-retirement one-time goals with target_year ≥ retirement year",
+            {"goals": [g.goal_name for g in post_retirement_one_time],
+             "horizon_years": ot_years},
+            round(ot_today),
+            unit="INR",
+        ))
+
+    # Projected corpus from assets LEFT OVER after goal allocation that are
+    # retirement-appropriate (EPF / PPF / NPS), grown at the PPF rate (Excel
+    # `10_Financial_Goals!I19` = Assumptions E26 = 7.1%). Using the leftover
+    # — not the gross holdings — avoids double-counting assets already
+    # earmarked to fund the education / house goals above.
+    retirement_earmarked_today = float(
+        (asset_pool.get("epf", 0) or 0)
+        + (asset_pool.get("ppf", 0) or 0)
+        + (asset_pool.get("pension", 0) or 0)
+    )
+    projected_corpus_rate = POST_TAX_RETURN["ppf"]  # 7.1%
+    projected_existing_corpus_fv = (
+        abs(excel_fv(projected_corpus_rate, n_rec, 0, -retirement_earmarked_today))
+        if retirement_earmarked_today > 0 and n_rec > 0 else 0.0
+    )
+
+    # Ongoing SIPs already flowing toward retirement (Excel E43), netted off
+    # the gross SIP to give the *additional* monthly commitment.
+    mi_for_fv = plan.monthly_investments
+    ongoing_retirement_sip = 0.0
+    if mi_for_fv:
+        ongoing_retirement_sip = float(
+            (mi_for_fv.mutual_fund_sip or 0) + (mi_for_fv.nps or 0)
+            + (mi_for_fv.ppf or 0) + (mi_for_fv.rd or 0)
+            + (mi_for_fv.direct_equity or 0) + (mi_for_fv.other or 0)
+        )
 
     retirement = compute_retirement_corpus(
         current_age=current_age,
         retirement_age=retirement_age,
         life_expectancy=life_expectancy,
-        current_annual_expenses=retire_annual_expense_today,
+        retirement_annual_expenses_today=retire_annual_expense_today,
         inflation=plan.assumptions.inflation or 0.07,
-        post_retire_return=POST_TAX_RETURN["equity_hybrid"],
+        corpus_discount_return=POST_TAX_RETURN["equity_conservative"],  # 8.75% (Assumptions E23)
+        spouse_current_age=spouse_age_frac,
+        spouse_life_expectancy=spouse_le,
+        one_time_spend_today=ot_today,
+        one_time_spend_years=ot_years,
+        one_time_spend_inflation=ot_infl,
+        projected_existing_corpus_fv=projected_existing_corpus_fv,
+        sip_funding_return=POST_TAX_RETURN["equity_hybrid"],  # 10.5% (Assumptions E22)
+        ongoing_retirement_sip_monthly=ongoing_retirement_sip,
     )
     retirement["used_planned_retirement_expense"] = bool(retire_goal is not None)
-    retirement["retirement_annual_expense_today"] = round(retire_annual_expense_today)
-    # Net existing PROVISIONS out of the gross corpus to find the
-    # actual shortfall the new SIP needs to close. Two pieces:
-    #   (a) explicitly retirement-tagged assets (EPF/PPF/NPS) compounded
-    #       to retirement at their per-class rates. (Existing Finding 4
-    #       logic — Excel's Assumptions sheet rows 94-103.)
-    #   (b) the FUTURE VALUE of ongoing monthly SIPs over the working
-    #       horizon, compounded at the equity-hybrid post-tax rate.
-    #       Without this, the Retirement Glide reports a huge "additional
-    #       SIP needed" even though the household's existing SIPs are
-    #       already going to wealth — contradicting the goal-scenarios
-    #       view which already credits existing SIPs to goals.
-    years_to_retire = max(0, retirement_age - current_age)
-    ret_assets_fv, ret_assets_rows = _retirement_tagged_assets_fv(
-        plan, years_to_retire=years_to_retire
-    )
-    retirement["existing_retirement_assets_fv"] = round(ret_assets_fv)
-    retirement["existing_retirement_assets_breakdown"] = ret_assets_rows
-
-    # FV of existing SIPs run to retirement. Standard FV-of-annuity:
-    #     FV = PMT × ((1+r)^n − 1) / r
-    # Use annual roi compounded over n years, with annual cashflow =
-    # monthly_sip × 12 (close enough; the exact monthly compounding only
-    # adds ~2% precision over decades).
-    mi_for_fv = plan.monthly_investments
-    monthly_sip_for_fv = 0.0
-    if mi_for_fv:
-        monthly_sip_for_fv = float(
-            (mi_for_fv.mutual_fund_sip or 0) + (mi_for_fv.nps or 0)
-            + (mi_for_fv.ppf or 0) + (mi_for_fv.rd or 0)
-            + (mi_for_fv.direct_equity or 0) + (mi_for_fv.other or 0)
-        )
-    sip_pre_retire_rate = POST_TAX_RETURN["equity_hybrid"]
-    if monthly_sip_for_fv > 0 and years_to_retire > 0 and sip_pre_retire_rate > 0:
-        annual_sip = monthly_sip_for_fv * 12
-        existing_sip_fv = annual_sip * (
-            ((1 + sip_pre_retire_rate) ** years_to_retire - 1) / sip_pre_retire_rate
-        )
-    else:
-        existing_sip_fv = 0.0
-    retirement["existing_sip_fv_at_retirement"] = round(existing_sip_fv)
-    retirement["monthly_sip_committed"] = round(monthly_sip_for_fv)
-
-    # Total provision = retirement-tagged assets + FV of ongoing SIPs
-    total_provision_fv = ret_assets_fv + existing_sip_fv
-    retirement["total_provision_at_retirement"] = round(total_provision_fv)
-
-    corpus_shortfall = max(0.0, retirement["corpus_required"] - total_provision_fv)
-    retirement["corpus_shortfall_after_existing"] = round(corpus_shortfall)
-    retirement["computation_trace"].append(_trace(
-        "Net existing provisions out of corpus need",
-        "shortfall = corpus_required − Σ FV(EPF/NPS/PPF) − FV(ongoing SIPs)",
-        {"corpus_required": retirement["corpus_required"],
-         "retirement_assets_fv": round(ret_assets_fv),
-         "existing_sip_fv": round(existing_sip_fv)},
-        round(corpus_shortfall),
-    ))
-
-    # Additional monthly SIP needed to close the shortfall — Excel
-    # `Retirement Plan!B48` = PMT(post_tax_roi/12, years_to_retire*12, , -shortfall).
-    n_months = years_to_retire * 12
-    if corpus_shortfall > 0 and n_months > 0 and sip_pre_retire_rate > 0:
-        sip_required = abs(excel_pmt(sip_pre_retire_rate / 12, n_months, 0, -corpus_shortfall))
-    else:
-        sip_required = 0.0
-    retirement["required_monthly_sip"] = round(sip_required)
-    retirement["sip_rate_used"] = round(sip_pre_retire_rate, 4)
-    retirement["computation_trace"].append(_trace(
-        "Additional monthly SIP needed to close retirement shortfall",
-        "PMT(roi/12, years_to_retire*12, , -shortfall)",
-        {"roi": round(sip_pre_retire_rate, 4),
-         "years_to_retire": years_to_retire,
-         "shortfall": round(corpus_shortfall)},
-        round(sip_required),
-        unit="INR/mo",
-    ))
+    # Back-compat keys the canvas / report still read.
+    retirement["existing_retirement_assets_fv"] = round(projected_existing_corpus_fv)
+    retirement["existing_retirement_assets_breakdown"] = [
+        {"label": bucket.upper(), "today_value": round(asset_pool.get(bucket, 0) or 0)}
+        for bucket in ("epf", "ppf", "pension")
+        if (asset_pool.get(bucket, 0) or 0) > 0
+    ]
+    retirement["monthly_sip_committed"] = round(ongoing_retirement_sip)
+    retirement["existing_sip_fv_at_retirement"] = 0  # SIPs now netted off the PMT, not FV'd into provision
 
     # ── Insurance need ─────────────────────────────────────────────────
     loans = plan.loans_liabilities
@@ -1355,9 +1540,9 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         fa_transfers_out_by_year[m_year] = fa_transfers_out_by_year.get(m_year, 0) + val
 
     yoy = compute_yoy_cashflow(
-        horizon_years=min(40, max(life_expectancy - current_age, 10)),
+        horizon_years=int(min(40, max(life_expectancy - current_age, 10))),
         start_year=current_year,
-        start_age=current_age,
+        start_age=int(round(current_age)),
         retirement_age=retirement_age,
         monthly_income_employment=income_emp_monthly,
         monthly_income_business=income_biz_monthly,
@@ -1385,7 +1570,7 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     on_track = required_savings_rate <= gross_savings_rate
 
     summary = {
-        "current_age": current_age,
+        "current_age": round(current_age, 1),
         "retirement_age": retirement_age,
         "life_expectancy": life_expectancy,
         "annual_income": round(annual_income),
