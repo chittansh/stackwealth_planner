@@ -207,6 +207,13 @@ type CfpRetirementBlock = {
   // Section-1 extras
   annual_living_expense_current?: number;
   self_life_expectancy?: number;
+  // SIP purpose split
+  sip_purpose_breakdown?: {
+    retirement_monthly: number;
+    goal_monthly: number;
+    total_monthly: number;
+    source: 'tagged' | 'instrument_heuristic';
+  };
   // Section-3 step-up plan
   stepup_plan?: StepUpPlan;
 };
@@ -236,6 +243,8 @@ type StepUpPlan = {
   excess_or_gap: number;
   excess_pct: number;
   reaches_goal: boolean;
+  required_first_year_contribution: number;
+  required_first_year_monthly: number;
   rows: StepUpRow[];
 };
 
@@ -374,7 +383,7 @@ function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock
           </div>
           {ongoingSip > 0 && (
             <div className="flex justify-between">
-              <span className="text-zinc-500">Less: SIPs already ongoing</span>
+              <span className="text-zinc-500">Less: retirement SIPs already ongoing</span>
               <span className="text-zinc-700 tabular-nums">− {formatINR(ongoingSip)} /mo</span>
             </div>
           )}
@@ -382,6 +391,13 @@ function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock
             <span className="text-zinc-600 font-medium">Additional monthly SIP to reach goal</span>
             <span className="text-zinc-900 font-semibold tabular-nums">{formatINR(additionalSip)} /mo</span>
           </div>
+          {block.sip_purpose_breakdown && block.sip_purpose_breakdown.goal_monthly > 0 && (
+            <div className="text-[10px] text-zinc-400 pt-1">
+              Only retirement-directed SIPs are netted here. Of {formatINR(block.sip_purpose_breakdown.total_monthly)}/mo
+              total SIPs, {formatINR(block.sip_purpose_breakdown.goal_monthly)}/mo is earmarked for other goals
+              {block.sip_purpose_breakdown.source === 'instrument_heuristic' ? ' (inferred from instrument type)' : ''}.
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -415,6 +431,15 @@ function StepUpTable({ plan, retireAge }: { plan: StepUpPlan; retireAge: number 
           value={`${formatINR(Math.abs(plan.excess_or_gap), { compact: true })} (${surplus ? '+' : '−'}${pct.toFixed(1)}%)`}
           accent={surplus ? 'good' : 'bad'}
         />
+      </div>
+
+      <div className="mb-4 rounded-md bg-emerald-50/60 border border-emerald-100 px-3 py-2.5 text-xs flex items-center justify-between">
+        <span className="text-zinc-600">
+          Required starting SIP to reach the goal (stepped up {(plan.step_up_pct * 100).toFixed(0)}%/yr)
+        </span>
+        <span className="text-emerald-800 font-semibold tabular-nums">
+          {formatINR(plan.required_first_year_monthly)}/mo
+        </span>
       </div>
 
       <div className="overflow-x-auto">

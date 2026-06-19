@@ -630,6 +630,21 @@ def compute_retirement_stepup(
 
     # Row 53 — current earmarked corpus grown to retirement.
     fv_corpus = abs(excel_fv(rate, years_to_retire, 0, -current_corpus_today)) if current_corpus_today > 0 else 0.0
+
+    # Closed-form solve: the starting annual contribution that — stepped up at
+    # `step_up_pct` and grown to retirement at `rate` — exactly closes the gap
+    # left after the current corpus. Each ₹1 of starting contribution grows to
+    #   S = Σ_{i=0..n-1} (1+step)^i · (1+rate)^(years_to_retire − i)
+    # so required_first = (corpus_needed − fv_corpus) / S.
+    step_growth_multiplier = sum(
+        ((1 + step_up_pct) ** i) * ((1 + rate) ** (years_to_retire - i))
+        for i in range(n)
+    )
+    gap_after_corpus = max(0.0, corpus_needed - fv_corpus)
+    required_first_year = (
+        gap_after_corpus / step_growth_multiplier
+        if step_growth_multiplier > 0 else 0.0
+    )
     cumulative = fv_corpus
     rows.append({
         "label": "Current corpus → FV at retirement",
@@ -683,6 +698,9 @@ def compute_retirement_stepup(
         "excess_or_gap": round(excess),
         "excess_pct": round(excess / corpus_needed, 4) if corpus_needed else 0.0,
         "reaches_goal": excess >= 0,
+        # Solved: the starting SIP that exactly reaches the corpus with this step-up.
+        "required_first_year_contribution": round(required_first_year),
+        "required_first_year_monthly": round(required_first_year / 12),
         "rows": rows,
     }
 
@@ -1078,6 +1096,29 @@ def _holdings_weighted_post_tax_roi(plan: PlanState) -> tuple[float, dict[str, f
     return weighted, breakdown
 
 
+def _sip_by_purpose(plan: PlanState) -> tuple[float, float, float, bool]:
+    """Split monthly SIPs by PURPOSE → (retirement, goal, total, is_explicit).
+
+    Prefers the per-line `recurring_investments` list (which carries the
+    "For Retirement" / "For House Purchase" intent). Retirement-purpose SIPs
+    are netted against the retirement corpus (Excel E43); goal/general SIPs
+    are credited toward financial goals. When no tagged list exists, falls
+    back to an instrument heuristic — NPS/PPF/VPF-in-`other` are retirement
+    vehicles; MF/RD/direct-equity are goal-directed."""
+    ri = plan.recurring_investments or []
+    if ri:
+        ret = sum(float(r.monthly_amount or 0) for r in ri if r.purpose == "retirement")
+        goal = sum(float(r.monthly_amount or 0) for r in ri if r.purpose in ("goal", "general"))
+        total = sum(float(r.monthly_amount or 0) for r in ri)
+        return ret, goal, total, True
+    mi = plan.monthly_investments
+    if not mi:
+        return 0.0, 0.0, 0.0, False
+    ret = float((mi.nps or 0) + (mi.ppf or 0) + (mi.other or 0))
+    goal = float((mi.mutual_fund_sip or 0) + (mi.rd or 0) + (mi.direct_equity or 0))
+    return ret, goal, ret + goal, False
+
+
 def _age_from_dob(dob: Optional[str], today: datetime) -> Optional[float]:
     """Fractional age in years from a date-of-birth string. Mirrors the
     firm Excel's `(today − DOB) / 365.25` so ages like 35.79 reconcile to
@@ -1220,17 +1261,11 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     # SIP gets the largest share of existing contributions. Each goal's
     # `incremental_sip_monthly` becomes the NEW commitment needed on top
     # of what's already running.
-    mi_for_credit = plan.monthly_investments
-    existing_sip_for_goals = 0.0
-    if mi_for_credit:
-        existing_sip_for_goals = float(
-            (mi_for_credit.mutual_fund_sip or 0)
-            + (mi_for_credit.nps or 0)
-            + (mi_for_credit.ppf or 0)
-            + (mi_for_credit.rd or 0)
-            + (mi_for_credit.direct_equity or 0)
-            + (mi_for_credit.other or 0)
-        )
+    # Split SIPs by purpose: only GOAL/general SIPs are credited to goals;
+    # retirement-purpose SIPs (NPS/VPF/...) are netted against the retirement
+    # corpus instead (below), so neither is double-counted.
+    sip_retirement, sip_goal, sip_total, sip_purpose_explicit = _sip_by_purpose(plan)
+    existing_sip_for_goals = sip_goal
     if existing_sip_for_goals > 0 and total_required_sip > 0:
         # Allocate up to each goal's required amount (a goal can't be
         # "over-funded" by existing SIPs — surplus credit stays in the
@@ -1285,13 +1320,9 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     #   2. Cashflow sustainability — surplus_pre_sip is the total room
     #      for all SIPs combined. If existing SIPs already exceed it,
     #      the household is funding the gap from savings/bonus.
-    mi = plan.monthly_investments
-    existing_sip_monthly = 0.0
-    if mi:
-        existing_sip_monthly = float(
-            (mi.mutual_fund_sip or 0) + (mi.nps or 0) + (mi.ppf or 0)
-            + (mi.rd or 0) + (mi.direct_equity or 0) + (mi.other or 0)
-        )
+    # Total ongoing SIP (all purposes) — this is what the household's
+    # cashflow surplus has to absorb, regardless of which goal it funds.
+    existing_sip_monthly = sip_total
     surplus_pre_sip = monthly_income - monthly_expenses - monthly_emi
     surplus_post_existing_sip = surplus_pre_sip - existing_sip_monthly
     affordable_for_new_sip = max(0.0, surplus_post_existing_sip)
@@ -1438,16 +1469,11 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         if retirement_earmarked_today > 0 and n_rec > 0 else 0.0
     )
 
-    # Ongoing SIPs already flowing toward retirement (Excel E43), netted off
-    # the gross SIP to give the *additional* monthly commitment.
-    mi_for_fv = plan.monthly_investments
-    ongoing_retirement_sip = 0.0
-    if mi_for_fv:
-        ongoing_retirement_sip = float(
-            (mi_for_fv.mutual_fund_sip or 0) + (mi_for_fv.nps or 0)
-            + (mi_for_fv.ppf or 0) + (mi_for_fv.rd or 0)
-            + (mi_for_fv.direct_equity or 0) + (mi_for_fv.other or 0)
-        )
+    # Ongoing SIPs already flowing toward RETIREMENT (Excel E43), netted off
+    # the gross SIP to give the *additional* monthly commitment. Only
+    # retirement-purpose SIPs count here — a SIP earmarked "For House
+    # Purchase" must not reduce the retirement ask (see _sip_by_purpose).
+    ongoing_retirement_sip = sip_retirement
 
     retirement = compute_retirement_corpus(
         current_age=current_age,
@@ -1478,6 +1504,13 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     # Section-1 extras the firm sheet shows (E17 current living expense, E12 self LE).
     retirement["annual_living_expense_current"] = round(annual_expenses)
     retirement["self_life_expectancy"] = life_expectancy
+    # SIP purpose split — how the ongoing-SIP figure was derived.
+    retirement["sip_purpose_breakdown"] = {
+        "retirement_monthly": round(sip_retirement),
+        "goal_monthly": round(sip_goal),
+        "total_monthly": round(sip_total),
+        "source": "tagged" if sip_purpose_explicit else "instrument_heuristic",
+    }
 
     # ── Retirement Plan §3 — step-up investments table (rows 50-78) ─────
     # Models the client's CURRENT retirement contributions stepped up each

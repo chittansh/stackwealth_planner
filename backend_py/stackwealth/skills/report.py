@@ -1652,6 +1652,7 @@ def _retirement_stepup_block(sp: dict | None) -> str:
         <tr style="font-weight:600;background:#f4f4f5;"><td>Projected corpus at retirement</td><td class="num">{_fmt_inr(sp['projected_corpus_at_retirement'])}</td></tr>
         <tr><td>Corpus needed</td><td class="num">{_fmt_inr(sp['corpus_needed'])}</td></tr>
         <tr style="font-weight:600;"><td>{'Surplus' if surplus else 'Gap'}</td><td class="num">{_fmt_inr(abs(sp['excess_or_gap']))} ({'+' if surplus else '−'}{pct:.1f}%)</td></tr>
+        <tr style="font-weight:600;background:#eef6ee;"><td>Required starting SIP to reach goal (with {sp['step_up_pct']*100:.0f}%/yr step-up)</td><td class="num">{_fmt_inr(sp['required_first_year_monthly'])}/mo</td></tr>
       </tbody>
     </table>
     <table>

@@ -173,6 +173,24 @@ class MonthlyInvestments(StrictModel):
     other: Optional[float] = None
 
 
+class RecurringInvestment(StrictModel):
+    """One line of the firm's `5_Recurring_Investments` sheet, WITH its
+    purpose. The flat `MonthlyInvestments` aggregate loses the per-line
+    "For Retirement" / "For House Purchase" intent from the Remarks column;
+    this list preserves it so the CFP can net retirement-directed SIPs
+    against the retirement corpus (Excel E43) without sweeping in SIPs that
+    are earmarked for other goals."""
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    investment_type: Optional[str] = None       # "Mutual Fund SIP", "NPS", "VPF", ...
+    monthly_amount: Optional[float] = None
+    # What the SIP is FOR. "retirement" → netted against the retirement
+    # corpus; "goal" → credited to financial goals; "general"/"emergency"
+    # → neither (treated as flexible savings).
+    purpose: Literal["retirement", "goal", "emergency", "general"] = "general"
+    linked_goal: Optional[str] = None            # free-text goal name when purpose="goal"
+    remarks: Optional[str] = None
+
+
 class LiquidCapital(StrictModel):
     savings_account_balance: Optional[float] = None
     idle_cash_for_investment: Optional[float] = None
@@ -632,6 +650,7 @@ class PlanState(StrictModel):
     real_estate: list[RealEstateHolding] = Field(default_factory=list)
     gold: list[GoldHolding] = Field(default_factory=list)
     monthly_investments: MonthlyInvestments = Field(default_factory=MonthlyInvestments)
+    recurring_investments: list[RecurringInvestment] = Field(default_factory=list)
     liquid_capital: LiquidCapital = Field(default_factory=LiquidCapital)
     emergency_fund: EmergencyFund = Field(default_factory=EmergencyFund)
     loans_liabilities: Liabilities = Field(default_factory=Liabilities)
