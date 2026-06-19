@@ -2277,18 +2277,9 @@ def _sandeep_s8_future(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     else:
         stress = '<p class="muted">Monte Carlo not yet run — invoke `montecarlo_run` to populate.</p>'
 
-    # 10-15 year trajectory
-    milestones = []
-    for offset in (0, 2, 4, 7, 9, 10, 12, 14):
-        idx = min(offset, len(yoy) - 1)
-        r = yoy[idx]
-        milestones.append(
-            f'<tr><td class="num">{r["year"]}</td><td class="num">{r["age"]}</td>'
-            f'<td class="num">{_fmt_lakhs(r["net_worth"])}</td>'
-            f'<td>{_h(_milestone_for_year(r["year"], plan))}</td></tr>'
-        )
-    traj_rows = "".join(milestones)
-
+    # The 10–15 year wealth trajectory lived here; it's now covered in full by
+    # the "Net Worth Trajectory" section at the top of the report (current vs
+    # suggested, every year), so this duplicate has been removed.
     return f"""<section class="page">
   <h2>SECTION 8 — FUTURE-PROOFING & SCENARIO ANALYSIS</h2>
 
@@ -2297,26 +2288,7 @@ def _sandeep_s8_future(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
 
   <h3>8.2  Stress Test Scenarios</h3>
   {stress}
-
-  <h3>8.3  10–15 Year Wealth Trajectory (Base Case)</h3>
-  <table>
-    <thead><tr><th class="num">Year</th><th class="num">Age</th><th class="num">Net Worth</th><th>Key Milestone</th></tr></thead>
-    <tbody>{traj_rows}</tbody>
-  </table>
 </section>"""
-
-
-def _milestone_for_year(year: int, plan: PlanState) -> str:
-    """Match a goal target_year to this calendar year if any."""
-    for g in plan.financial_goals:
-        if g.target_year == year:
-            return f"Goal triggered: {g.goal_name}"
-    pd = plan.personal_details
-    fsi = plan.freedom_score_inputs
-    retire_year = (datetime.now().year + max(0, (pd.retirement_age_target or 60) - (fsi.age or 30)))
-    if year == retire_year:
-        return "Retirement — corpus deployed"
-    return "On track"
 
 
 def _sandeep_s9_roadmap(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
