@@ -618,6 +618,10 @@ class ComputedSnapshot(StrictModel):
     # canvas, the PDF report, and the agent all see the same numbers the
     # firm's `CFP_ng_080626.xlsx` model would produce.
     cfp: Optional[dict] = None
+    # AI "suggested" optimisation layer (six-lever engine) — see
+    # skills/suggestions.py. Loose dict (like `cfp`) so the canvas/report/
+    # agent read the same shape without a strict round-trip.
+    suggestions: Optional[dict] = None
 
 
 class ScenarioOp(StrictModel):

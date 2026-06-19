@@ -163,6 +163,12 @@ export async function planSet(id: string, path: string, value: unknown) {
   }).then((r) => r.json());
 }
 
+export async function fetchSuggestions(id: string): Promise<unknown> {
+  const r = await fetch(`${BASE}/api/skill/suggestions/${id}`, { method: 'POST' });
+  if (!r.ok) throw new Error(`fetchSuggestions ${r.status}`);
+  return r.json();
+}
+
 export async function resetChat(id: string, chatId?: string) {
   const qs = chatId ? `?chat_id=${encodeURIComponent(chatId)}` : '';
   return fetch(`${BASE}/api/chat/${id}/reset${qs}`, { method: 'POST' }).then((r) => r.json());

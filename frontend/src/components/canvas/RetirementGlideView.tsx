@@ -4,6 +4,7 @@ import { Area, AreaChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YA
 
 import type { PlanState } from '@/types/plan-state';
 import { formatINR } from '@/lib/utils';
+import { SuggestedSection } from './SuggestedSection';
 
 /**
  * Retirement Glide — a dedicated view that zooms the net-worth trajectory on
@@ -139,6 +140,8 @@ export function RetirementGlideView({ plan }: { plan: PlanState | null }) {
           </tbody>
         </table>
       </div>
+
+      <SuggestedSection plan={plan} domain="retirement" />
     </div>
   );
 }

@@ -642,6 +642,30 @@ async def confirm_field(args: dict[str, Any]) -> dict[str, Any]:
 # ── scenarios ──────────────────────────────────────────────────────────────
 
 
+def simulate_mutation(plan: PlanState, mutation: dict | None) -> dict:
+    """Apply a ScenarioMutation (dict with `ops`) to a COPY of the plan and
+    return the recomputed `computed` snapshot — without persisting anything.
+    Shared core of `pin()`; used by the suggestions engine to project the
+    effect of an optimisation (suggested net-worth / cashflow / retirement)."""
+    cloned = _to_dict(plan)
+    if mutation:
+        for op in mutation.get("ops", []):
+            if op["op"] == "set":
+                set_path(cloned, op["path"], op.get("value"))
+            elif op["op"] == "add" and op.get("row") is not None:
+                list_ = get_path(cloned, op["path"]) or []
+                set_path(cloned, op["path"], list_ + [op["row"]])
+            elif op["op"] == "remove" and op.get("id"):
+                list_ = get_path(cloned, op["path"]) or []
+                set_path(
+                    cloned,
+                    op["path"],
+                    [r for r in list_ if isinstance(r, dict) and r.get("id") != op["id"]],
+                )
+    cloned = recompute(cloned)
+    return cloned["computed"]
+
+
 async def pin(args: dict[str, Any]) -> dict[str, Any]:
     plan = await get_plan(args["household_id"])
     if not plan:

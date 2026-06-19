@@ -453,6 +453,67 @@ export type ComputedSnapshot = {
   debt_paydown?: DebtPaydownOutput;
   milestone_pins: MilestonePin[];
   cfp?: CFPSnapshot | null;
+  suggestions?: SuggestionsSnapshot | null;
+};
+
+export type SuggestionLever = {
+  lever: 'increase_sip' | 'delay_goal' | 'reduce_value' | 'increase_income' | 'liquidate_assets' | 'lumpsum';
+  title: string;
+  change: string;
+  rationale: string;
+  feasible: boolean;
+  impact: Record<string, unknown>;
+};
+
+export type SuggestedGoalRow = {
+  goal_name: string;
+  target_year: number;
+  required_sip_monthly: number;
+  existing_sip_monthly: number;
+  shortfall_monthly: number;
+  funded_pct: number | null;
+  levers: SuggestionLever[];
+};
+
+export type SuggestionsSnapshot = {
+  generated_at: string;
+  has_gaps: boolean;
+  recommended: {
+    summary: string;
+    levers_used: string[];
+    mutation: ScenarioMutation;
+    impact: { headline_at_horizon?: number; headline_delta?: number; baseline_headline?: number };
+  };
+  domains: {
+    cashflow: {
+      title: string;
+      monthly_surplus: number;
+      monthly_existing_sip: number;
+      affordable_new_sip: number;
+      total_required_incremental_sip: number;
+      sip_shortfall_monthly: number;
+      is_affordable: boolean;
+      levers: SuggestionLever[];
+    };
+    goals: { title: string; goals: SuggestedGoalRow[] };
+    retirement: {
+      title: string;
+      corpus_required: number;
+      provisioned: number;
+      shortfall: number;
+      required_sip_monthly: number;
+      funded_pct: number;
+      levers: SuggestionLever[];
+      on_track: boolean;
+    };
+  };
+  nudges: { lever: string; title: string; question: string }[];
+  suggested: {
+    net_worth_series?: { year: number; value: number }[];
+    headline_at_horizon?: number;
+    retirement_required_sip?: number;
+    retirement_funded_pct?: number;
+  };
 };
 
 export type ScenarioMutation = {

@@ -29,6 +29,7 @@ from .. import config
 from ..db import get_plan
 from ..types import PlanState
 from . import cfp as cfp_skill
+from . import suggestions as suggestions_skill
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -1229,6 +1230,7 @@ def _build_sandeep_html(plan: PlanState) -> str:
         _sandeep_s2_cashflow(plan),
         _sandeep_s3_networth(plan),
         _sandeep_s4_goals(plan, cfp),
+        _sandeep_s4b_suggestions(plan),
         _sandeep_s5_strategy(plan, cfp),
         _sandeep_s6_risk(plan, cfp),
         _sandeep_s7_tax(plan),
@@ -1659,6 +1661,112 @@ def _retirement_stepup_block(sp: dict | None) -> str:
       <thead><tr><th>Age</th><th class="num">Yrs to retire</th><th class="num">Annual contribution</th><th class="num">Step-up</th><th class="num">Total</th><th class="num">FV at retirement</th><th class="num">Cumulative</th></tr></thead>
       <tbody>{body}</tbody>
     </table>"""
+
+
+def _levers_html(levers: list[dict]) -> str:
+    if not levers:
+        return ""
+    items = []
+    for lv in levers:
+        ok = lv.get("feasible", True)
+        mark = "✓" if ok else "✗"
+        cls = "" if ok else ' style="color:#999;"'
+        items.append(
+            f'<li{cls}><strong>{mark} {_h(lv.get("title",""))}:</strong> {_h(lv.get("change",""))}'
+            f'<br/><span class="muted">{_h(lv.get("rationale",""))}</span></li>'
+        )
+    return "<ul>" + "".join(items) + "</ul>"
+
+
+def _sandeep_s4b_suggestions(plan: PlanState) -> str:
+    """Section 4b — the AI 'Suggested' optimisation layer (six-lever engine).
+    Computed fresh so the report always carries it. Three sub-blocks
+    (Suggested Cashflow / Goals / Retirement) + the recommended combined plan
+    + the lumpsum nudge."""
+    try:
+        s = suggestions_skill.compute_suggestions(plan)
+    except Exception:
+        return ""
+    if not s.get("has_gaps"):
+        return """<section class="page">
+  <h2>SECTION 4B — SUGGESTED IMPROVEMENTS</h2>
+  <p>On the current trajectory every goal and the retirement corpus are adequately funded by existing SIPs and assets. No corrective levers are required — keep the current SIPs running and step them up with annual income growth.</p>
+</section>"""
+
+    rec = s.get("recommended", {})
+    impact = rec.get("impact", {})
+    delta = impact.get("headline_delta") or 0
+    rec_html = f"""
+    <div style="background:#eef6ee;border:1px solid #cfe3cf;padding:3mm;border-radius:2mm;margin:2mm 0;">
+      <strong>Recommended combined plan:</strong> {_h(rec.get('summary',''))}.
+      <br/>Projected net-worth impact at horizon: <strong>{('+' if delta>=0 else '')}{_fmt_inr(delta)}</strong>
+      (levers: {_h(', '.join(rec.get('levers_used', [])) or 'none')}).
+    </div>"""
+
+    cf = s["domains"]["cashflow"]
+    cf_html = f"""
+    <h3>Suggested Cashflow</h3>
+    <table>
+      <tbody>
+        <tr><td>Monthly surplus (pre-SIP)</td><td class="num">{_fmt_inr(cf['monthly_surplus'])}</td></tr>
+        <tr><td>Existing SIPs</td><td class="num">{_fmt_inr(cf['monthly_existing_sip'])}</td></tr>
+        <tr><td>Room for new SIP</td><td class="num">{_fmt_inr(cf['affordable_new_sip'])}</td></tr>
+        <tr><td>Total new SIP required (all goals)</td><td class="num">{_fmt_inr(cf['total_required_incremental_sip'])}</td></tr>
+        <tr style="font-weight:600;background:#f4f4f5;"><td>{'Affordable as-is' if cf['is_affordable'] else 'Monthly shortfall to fund every goal'}</td><td class="num">{_fmt_inr(cf['sip_shortfall_monthly'])}</td></tr>
+      </tbody>
+    </table>
+    {_levers_html(cf.get('levers', []))}"""
+
+    goals = s["domains"]["goals"]["goals"]
+    goal_rows = "".join(
+        f'<tr><td>{_h(g["goal_name"])}</td><td class="num">{g["target_year"]}</td>'
+        f'<td class="num">{_fmt_inr(g["required_sip_monthly"])}</td>'
+        f'<td class="num">{_fmt_inr(g["shortfall_monthly"])}</td>'
+        f'<td class="num">{(str(g["funded_pct"])+"%") if g.get("funded_pct") is not None else "—"}</td></tr>'
+        for g in goals
+    )
+    goal_levers = "".join(
+        f'<p style="margin-top:1.5mm;"><strong>{_h(g["goal_name"])}</strong> — ways to close the gap:</p>{_levers_html(g["levers"])}'
+        for g in goals
+    )
+    goals_html = f"""
+    <h3>Suggested Goals</h3>
+    <table>
+      <thead><tr><th>Goal</th><th class="num">Year</th><th class="num">SIP needed</th><th class="num">Shortfall/mo</th><th class="num">Funded</th></tr></thead>
+      <tbody>{goal_rows or '<tr><td colspan="5" class="muted">All goals on track.</td></tr>'}</tbody>
+    </table>
+    {goal_levers}""" if goals else ""
+
+    r = s["domains"]["retirement"]
+    ret_html = f"""
+    <h3>Suggested Retirement Glide</h3>
+    <table>
+      <tbody>
+        <tr><td>Corpus required</td><td class="num">{_fmt_inr(r['corpus_required'])}</td></tr>
+        <tr><td>Provisioned (earmarked assets)</td><td class="num">{_fmt_inr(r['provisioned'])}</td></tr>
+        <tr><td>Funded</td><td class="num">{r['funded_pct']}%</td></tr>
+        <tr style="font-weight:600;background:#f4f4f5;"><td>Additional SIP to close the gap</td><td class="num">{_fmt_inr(r['required_sip_monthly'])}/mo</td></tr>
+      </tbody>
+    </table>
+    {_levers_html(r.get('levers', []))}""" if not r.get("on_track") else """
+    <h3>Suggested Retirement Glide</h3>
+    <p>Retirement is on track at the current contribution level.</p>"""
+
+    nudge = s.get("nudges", [{}])[0]
+    nudge_html = f"""
+    <div style="background:#fff7e6;border:1px solid #f0d9a8;padding:3mm;border-radius:2mm;margin:2mm 0;">
+      <strong>{_h(nudge.get('title',''))}</strong> {_h(nudge.get('question',''))}
+    </div>""" if nudge else ""
+
+    return f"""<section class="page">
+  <h2>SECTION 4B — SUGGESTED IMPROVEMENTS</h2>
+  <p class="muted">How to do better than the as-is plan — concrete, math-backed levers. Guardrails: never delay children's education/marriage; retirement delay capped at age 62; value cuts bounded.</p>
+  {rec_html}
+  {cf_html}
+  {goals_html}
+  {ret_html}
+  {nudge_html}
+</section>"""
 
 
 def _sandeep_s4_goals(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:

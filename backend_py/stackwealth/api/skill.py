@@ -16,6 +16,7 @@ from ..skills.debt import paydown as debt_paydown
 from ..skills.freedom import score as freedom_score
 from ..skills.risk import assess as risk_assess
 from ..skills.scenario import run_monte_carlo
+from ..skills.suggestions import compute_suggestions
 from ..skills.tax import harvest as tax_harvest
 
 router = APIRouter()
@@ -120,3 +121,23 @@ async def cfp(id: str) -> JSONResponse:
     computation_trace. Use this for quick verification or for non-chat
     surfaces that want the math without the agent in the loop."""
     return _json(await run_cfp(id))
+
+
+@router.post("/suggestions/{id}")
+@router.get("/suggestions/{id}")
+async def suggestions(id: str) -> JSONResponse:
+    """AI 'suggested' optimisation layer — the six-lever engine that proposes
+    how to close goal/retirement/cashflow gaps (increase SIP, give a goal more
+    time, trim its value, increase income, liquidate a hard asset, or fold in a
+    lumpsum). Computes, persists to `plan.computed.suggestions`, and returns the
+    snapshot. Powers the 'Suggested ___' canvas sections and the report."""
+    plan = await get_plan(id)
+    if not plan:
+        return _json({"error": "household_not_found"})
+    snapshot = compute_suggestions(plan)
+    plan.computed.suggestions = snapshot
+    try:
+        await save_plan(plan)
+    except Exception:
+        pass  # returning the fresh snapshot matters more than persisting it
+    return _json(snapshot)

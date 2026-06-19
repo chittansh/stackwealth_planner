@@ -1,9 +1,10 @@
 'use client';
 
 import { Area, AreaChart, ResponsiveContainer, XAxis, YAxis, Tooltip, ReferenceDot } from 'recharts';
-import type { PlanState } from '@/types/plan-state';
+import type { PlanState, SuggestionsSnapshot } from '@/types/plan-state';
 import { formatINR } from '@/lib/utils';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { fetchSuggestions } from '@/lib/api';
 import { MilestoneDrawer } from './MilestoneDrawer';
 
 export function NetWorthChart({
@@ -14,6 +15,20 @@ export function NetWorthChart({
   plan: PlanState | null;
 }) {
   const [pinIdx, setPinIdx] = useState<number | null>(null);
+
+  // Suggested-plan overlay — read the persisted snapshot, else fetch once.
+  const persistedSug = (plan?.computed?.suggestions ?? null) as SuggestionsSnapshot | null;
+  const [localSug, setLocalSug] = useState<SuggestionsSnapshot | null>(null);
+  const sug = persistedSug ?? localSug;
+  const hasCfp = !!plan?.computed?.cfp;
+  useEffect(() => {
+    if (persistedSug || localSug || !householdId || !hasCfp) return;
+    fetchSuggestions(householdId)
+      .then((s) => setLocalSug(s as SuggestionsSnapshot))
+      .catch(() => {});
+  }, [householdId, hasCfp, persistedSug, localSug]);
+  const suggestedSeries = sug?.suggested?.net_worth_series ?? [];
+  const recDelta = sug?.recommended?.impact?.headline_delta ?? 0;
 
   const baseline = plan?.computed.net_worth_series ?? [];
   // One series per active scenario. The chips already render every active
@@ -27,6 +42,9 @@ export function NetWorthChart({
     activeScenarios.forEach((s, idx) => {
       row[`scenario_${idx}`] = s.computed.net_worth_series[i]?.value ?? null;
     });
+    if (suggestedSeries.length) {
+      row.suggested = suggestedSeries[i]?.value ?? null;
+    }
     return row;
   });
 
@@ -81,6 +99,18 @@ export function NetWorthChart({
               contentStyle={{ borderRadius: 8, border: '1px solid #e4e4e7', fontSize: 12 }}
             />
             <Area type="monotone" dataKey="baseline" stroke="#52525b" strokeWidth={1.5} fill="url(#grad-baseline)" dot={false} />
+            {suggestedSeries.length > 0 && (
+              <Area
+                type="monotone"
+                dataKey="suggested"
+                stroke="#5f7d56"
+                strokeWidth={1.5}
+                strokeDasharray="5 3"
+                fill="none"
+                dot={false}
+                name="Suggested"
+              />
+            )}
             {activeScenarios.map((_, idx) => {
               const colour = SCENARIO_COLOURS[idx % SCENARIO_COLOURS.length];
               return (
@@ -118,6 +148,20 @@ export function NetWorthChart({
       {mc && (
         <div className="mt-2 text-xs text-zinc-500">
           MC ({mc.paths_count} paths) · P10 age {mc.p10_freedom_age} · P50 {mc.p50_freedom_age} · P90 {mc.p90_freedom_age}
+        </div>
+      )}
+      {sug?.has_gaps && suggestedSeries.length > 0 && (
+        <div className="mt-2 flex items-center justify-between rounded-lg border border-[color:var(--color-accent,#5f7d56)]/30 bg-[color:var(--color-accent,#5f7d56)]/[0.05] px-3 py-2 text-xs">
+          <span className="text-zinc-600">
+            <span className="font-medium text-[color:var(--color-accent,#5f7d56)]">Suggested plan</span>{' '}
+            (dashed): {sug.recommended?.summary}
+          </span>
+          {recDelta !== 0 && (
+            <span className="tabular-nums font-semibold text-emerald-700 whitespace-nowrap ml-3">
+              {recDelta >= 0 ? '+' : ''}
+              {formatINR(recDelta, { compact: true })} at horizon
+            </span>
+          )}
         </div>
       )}
       {pinIdx !== null && pins[pinIdx] && (

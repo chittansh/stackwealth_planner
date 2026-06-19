@@ -23,6 +23,7 @@ from ..skills import knowledge as knowledge_skill
 from ..skills import news as news_skill
 from ..skills import risk as risk_skill
 from ..skills import scenario as scenario_skill
+from ..skills import suggestions as suggestions_skill
 from ..skills import tax as tax_skill
 from ..skills.allocate import compute_allocation
 from ..skills.report import render_plan_pdf
@@ -237,6 +238,21 @@ async def _cfp_plan(**kwargs: Any) -> Any:
     its formula and the inputs that went into it."""
     kwargs = _coerce_kwargs(kwargs)
     return await cfp_skill.run_cfp(kwargs["household_id"])
+
+
+async def _suggest_optimizations(**kwargs: Any) -> Any:
+    """The six-lever 'how to do better' engine. Given the as-is plan, returns
+    actionable ways to close goal/retirement/cashflow gaps — increase SIP, give
+    a goal more time (guardrailed: never child education; retirement only to 62),
+    trim a goal's value, increase income, liquidate a non-primary hard asset, or
+    fold in a lumpsum — plus one recommended combined plan and its projected
+    impact. Persists to `plan.computed.suggestions` for the canvas + report."""
+    kwargs = _coerce_kwargs(kwargs)
+    plan = await get_plan(kwargs["household_id"])
+    if plan is None:
+        return {"error": "household_not_found"}
+    snapshot = suggestions_skill.compute_suggestions(plan)
+    return await _persist_computed(kwargs["household_id"], "suggestions", snapshot)
 
 
 class CashflowArgs(BaseModel):
@@ -618,6 +634,22 @@ def make_tools() -> list[StructuredTool]:
             ),
             args_schema=HouseholdOnlyArgs,
             coroutine=_cfp_plan,
+        ),
+        StructuredTool.from_function(
+            name="suggest_optimizations",
+            description=(
+                "AI 'how to do better' engine — call AFTER the as-is plan/CFP exists to get "
+                "concrete, math-backed ways to close goal/retirement/cashflow gaps. Returns six "
+                "advisor levers per gap (increase SIP; give a goal more time; trim its value; "
+                "increase income; liquidate a non-primary hard asset; fold in a lumpsum), a single "
+                "recommended combined plan with its projected net-worth impact, and a lumpsum "
+                "nudge. Guardrails are enforced server-side: NEVER delay child education/marriage, "
+                "retirement delay capped at age 62, value cuts bounded. Use to populate the "
+                "'Suggested cashflow / goals / retirement' sections and to advise the client. For "
+                "the lumpsum lever you MUST ask the user for the amount/year — never invent it."
+            ),
+            args_schema=HouseholdOnlyArgs,
+            coroutine=_suggest_optimizations,
         ),
         StructuredTool.from_function(
             name="cashflow_project",
