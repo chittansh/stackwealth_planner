@@ -90,15 +90,23 @@ function SuggestedShell({ title, children }: { title: string; children: React.Re
 
 function RecommendedCard({ snap }: { snap: SuggestionsSnapshot }) {
   const rec = snap.recommended;
-  const delta = rec?.impact?.headline_delta ?? 0;
+  const imp = rec?.impact ?? {};
+  const retDelta = imp.net_worth_at_retirement_delta ?? 0;
   return (
     <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 px-4 py-3 text-sm">
       <div className="text-[10px] uppercase tracking-wide text-emerald-700 mb-0.5">Recommended combined plan</div>
       <div className="text-zinc-800">{rec?.summary || 'On track — keep current SIPs running.'}</div>
-      {delta !== 0 && (
+      {retDelta !== 0 && imp.retirement_year && (
         <div className="text-xs text-emerald-800 mt-1 tabular-nums">
-          Projected net-worth impact at horizon: {delta >= 0 ? '+' : ''}
-          {formatINR(delta, { compact: true })}
+          Projected net worth at retirement ({imp.retirement_year}):{' '}
+          {formatINR(imp.net_worth_at_retirement ?? 0, { compact: true })} vs{' '}
+          {formatINR(imp.baseline_net_worth_at_retirement ?? 0, { compact: true })} today&apos;s plan
+          {retDelta > 0 ? ` (+${formatINR(retDelta, { compact: true })})` : ''}
+        </div>
+      )}
+      {rec?.residual_note && (
+        <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-100 rounded px-2 py-1.5 mt-2">
+          {rec.residual_note}
         </div>
       )}
     </div>
@@ -155,10 +163,17 @@ function GoalsBody({ snap }: { snap: SuggestionsSnapshot }) {
       {goals.map((g) => (
         <div key={g.goal_name} className="rounded-lg border border-zinc-200 bg-white p-3">
           <div className="flex items-baseline justify-between mb-1.5">
-            <span className="text-sm font-medium text-zinc-800">{g.goal_name}</span>
+            <span className="text-sm font-medium text-zinc-800">
+              {g.goal_name}
+              {g.is_retirement && (
+                <span className="ml-1.5 text-[9px] uppercase tracking-wide text-[color:var(--color-accent,#5f7d56)] border border-[color:var(--color-accent,#5f7d56)]/40 rounded px-1 py-0.5">
+                  retirement
+                </span>
+              )}
+            </span>
             <span className="text-[11px] text-zinc-500 tabular-nums">
-              {g.target_year} · SIP {formatINR(g.required_sip_monthly)}/mo · shortfall{' '}
-              {formatINR(g.shortfall_monthly)}/mo
+              {g.target_year} · need {formatINR(g.required_sip_monthly)}/mo · already{' '}
+              {formatINR(g.existing_sip_monthly)}/mo · add {formatINR(g.shortfall_monthly)}/mo
               {g.funded_pct != null ? ` · ${g.funded_pct}% funded` : ''}
             </span>
           </div>

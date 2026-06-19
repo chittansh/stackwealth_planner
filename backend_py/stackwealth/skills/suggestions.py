@@ -44,10 +44,34 @@ GOAL_DELAY_CAP_YEARS: int = 3
 RETIREMENT_DELAY_CAP_AGE: int = 62
 VALUE_CUT_ESSENTIAL: float = 0.10
 VALUE_CUT_DISCRETIONARY: float = 0.30
+# Realism caps — a mid-career earner cannot conjure a 50% pay jump. A one-off
+# bump (promotion, side income, spouse income) realistically tops out ~10%;
+# beyond that the honest move is a step-up commitment, a longer timeline, a
+# trimmed target, an asset sale, or a lumpsum — never "grow income 54%".
+INCOME_BUMP_CAP_PCT: float = 0.10
+# Annual SIP step-up the household commits to as income grows (the realistic
+# alternative to a flat, unaffordable level-SIP today).
+SIP_STEPUP_PCT: float = 0.10
 
 
 def _rupees(n: float) -> str:
     return f"₹{round(n):,}"
+
+
+def _stepup_start_monthly(fv_gap: float, years: int, annual_rate: float,
+                          step_up: float = SIP_STEPUP_PCT) -> float:
+    """Starting MONTHLY SIP that — stepped up `step_up` each year and grown at
+    `annual_rate` — accumulates to `fv_gap` over `years`. Closed form:
+        FV = Σ_{i=0..n-1} A·(1+step)^i·(1+rate)^(n-1-i)   (A = first-year annual)
+    so A = fv_gap / Σ(...); monthly = A/12. The realistic 'start low, grow with
+    income' alternative to a flat level SIP."""
+    n = max(1, int(round(years)))
+    if fv_gap <= 0 or annual_rate <= 0:
+        return 0.0
+    mult = sum(((1 + step_up) ** i) * ((1 + annual_rate) ** (n - 1 - i)) for i in range(n))
+    if mult <= 0:
+        return 0.0
+    return (fv_gap / mult) / 12
 
 
 def _is_essential(goal: Optional[Goal]) -> bool:
@@ -172,6 +196,21 @@ def _goal_levers(goal: Optional[Goal], block: dict, current_year: int,
                 True, {"liquidate_today": round(applied), "sources": [c["label"] for c in liq]},
             ))
 
+    # L6b — step-up SIP (start lower, grow with income). The realistic
+    # alternative to a flat level SIP — what most earners actually do.
+    years = block.get("years_to_go") or 0
+    fv_gap = block.get("fv_gap") or 0
+    if years > 1 and fv_gap > 0:
+        start = _stepup_start_monthly(fv_gap, years, block["effective_return"])
+        if start > 0 and start < req:
+            levers.append(_lever(
+                "step_up_sip", "Start lower, step up yearly",
+                f"Start at {_rupees(start)}/mo and step up {round(SIP_STEPUP_PCT*100)}%/yr (vs flat {_rupees(req)}/mo)",
+                f"As income grows you raise the SIP {round(SIP_STEPUP_PCT*100)}%/yr — so you can begin at {_rupees(start)} now instead of the full {_rupees(req)}, and still reach the goal.",
+                True, {"start_sip_monthly": round(start), "step_up_pct": SIP_STEPUP_PCT,
+                       "vs_flat_sip_monthly": round(req)},
+            ))
+
     return levers
 
 
@@ -252,60 +291,111 @@ def _retirement_levers(plan: PlanState, ret: dict) -> list[dict]:
             "The firm's plan notes an apartment can back a reverse mortgage after 60; a non-primary property can fund the corpus instead of a higher SIP.",
             True, {"liquidate_today": round(total), "sources": [c["label"] for c in liq]},
         ))
+
+    # L6b — step-up SIP: start lower today, grow with income (from the §3 table).
+    sp = ret.get("stepup_plan") or {}
+    start = sp.get("required_first_year_monthly", 0) or 0
+    if start > 0 and start < req:
+        levers.append(_lever(
+            "step_up_sip", "Start lower, step up yearly",
+            f"Start at {_rupees(start)}/mo and step up {round(SIP_STEPUP_PCT*100)}%/yr (vs flat {_rupees(req)}/mo)",
+            f"Stepping the SIP up {round(SIP_STEPUP_PCT*100)}%/yr as income grows lets you begin at {_rupees(start)} now and still reach the corpus.",
+            True, {"start_sip_monthly": round(start), "step_up_pct": SIP_STEPUP_PCT,
+                   "vs_flat_sip_monthly": round(req)},
+        ))
     return levers
 
 
 # ── Recommended combined plan ────────────────────────────────────────────
 
-def _build_recommended(plan: PlanState, cfp, surplus: float) -> tuple[dict, dict]:
-    """Stack feasible levers into one plan that the household can actually
-    execute. Priority: spend available surplus on SIP first; if that doesn't
-    cover the total ask, lean on allowed delays + bounded trims + the income
-    lever for the residual. Returns (mutation, human_summary)."""
+def _build_recommended(plan: PlanState, cfp, surplus: float, current_year: int) -> tuple[dict, dict]:
+    """Stack REALISTIC levers a mid-career household can actually execute — in
+    small, granular doses rather than one heroic move. Order:
+      1) redirect existing free surplus into SIPs,
+      2) commit to a 10%/yr SIP step-up (the natural way SIPs grow with income),
+      3) delay retirement to the cap (cheap, high-leverage),
+      4) push genuinely-flexible (non-locked) shortfall goals out 3 years,
+      5) earmark a non-primary hard asset and invest the proceeds (a lumpsum),
+      6) a MODEST income lift, capped at +10% (a raise / side income — never 50%).
+    Whatever still doesn't fit is reported honestly as a residual + lumpsum nudge
+    (computed by the caller from the simulated plan)."""
     ops: list[dict] = []
     summary = cfp.summary
+    income = float(summary.get("monthly_income", 0) or 0)
     total_incremental = summary.get("total_incremental_sip_monthly", 0) or 0
     retire_sip = cfp.retirement.get("required_monthly_sip", 0) or 0
     total_ask = total_incremental + retire_sip
 
     levers_used: list[str] = []
     notes: list[str] = []
+    if total_ask <= 0:
+        return {"ops": []}, {"summary": "Plan is already on track — keep current SIPs running and step them up with annual income growth.",
+                             "levers_used": [], "income_bump_monthly": 0, "surplus_redirected": 0}
 
-    # 1) Put the available surplus to work as extra SIP.
+    # 1) Redirect the free surplus into SIPs.
     mi = plan.monthly_investments
     base_mf = float((mi.mutual_fund_sip or 0)) if mi else 0.0
     sip_added = min(max(0.0, surplus), total_ask)
     if sip_added > 0:
-        ops.append({"path": "monthly_investments.mutual_fund_sip", "op": "set",
-                    "value": round(base_mf + sip_added)})
+        ops.append({"path": "monthly_investments.mutual_fund_sip", "op": "set", "value": round(base_mf + sip_added)})
         levers_used.append("increase_sip")
-        notes.append(f"Deploy your {_rupees(sip_added)}/mo free surplus as SIP")
+        notes.append(f"Redirect your {_rupees(sip_added)}/mo surplus into SIPs")
 
-    residual = max(0.0, total_ask - sip_added)
+    # 2) Commit to a 10%/yr SIP step-up (realistic, income-linked).
+    ops.append({"path": "assumptions.sip_annual_step_up_pct", "op": "set", "value": SIP_STEPUP_PCT})
+    levers_used.append("step_up_sip")
+    notes.append(f"Step up SIPs {round(SIP_STEPUP_PCT*100)}%/yr as income grows")
 
-    # 2) Residual → delay retirement to the cap (cheap, high-leverage) + income lever.
-    if residual > 0:
-        cur_age = cfp.retirement.get("retirement_age") or 60
-        if cur_age < RETIREMENT_DELAY_CAP_AGE:
-            new_age = min(RETIREMENT_DELAY_CAP_AGE, int(round(cur_age)) + GOAL_DELAY_CAP_YEARS)
-            ops.append({"path": "personal_details.retirement_age_target", "op": "set", "value": new_age})
-            if plan.assumptions.persons:
-                ops.append({"path": "assumptions.persons.0.retirement_age", "op": "set", "value": new_age})
+    # 3) Delay retirement to the cap.
+    cur_age = cfp.retirement.get("retirement_age") or 60
+    if retire_sip > 0 and cur_age < RETIREMENT_DELAY_CAP_AGE:
+        new_age = min(RETIREMENT_DELAY_CAP_AGE, int(round(cur_age)) + GOAL_DELAY_CAP_YEARS)
+        ops.append({"path": "personal_details.retirement_age_target", "op": "set", "value": new_age})
+        if plan.assumptions.persons:
+            ops.append({"path": "assumptions.persons.0.retirement_age", "op": "set", "value": new_age})
+        levers_used.append("delay_goal")
+        notes.append(f"Retire at {new_age} instead of {round(cur_age)}")
+
+    # 4) Push genuinely-flexible shortfall goals out 3 years (never locked ones).
+    short_ids = {b["goal_id"] for b in cfp.goal_blocks if (b.get("sip_shortfall_monthly", 0) or 0) > 0}
+    delayed_names: list[str] = []
+    for i, g in enumerate(plan.financial_goals):
+        if g.id not in short_ids or (g.kind or "") in LOCKED_TIME_GOALS or g.kind == "retirement":
+            continue
+        if not g.target_year:
+            continue
+        ops.append({"path": f"financial_goals.{i}.target_year", "op": "set", "value": g.target_year + GOAL_DELAY_CAP_YEARS})
+        delayed_names.append(g.goal_name)
+    if delayed_names:
+        if "delay_goal" not in levers_used:
             levers_used.append("delay_goal")
-            notes.append(f"Retire at {new_age} instead of {round(cur_age)}")
+        notes.append(f"Give {', '.join(delayed_names)} {GOAL_DELAY_CAP_YEARS} more years")
 
-        # Income lever for whatever still doesn't fit.
-        income = summary.get("monthly_income", 0) or 0
-        if income > 0:
-            needed_income = income + residual
-            pct = round((residual / income) * 100, 1)
-            ops.append({"path": "freedom_score_inputs.monthly_income", "op": "set",
-                        "value": round(needed_income)})
-            levers_used.append("increase_income")
-            notes.append(f"Grow income ~{pct}% (+{_rupees(residual)}/mo) — raise, side income, or spouse income")
+    # 5) Earmark a non-primary hard asset → invest the proceeds (a lumpsum).
+    liq = _liquidation_candidates(plan)
+    if liq:
+        total = sum(c["today_value"] for c in liq)
+        labels = ", ".join(c["label"] for c in liq[:2])
+        evs = [{"year": current_year + 1, "amount": round(total), "label": "Asset sale (recommended)"}]
+        ops.append({"path": "assumptions.lumpsum_events", "op": "set", "value": evs})
+        levers_used.append("liquidate_assets")
+        notes.append(f"Sell/earmark {labels} (~{_rupees(total)}) and invest the proceeds")
 
-    human = "; ".join(notes) if notes else "Plan is already on track — keep current SIPs running."
-    return {"ops": ops}, {"summary": human, "levers_used": sorted(set(levers_used))}
+    # 6) A MODEST income lift — capped at +10%. Never the full residual.
+    income_bump = 0.0
+    if income > 0 and sip_added < total_ask:
+        income_bump = round(income * INCOME_BUMP_CAP_PCT)
+        ops.append({"path": "freedom_score_inputs.monthly_income", "op": "set", "value": round(income + income_bump)})
+        levers_used.append("increase_income")
+        notes.append(f"A realistic ~{round(INCOME_BUMP_CAP_PCT*100)}% income lift (+{_rupees(income_bump)}/mo) via a raise or side income")
+
+    human = "; ".join(notes) if notes else "Keep current SIPs running."
+    return {"ops": ops}, {
+        "summary": human,
+        "levers_used": sorted(set(levers_used)),
+        "income_bump_monthly": round(income_bump),
+        "surplus_redirected": round(sip_added),
+    }
 
 
 # ── Public entrypoint ────────────────────────────────────────────────────
@@ -347,16 +437,36 @@ def compute_suggestions(plan: PlanState) -> dict:
     ret_required = ret.get("required_monthly_sip", 0) or 0
     corpus_req = ret.get("corpus_required", 0) or 0
     provisioned = ret.get("projected_existing_corpus_fv", 0) or 0
+    ret_levers = _retirement_levers(plan, ret) if ret_required > 0 else []
+    ret_funded_pct = round((provisioned / corpus_req) * 100, 1) if corpus_req else 100.0
     retirement_dom = {
         "title": "Suggested Retirement Glide",
         "corpus_required": round(corpus_req),
         "provisioned": round(provisioned),
         "shortfall": round(ret_shortfall),
         "required_sip_monthly": round(ret_required),
-        "funded_pct": round((provisioned / corpus_req) * 100, 1) if corpus_req else 100.0,
-        "levers": _retirement_levers(plan, ret) if ret_required > 0 else [],
+        "ongoing_sip_monthly": round(ret.get("ongoing_retirement_sip_monthly", 0) or 0),
+        "funded_pct": ret_funded_pct,
+        "levers": ret_levers,
         "on_track": ret_required <= 0,
     }
+
+    # Retirement is a GOAL too — surface it in Suggested Goals with the SIPs
+    # already flowing to it (NPS/VPF/etc.) credited, so we never double-ask.
+    if ret_required > 0:
+        gross_ret_sip = ret.get("gross_monthly_sip", 0) or 0
+        ongoing_ret_sip = ret.get("ongoing_retirement_sip_monthly", 0) or 0
+        retire_year = current_year + round(ret.get("years_to_retire", 0) or 0)
+        goal_rows.insert(0, {
+            "goal_name": "Retirement",
+            "target_year": retire_year,
+            "is_retirement": True,
+            "required_sip_monthly": round(gross_ret_sip),
+            "existing_sip_monthly": round(ongoing_ret_sip),
+            "shortfall_monthly": round(ret_required),
+            "funded_pct": ret_funded_pct,
+            "levers": ret_levers,
+        })
 
     # ── Cashflow domain ───────────────────────────────────────────────
     total_incremental = summary.get("total_incremental_sip_monthly", 0) or 0
@@ -364,12 +474,25 @@ def compute_suggestions(plan: PlanState) -> dict:
     income = summary.get("monthly_income", 0) or 0
     cashflow_levers: list[dict] = []
     if sip_shortfall > 0 and income > 0:
-        pct = round((sip_shortfall / income) * 100, 1)
+        # Realistic income lift — capped at +10%. We DON'T suggest closing the
+        # whole gap with income (a 50% raise isn't a real lever); we show what a
+        # plausible raise covers, then point to the other levers for the rest.
+        bump = min(income * INCOME_BUMP_CAP_PCT, sip_shortfall)
+        pct = round((bump / income) * 100, 1)
+        covers_all = bump >= sip_shortfall - 1
         cashflow_levers.append(_lever(
-            "increase_income", "Increase income",
-            f"Grow income ~{pct}% (+{_rupees(sip_shortfall)}/mo) to fund every goal's SIP",
-            "The required SIPs exceed your monthly surplus; closing it needs either more income or trimmed goals.",
-            True, {"income_increase_monthly": round(sip_shortfall), "income_increase_pct": pct},
+            "increase_income", "Increase income (realistically)",
+            f"A ~{pct}% lift (+{_rupees(bump)}/mo) via a raise or side income "
+            + ("covers the gap" if covers_all else f"covers {_rupees(bump)} of the {_rupees(sip_shortfall)}/mo gap"),
+            "A mid-career raise / side income / spouse income realistically adds up to ~10%. Beyond that, lean on the step-up SIP, a longer timeline, a trimmed goal, or an asset sale — not an unrealistic pay jump.",
+            True, {"income_increase_monthly": round(bump), "income_increase_pct": pct,
+                   "covers_full_gap": covers_all, "remaining_gap_monthly": round(max(0, sip_shortfall - bump))},
+        ))
+        cashflow_levers.append(_lever(
+            "step_up_sip", "Step up SIPs every year",
+            f"Commit to raising SIPs {round(SIP_STEPUP_PCT*100)}%/yr as income grows",
+            "Stepping up with income lets you start lower today and still reach the goals — the realistic alternative to a flat, unaffordable SIP now.",
+            True, {"step_up_pct": SIP_STEPUP_PCT},
         ))
     cashflow_dom = {
         "title": "Suggested Cashflow",
@@ -383,36 +506,68 @@ def compute_suggestions(plan: PlanState) -> dict:
     }
 
     # ── Recommended combined plan + projection ────────────────────────
-    rec_mutation, rec_meta = _build_recommended(plan, cfp, surplus)
+    rec_mutation, rec_meta = _build_recommended(plan, cfp, surplus, current_year)
     baseline_headline = plan.computed.headline_amount_at_horizon or 0
     baseline_series = [
         {"year": p.year, "value": p.value} for p in (plan.computed.net_worth_series or [])
     ]
+    # Net worth at the RETIREMENT year is the decision-relevant impact metric —
+    # far more credible than the age-85 horizon, where decades of step-up
+    # compound to absurd magnitudes.
+    retire_year = current_year + round(ret.get("years_to_retire", 0) or 0)
+
+    def _nw_at(series: list[dict], year: int) -> float:
+        if not series:
+            return 0.0
+        at = next((p for p in series if p.get("year") == year), None)
+        return float((at or series[-1]).get("value", 0) or 0)
+
+    baseline_nw_retire = _nw_at(baseline_series, retire_year)
     suggested = {}
+    residual_note = None
     try:
         comp = simulate_mutation(plan, rec_mutation)
         sug_cfp = comp.get("cfp") or {}
         sug_ret = sug_cfp.get("retirement") or {}
+        sug_summary = sug_cfp.get("summary") or {}
         sug_corpus = sug_ret.get("corpus_required", 0) or 0
         sug_prov = (sug_ret.get("projected_existing_corpus_fv", 0) or 0)
+        sug_series = comp.get("net_worth_series", [])
+        suggested_nw_retire = _nw_at(sug_series, retire_year)
         suggested = {
-            "net_worth_series": comp.get("net_worth_series", []),
+            "net_worth_series": sug_series,
             "headline_at_horizon": comp.get("headline_amount_at_horizon", 0),
+            "net_worth_at_retirement": round(suggested_nw_retire),
             "retirement_required_sip": round(sug_ret.get("required_monthly_sip", 0) or 0),
             "retirement_funded_pct": round((sug_prov / sug_corpus) * 100, 1) if sug_corpus else 100.0,
         }
+        # Honest residual AFTER the recommended plan, on a conservative level-SIP
+        # basis. The step-up commitment narrows this over time, but we surface
+        # it so the plan isn't oversold.
+        residual = (sug_summary.get("total_incremental_sip_monthly", 0) or 0) + (sug_ret.get("required_monthly_sip", 0) or 0)
+        if residual > 1000:
+            residual_note = (
+                f"On a conservative flat-SIP basis about {_rupees(residual)}/mo is still uncovered "
+                "(the 10%/yr step-up above narrows this as income grows). To fully close it, extend a "
+                "timeline further, trim a discretionary goal, or fold in a lumpsum (see the prompt below)."
+            )
     except Exception as e:  # projection must never break the suggestions payload
         suggested = {"error": str(e), "net_worth_series": baseline_series}
 
-    headline_delta = (suggested.get("headline_at_horizon", baseline_headline) or 0) - baseline_headline
+    nw_retire_delta = (suggested.get("net_worth_at_retirement", baseline_nw_retire) or 0) - baseline_nw_retire
 
     recommended = {
         **rec_meta,
         "mutation": rec_mutation,
+        "residual_note": residual_note,
         "impact": {
+            "retirement_year": retire_year,
+            "net_worth_at_retirement": suggested.get("net_worth_at_retirement"),
+            "baseline_net_worth_at_retirement": round(baseline_nw_retire),
+            "net_worth_at_retirement_delta": round(nw_retire_delta),
+            # kept for back-compat / secondary display
             "headline_at_horizon": suggested.get("headline_at_horizon"),
-            "headline_delta": round(headline_delta),
-            "baseline_headline": round(baseline_headline),
+            "headline_delta": round((suggested.get("headline_at_horizon", baseline_headline) or 0) - baseline_headline),
         },
     }
 

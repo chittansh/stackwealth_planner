@@ -468,6 +468,7 @@ export type SuggestionLever = {
 export type SuggestedGoalRow = {
   goal_name: string;
   target_year: number;
+  is_retirement?: boolean;
   required_sip_monthly: number;
   existing_sip_monthly: number;
   shortfall_monthly: number;
@@ -482,7 +483,18 @@ export type SuggestionsSnapshot = {
     summary: string;
     levers_used: string[];
     mutation: ScenarioMutation;
-    impact: { headline_at_horizon?: number; headline_delta?: number; baseline_headline?: number };
+    residual_note?: string | null;
+    income_bump_monthly?: number;
+    surplus_redirected?: number;
+    impact: {
+      retirement_year?: number;
+      net_worth_at_retirement?: number;
+      baseline_net_worth_at_retirement?: number;
+      net_worth_at_retirement_delta?: number;
+      headline_at_horizon?: number;
+      headline_delta?: number;
+      baseline_headline?: number;
+    };
   };
   domains: {
     cashflow: {

@@ -1695,12 +1695,21 @@ def _sandeep_s4b_suggestions(plan: PlanState) -> str:
 
     rec = s.get("recommended", {})
     impact = rec.get("impact", {})
-    delta = impact.get("headline_delta") or 0
+    ret_yr = impact.get("retirement_year")
+    nw_sug = impact.get("net_worth_at_retirement") or 0
+    nw_base = impact.get("baseline_net_worth_at_retirement") or 0
+    rec_residual = rec.get("residual_note")
+    impact_line = (
+        f"<br/>Projected net worth at retirement ({ret_yr}): <strong>{_fmt_inr(nw_sug)}</strong> "
+        f"vs {_fmt_inr(nw_base)} on today's plan."
+        if ret_yr else ""
+    )
     rec_html = f"""
     <div style="background:#eef6ee;border:1px solid #cfe3cf;padding:3mm;border-radius:2mm;margin:2mm 0;">
       <strong>Recommended combined plan:</strong> {_h(rec.get('summary',''))}.
-      <br/>Projected net-worth impact at horizon: <strong>{('+' if delta>=0 else '')}{_fmt_inr(delta)}</strong>
-      (levers: {_h(', '.join(rec.get('levers_used', [])) or 'none')}).
+      {impact_line}
+      <br/><span class="muted">Levers: {_h(', '.join(rec.get('levers_used', [])) or 'none')}.</span>
+      {('<br/><span style="color:#9a6a00;">' + _h(rec_residual) + '</span>') if rec_residual else ''}
     </div>"""
 
     cf = s["domains"]["cashflow"]
@@ -1719,8 +1728,9 @@ def _sandeep_s4b_suggestions(plan: PlanState) -> str:
 
     goals = s["domains"]["goals"]["goals"]
     goal_rows = "".join(
-        f'<tr><td>{_h(g["goal_name"])}</td><td class="num">{g["target_year"]}</td>'
+        f'<tr><td>{_h(g["goal_name"])}{" (retirement)" if g.get("is_retirement") else ""}</td><td class="num">{g["target_year"]}</td>'
         f'<td class="num">{_fmt_inr(g["required_sip_monthly"])}</td>'
+        f'<td class="num">{_fmt_inr(g["existing_sip_monthly"])}</td>'
         f'<td class="num">{_fmt_inr(g["shortfall_monthly"])}</td>'
         f'<td class="num">{(str(g["funded_pct"])+"%") if g.get("funded_pct") is not None else "—"}</td></tr>'
         for g in goals
@@ -1730,10 +1740,10 @@ def _sandeep_s4b_suggestions(plan: PlanState) -> str:
         for g in goals
     )
     goals_html = f"""
-    <h3>Suggested Goals</h3>
+    <h3>Suggested Goals <span class="muted" style="font-weight:400;">(retirement included; SIPs already contributed are credited)</span></h3>
     <table>
-      <thead><tr><th>Goal</th><th class="num">Year</th><th class="num">SIP needed</th><th class="num">Shortfall/mo</th><th class="num">Funded</th></tr></thead>
-      <tbody>{goal_rows or '<tr><td colspan="5" class="muted">All goals on track.</td></tr>'}</tbody>
+      <thead><tr><th>Goal</th><th class="num">Year</th><th class="num">SIP needed</th><th class="num">Already SIP'd</th><th class="num">Add/mo</th><th class="num">Funded</th></tr></thead>
+      <tbody>{goal_rows or '<tr><td colspan="6" class="muted">All goals on track.</td></tr>'}</tbody>
     </table>
     {goal_levers}""" if goals else ""
 

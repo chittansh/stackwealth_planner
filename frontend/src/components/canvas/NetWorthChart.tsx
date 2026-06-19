@@ -28,7 +28,9 @@ export function NetWorthChart({
       .catch(() => {});
   }, [householdId, hasCfp, persistedSug, localSug]);
   const suggestedSeries = sug?.suggested?.net_worth_series ?? [];
-  const recDelta = sug?.recommended?.impact?.headline_delta ?? 0;
+  const recImpact = sug?.recommended?.impact;
+  const recDelta = recImpact?.net_worth_at_retirement_delta ?? recImpact?.headline_delta ?? 0;
+  const recRetYear = recImpact?.retirement_year;
 
   const baseline = plan?.computed.net_worth_series ?? [];
   // One series per active scenario. The chips already render every active
@@ -159,7 +161,8 @@ export function NetWorthChart({
           {recDelta !== 0 && (
             <span className="tabular-nums font-semibold text-emerald-700 whitespace-nowrap ml-3">
               {recDelta >= 0 ? '+' : ''}
-              {formatINR(recDelta, { compact: true })} at horizon
+              {formatINR(recDelta, { compact: true })}
+              {recRetYear ? ` by ${recRetYear}` : ''}
             </span>
           )}
         </div>
