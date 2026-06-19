@@ -1224,13 +1224,20 @@ def _build_html(plan: PlanState) -> str:
 
 def _build_sandeep_html(plan: PlanState) -> str:
     cfp = cfp_skill.compute_cfp(plan)
+    # Compute the AI suggestions once and share across the net-worth overview
+    # (top of report) and the Section-4B suggestions block.
+    try:
+        sug = suggestions_skill.compute_suggestions(plan)
+    except Exception:
+        sug = None
     sections = [
         _sandeep_cover(plan, cfp),
+        _sandeep_networth_overview(plan, cfp, sug),
         _sandeep_s1_profile(plan),
-        _sandeep_s2_cashflow(plan),
+        _sandeep_s2_cashflow(plan, cfp),
         _sandeep_s3_networth(plan),
         _sandeep_s4_goals(plan, cfp),
-        _sandeep_s4b_suggestions(plan),
+        _sandeep_s4b_suggestions(plan, sug),
         _sandeep_s5_strategy(plan, cfp),
         _sandeep_s6_risk(plan, cfp),
         _sandeep_s7_tax(plan),
@@ -1307,6 +1314,83 @@ def _sandeep_cover(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     Tax Efficiency · Future-Proofing &amp; Scenario Analysis · Execution Roadmap.
     Every number on this report traces back to PlanState data and the firm's CFP Excel methodology.
   </div>
+</section>"""
+
+
+def _sandeep_networth_overview(plan: PlanState, cfp: cfp_skill.CFPOutput, sug: dict | None) -> str:
+    """Up-front net-worth trajectory — the headline of the whole plan. Shows
+    the baseline (current-plan) net worth over the full horizon AND, when the
+    AI suggests improvements, the suggested-plan trajectory side-by-side."""
+    baseline = [{"year": p.year, "value": p.value} for p in (plan.computed.net_worth_series or [])]
+    if not baseline:
+        return ""
+    fsi = plan.freedom_score_inputs
+    start_age = fsi.age or (cfp.summary.get("current_age") if cfp.summary else None) or 30
+    start_year = baseline[0]["year"]
+    horizon_years = baseline[-1]["year"] - start_year
+
+    ret = cfp.retirement or {}
+    retire_year = start_year + round(ret.get("years_to_retire", 0) or 0)
+
+    sug_series = []
+    sug_has_gaps = bool(sug and sug.get("has_gaps"))
+    if sug_has_gaps:
+        sug_series = (sug.get("suggested") or {}).get("net_worth_series") or []
+    sug_by_year = {p.get("year"): p.get("value") for p in sug_series}
+
+    def _at(series, year):
+        m = next((p for p in series if p.get("year") == year), None)
+        return (m or {}).get("value", 0) if m else 0
+
+    current_nw = plan.computed.net_worth.total if plan.computed.net_worth else 0
+    base_at_retire = _at(baseline, retire_year)
+    base_at_horizon = baseline[-1]["value"]
+    sug_at_retire = sug_by_year.get(retire_year)
+    sug_at_horizon = sug_series[-1].get("value") if sug_series else None
+
+    # Headline stat cards.
+    cards = f"""
+    <div class="kpis">
+      <div class="kcell"><div class="label">Net Worth Today</div><div class="val">{_fmt_lakhs(current_nw)}</div></div>
+      <div class="kcell"><div class="label">At Retirement ({retire_year})</div><div class="val">{_fmt_lakhs(base_at_retire)}</div><div class="note">current plan</div></div>
+      <div class="kcell"><div class="label">At Age {int(start_age) + horizon_years} ({baseline[-1]["year"]})</div><div class="val">{_fmt_lakhs(base_at_horizon)}</div><div class="note">current plan, {horizon_years}-yr horizon</div></div>
+    </div>"""
+
+    desc = f"""
+    <p>This is the household's projected <strong>net worth over the next {horizon_years} years</strong> on the
+    <strong>current plan</strong> — income growing at its post-tax rate, expenses at inflation, surplus reinvested,
+    and every asset compounding at its own post-tax return. It is the single most important picture in this plan:
+    where today's decisions land the family by retirement ({retire_year}) and beyond.</p>"""
+    if sug_has_gaps:
+        delta_h = (sug_at_horizon or base_at_horizon) - base_at_horizon
+        desc += f"""
+    <p>The <strong>suggested plan</strong> overlays the AI optimisation (Section 4B) — redirecting surplus, a 10%/yr
+    SIP step-up, a realistic income lift, and other levers. It lifts net worth at age {int(start_age) + horizon_years}
+    to <strong>{_fmt_lakhs(sug_at_horizon or base_at_horizon)}</strong>
+    (<strong>{'+' if delta_h >= 0 else ''}{_fmt_lakhs(delta_h)}</strong> vs the current plan), and at retirement to
+    <strong>{_fmt_lakhs(sug_at_retire or base_at_retire)}</strong>.</p>"""
+
+    # Trajectory table (both series).
+    show_sug = sug_has_gaps and bool(sug_series)
+    hdr_sug = '<th class="num">Suggested Plan</th>' if show_sug else ""
+    body = ""
+    for p in baseline:
+        yr = p["year"]
+        age = int(start_age) + (yr - start_year)
+        sug_cell = f'<td class="num">{_fmt_lakhs(sug_by_year.get(yr))}</td>' if show_sug else ""
+        mark = ' style="font-weight:600;background:#f4f4f5;"' if yr == retire_year else ""
+        body += f'<tr{mark}><td>{yr}{" · retires" if yr == retire_year else ""}</td><td class="num">{age}</td><td class="num">{_fmt_lakhs(p["value"])}</td>{sug_cell}</tr>'
+
+    return f"""<section class="page">
+  <h2>NET WORTH TRAJECTORY — {horizon_years}-YEAR OUTLOOK</h2>
+  {desc}
+  {cards}
+  <h3>Year-by-Year Net Worth{' — Current vs Suggested' if show_sug else ''}</h3>
+  <table style="font-size:8px;">
+    <thead><tr><th>Year</th><th class="num">Age</th><th class="num">Current Plan</th>{hdr_sug}</tr></thead>
+    <tbody>{body}</tbody>
+  </table>
+  <p class="muted">Values in lakhs. The current-plan series is the canonical projection used throughout this report; the suggested series reflects the recommended combined plan in Section 4B.</p>
 </section>"""
 
 
@@ -1394,7 +1478,58 @@ def _sandeep_s1_profile(plan: PlanState) -> str:
 </section>"""
 
 
-def _sandeep_s2_cashflow(plan: PlanState) -> str:
+def _yoy_cashflow_tables(cfp: cfp_skill.CFPOutput) -> str:
+    """The full year-by-year cash-flow projection — same data the canvas
+    Cashflow tab renders. Two compact tables: income→surplus, and the
+    financial / non-financial asset build-up to net worth."""
+    rows = cfp.yoy_cashflow or []
+    if not rows:
+        return '<p class="muted">Year-by-year projection not available.</p>'
+
+    def _c(v) -> str:
+        return _fmt_inr(v or 0)
+
+    income_rows = "".join(
+        f'<tr><td>{r["year"]}</td><td class="num">{r["age"]}</td>'
+        f'<td class="num">{_c(r.get("income_employment"))}</td>'
+        f'<td class="num">{_c(r.get("income_business"))}</td>'
+        f'<td class="num">{_c(r.get("income_rental"))}</td>'
+        f'<td class="num">{_c(r.get("income_other"))}</td>'
+        f'<td class="num">{_c(r.get("total_income"))}</td>'
+        f'<td class="num">{_c(r.get("expenses"))}</td>'
+        f'<td class="num">{_c(r.get("loan_repayment"))}</td>'
+        f'<td class="num">{_c(r.get("surplus"))}</td></tr>'
+        for r in rows
+    )
+    asset_rows = "".join(
+        f'<tr><td>{r["year"]}</td><td class="num">{r["age"]}</td>'
+        f'<td class="num">{_c(r.get("fa_opening"))}</td>'
+        f'<td class="num">{_c(r.get("net_annual_cash_savings"))}</td>'
+        f'<td class="num">{_c(r.get("major_withdrawals"))}</td>'
+        f'<td class="num">{_c(r.get("investment_returns"))}</td>'
+        f'<td class="num">{_c(r.get("lumpsum_deposit_withdrawal"))}</td>'
+        f'<td class="num">{_c(r.get("financial_assets_closing"))}</td>'
+        f'<td class="num">{_c(r.get("non_financial_assets_closing"))}</td>'
+        f'<td class="num"><strong>{_c(r.get("net_worth"))}</strong></td></tr>'
+        for r in rows
+    )
+    return f"""
+  <h3>2.4  Year-by-Year Cash Flow Projection</h3>
+  <p class="muted">Mirrors the firm's <code>YoY Cash Flow</code> tab — each income line grown at its own
+  post-tax rate, expenses at inflation, surplus reinvested, and assets compounded at their post-tax returns.</p>
+  <p class="muted" style="margin-top:1.5mm;"><strong>2.4a  Income, Expenses &amp; Surplus</strong></p>
+  <table style="font-size:7.5px;">
+    <thead><tr><th>Year</th><th class="num">Age</th><th class="num">Employment</th><th class="num">Business</th><th class="num">Rental</th><th class="num">Other</th><th class="num">Total Income</th><th class="num">Expenses</th><th class="num">Loan</th><th class="num">Surplus</th></tr></thead>
+    <tbody>{income_rows}</tbody>
+  </table>
+  <p class="muted" style="margin-top:2mm;"><strong>2.4b  Asset Build-up &amp; Net Worth</strong></p>
+  <table style="font-size:7.5px;">
+    <thead><tr><th>Year</th><th class="num">Age</th><th class="num">FA Open</th><th class="num">Net Savings</th><th class="num">Withdrawals</th><th class="num">Inv. Returns</th><th class="num">Lumpsum</th><th class="num">FA Close</th><th class="num">Non-Fin. Assets</th><th class="num">Net Worth</th></tr></thead>
+    <tbody>{asset_rows}</tbody>
+  </table>"""
+
+
+def _sandeep_s2_cashflow(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     """SECTION 2 — Cash Flow Analysis."""
     income = plan.income_details
     expenses = plan.monthly_expenses
@@ -1495,6 +1630,7 @@ def _sandeep_s2_cashflow(plan: PlanState) -> str:
 
   <h3>2.3  Expense Review — Optimisation Opportunities</h3>
   {_sandeep_expense_opportunities(plan)}
+  {_yoy_cashflow_tables(cfp)}
 </section>"""
 
 
@@ -1678,14 +1814,16 @@ def _levers_html(levers: list[dict]) -> str:
     return "<ul>" + "".join(items) + "</ul>"
 
 
-def _sandeep_s4b_suggestions(plan: PlanState) -> str:
+def _sandeep_s4b_suggestions(plan: PlanState, sug: dict | None = None) -> str:
     """Section 4b — the AI 'Suggested' optimisation layer (six-lever engine).
-    Computed fresh so the report always carries it. Three sub-blocks
-    (Suggested Cashflow / Goals / Retirement) + the recommended combined plan
-    + the lumpsum nudge."""
+    Three sub-blocks (Suggested Cashflow / Goals / Retirement) + the
+    recommended combined plan + the lumpsum nudge. Accepts a pre-computed
+    snapshot to avoid recomputing."""
     try:
-        s = suggestions_skill.compute_suggestions(plan)
+        s = sug if sug is not None else suggestions_skill.compute_suggestions(plan)
     except Exception:
+        return ""
+    if not s:
         return ""
     if not s.get("has_gaps"):
         return """<section class="page">
