@@ -60,6 +60,10 @@ export function RetirementGlideView({ plan }: { plan: PlanState | null }) {
 
       {cfpRet && <RetirementCorpusBlock block={cfpRet} retireAge={retireAge} />}
 
+      {cfpRet?.stepup_plan && cfpRet.stepup_plan.rows.length > 0 && (
+        <StepUpTable plan={cfpRet.stepup_plan} retireAge={retireAge} />
+      )}
+
       <div className="rounded-xl border border-zinc-200 bg-white p-5">
         <h3 className="text-sm font-medium text-zinc-700 mb-3">
           Asset trajectory through retirement
@@ -200,6 +204,39 @@ type CfpRetirementBlock = {
   ongoing_retirement_sip_monthly?: number;
   required_monthly_sip?: number;
   used_planned_retirement_expense?: boolean;
+  // Section-1 extras
+  annual_living_expense_current?: number;
+  self_life_expectancy?: number;
+  // Section-3 step-up plan
+  stepup_plan?: StepUpPlan;
+};
+
+type StepUpRow = {
+  label: string;
+  is_one_time: boolean;
+  year_offset?: number;
+  years_remaining: number;
+  age: number;
+  base_contribution: number;
+  step_up_amount: number;
+  total_contribution: number;
+  rate: number;
+  fv_at_retirement: number;
+  cumulative_fv: number;
+};
+
+type StepUpPlan = {
+  step_up_pct: number;
+  rate: number;
+  first_year_annual_contribution: number;
+  first_year_monthly_contribution: number;
+  current_corpus_today: number;
+  projected_corpus_at_retirement: number;
+  corpus_needed: number;
+  excess_or_gap: number;
+  excess_pct: number;
+  reaches_goal: boolean;
+  rows: StepUpRow[];
 };
 
 /** Cell-for-cell mirror of the firm's `Retirement Plan` tab — corpus
@@ -253,6 +290,14 @@ function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock
         <Cell
           label={`Annual expense at age ${retireAge}`}
           value={formatINR(annualAtRetire, { compact: true })}
+        />
+        <Cell
+          label="Current annual living expense"
+          value={formatINR(block.annual_living_expense_current ?? 0, { compact: true })}
+        />
+        <Cell
+          label="Life expectancy (self / spouse)"
+          value={`${block.self_life_expectancy ?? '—'} / ${block.spouse_life_expectancy ?? '—'}`}
         />
         <Cell label="Corpus discount return" value={`${(discountReturn * 100).toFixed(2)}%`} />
         <Cell label="SIP funding return" value={`${(sipReturn * 100).toFixed(1)}%`} />
@@ -339,6 +384,74 @@ function RetirementCorpusBlock({ block, retireAge }: { block: CfpRetirementBlock
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Excel `Retirement Plan` §3 — the step-up investments table. Projects the
+ * client's retirement contributions stepped up each year, future-valued to
+ * retirement, and compares the cumulative corpus against the requirement. */
+function StepUpTable({ plan, retireAge }: { plan: StepUpPlan; retireAge: number }) {
+  const surplus = plan.excess_or_gap >= 0;
+  const pct = Math.abs(plan.excess_pct * 100);
+  return (
+    <div className="rounded-xl border border-zinc-200 bg-white p-5">
+      <h3 className="text-sm font-medium text-zinc-700 mb-1">
+        Step-up investment plan (Excel-faithful)
+      </h3>
+      <p className="text-[11px] text-zinc-400 mb-4">
+        Mirrors <code className="text-[10px]">Retirement Plan</code> §3 — starting at{' '}
+        {formatINR(plan.first_year_monthly_contribution)}/mo and stepping up{' '}
+        {(plan.step_up_pct * 100).toFixed(0)}% every year, each contribution is grown to
+        retirement at {(plan.rate * 100).toFixed(1)}%. The running total is the corpus the plan
+        accumulates by age {retireAge}.
+      </p>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+        <Big label="Projected corpus at retirement" value={formatINR(plan.projected_corpus_at_retirement, { compact: true })} />
+        <Big label="Corpus needed" value={formatINR(plan.corpus_needed, { compact: true })} subtle />
+        <Big
+          label={surplus ? 'Surplus' : 'Gap'}
+          value={`${formatINR(Math.abs(plan.excess_or_gap), { compact: true })} (${surplus ? '+' : '−'}${pct.toFixed(1)}%)`}
+          accent={surplus ? 'good' : 'bad'}
+        />
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="text-zinc-500">
+            <tr className="text-left border-b border-zinc-100">
+              <th className="py-1.5 pr-2">Age</th>
+              <th className="py-1.5 pr-2">Yrs to retire</th>
+              <th className="text-right pr-2">Annual contribution</th>
+              <th className="text-right pr-2">Step-up</th>
+              <th className="text-right pr-2">Total</th>
+              <th className="text-right pr-2">FV at retirement</th>
+              <th className="text-right">Cumulative</th>
+            </tr>
+          </thead>
+          <tbody>
+            {plan.rows.map((r, i) => (
+              <tr
+                key={i}
+                className={`border-b border-zinc-100 last:border-0 ${r.is_one_time ? 'bg-zinc-50/60 italic' : ''}`}
+              >
+                <td className="py-1.5 pr-2 tabular-nums">{r.is_one_time ? '—' : Math.round(r.age)}</td>
+                <td className="py-1.5 pr-2 tabular-nums">{r.years_remaining.toFixed(1)}</td>
+                <td className="text-right pr-2 tabular-nums">
+                  {r.is_one_time ? `${formatINR(r.total_contribution, { compact: true })} (corpus)` : formatINR(r.base_contribution, { compact: true })}
+                </td>
+                <td className="text-right pr-2 tabular-nums text-zinc-500">
+                  {r.step_up_amount ? `+${formatINR(r.step_up_amount, { compact: true })}` : '—'}
+                </td>
+                <td className="text-right pr-2 tabular-nums">{r.is_one_time ? '—' : formatINR(r.total_contribution, { compact: true })}</td>
+                <td className="text-right pr-2 tabular-nums">{formatINR(r.fv_at_retirement, { compact: true })}</td>
+                <td className="text-right tabular-nums font-medium">{formatINR(r.cumulative_fv, { compact: true })}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

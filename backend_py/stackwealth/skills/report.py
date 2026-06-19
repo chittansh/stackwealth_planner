@@ -1626,6 +1626,40 @@ def _sandeep_s3_networth(plan: PlanState) -> str:
 </section>"""
 
 
+def _retirement_stepup_block(sp: dict | None) -> str:
+    """Excel `Retirement Plan` §3 — the step-up investment projection table."""
+    if not sp or not sp.get("rows"):
+        return ""
+    surplus = sp["excess_or_gap"] >= 0
+    pct = abs(sp["excess_pct"]) * 100
+    body = "".join(
+        f'<tr style="{"background:#f8f8f8;font-style:italic;" if row["is_one_time"] else ""}">'
+        f'<td>{"—" if row["is_one_time"] else round(row["age"])}</td>'
+        f'<td class="num">{row["years_remaining"]:.1f}</td>'
+        f'<td class="num">{("%s (corpus)" % _fmt_inr(row["total_contribution"])) if row["is_one_time"] else _fmt_inr(row["base_contribution"])}</td>'
+        f'<td class="num">{("+" + _fmt_inr(row["step_up_amount"])) if row["step_up_amount"] else "—"}</td>'
+        f'<td class="num">{"—" if row["is_one_time"] else _fmt_inr(row["total_contribution"])}</td>'
+        f'<td class="num">{_fmt_inr(row["fv_at_retirement"])}</td>'
+        f'<td class="num">{_fmt_inr(row["cumulative_fv"])}</td></tr>'
+        for row in sp["rows"]
+    )
+    return f"""
+    <p class="muted" style="margin-top:2mm;"><strong>Step-up investment plan</strong> — starting at
+    {_fmt_inr(sp['first_year_monthly_contribution'])}/mo, stepped up {sp['step_up_pct']*100:.0f}%/yr, grown to
+    retirement at {sp['rate']*100:.1f}%:</p>
+    <table>
+      <tbody>
+        <tr style="font-weight:600;background:#f4f4f5;"><td>Projected corpus at retirement</td><td class="num">{_fmt_inr(sp['projected_corpus_at_retirement'])}</td></tr>
+        <tr><td>Corpus needed</td><td class="num">{_fmt_inr(sp['corpus_needed'])}</td></tr>
+        <tr style="font-weight:600;"><td>{'Surplus' if surplus else 'Gap'}</td><td class="num">{_fmt_inr(abs(sp['excess_or_gap']))} ({'+' if surplus else '−'}{pct:.1f}%)</td></tr>
+      </tbody>
+    </table>
+    <table>
+      <thead><tr><th>Age</th><th class="num">Yrs to retire</th><th class="num">Annual contribution</th><th class="num">Step-up</th><th class="num">Total</th><th class="num">FV at retirement</th><th class="num">Cumulative</th></tr></thead>
+      <tbody>{body}</tbody>
+    </table>"""
+
+
 def _sandeep_s4_goals(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     """SECTION 4 — Goal-Based Planning."""
     intro = ("<p>All goals inflation-adjusted using the firm's CFP table: General 7%, Education 10%, "
@@ -1716,7 +1750,8 @@ def _sandeep_s4_goals(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     <table>
       <thead><tr><th>Step</th><th>Formula</th><th class="num">Value</th></tr></thead>
       <tbody>{r_trace}</tbody>
-    </table>"""
+    </table>
+    {_retirement_stepup_block(r.get('stepup_plan'))}"""
 
     return f"""<section class="page">
   <h2>SECTION 4 — GOAL-BASED PLANNING</h2>

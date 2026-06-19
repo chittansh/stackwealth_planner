@@ -599,6 +599,94 @@ def compute_retirement_corpus(
     }
 
 
+def compute_retirement_stepup(
+    *,
+    current_age: float,
+    retirement_age: float,
+    current_corpus_today: float,
+    first_year_annual_contribution: float,
+    step_up_pct: float,
+    rate: float,
+    corpus_needed: float,
+) -> dict:
+    """Excel `Retirement Plan` tab — Section 3 (rows 50-78), the
+    "Total Retirement Corpus Calculation (If Step up investments are
+    considered)" table.
+
+    Models a client who starts at `first_year_annual_contribution` and steps
+    it up `step_up_pct` every year. Each year's contribution is future-valued
+    to the retirement date at `rate`; the running total is the corpus the
+    plan accumulates. Compared against `corpus_needed` to show surplus / gap.
+
+        J53 = FV(rate, years_to_retire, , −current_corpus)            (one-time)
+        G_i = first × (1 + step_up)^i                                (year i contribution)
+        J_i = FV(rate, years_to_retire − i, , −G_i)                  (grown to retirement)
+        K73 = J53 + Σ J_i                                            (cumulative FV)
+        excess = K73 − corpus_needed
+    """
+    years_to_retire = max(0.0, retirement_age - current_age)
+    n = round(years_to_retire)
+    rows: list[dict] = []
+
+    # Row 53 — current earmarked corpus grown to retirement.
+    fv_corpus = abs(excel_fv(rate, years_to_retire, 0, -current_corpus_today)) if current_corpus_today > 0 else 0.0
+    cumulative = fv_corpus
+    rows.append({
+        "label": "Current corpus → FV at retirement",
+        "is_one_time": True,
+        "years_remaining": round(years_to_retire, 1),
+        "age": round(current_age, 1),
+        "base_contribution": round(current_corpus_today),
+        "step_up_amount": 0,
+        "total_contribution": round(current_corpus_today),
+        "rate": round(rate, 4),
+        "fv_at_retirement": round(fv_corpus),
+        "cumulative_fv": round(cumulative),
+    })
+
+    # Rows 54-73 — stepped-up annual contributions.
+    base = first_year_annual_contribution
+    for i in range(n):
+        yrs_remaining = years_to_retire - i
+        if i == 0:
+            step_amt = 0.0
+            total = base
+        else:
+            step_amt = base * step_up_pct
+            total = base + step_amt
+        fv = abs(excel_fv(rate, yrs_remaining, 0, -total)) if total > 0 else 0.0
+        cumulative += fv
+        rows.append({
+            "label": "Annual contribution (stepped up)",
+            "is_one_time": False,
+            "year_offset": i,
+            "years_remaining": round(yrs_remaining, 1),
+            "age": round(current_age + i, 1),
+            "base_contribution": round(base),
+            "step_up_amount": round(step_amt),
+            "total_contribution": round(total),
+            "rate": round(rate, 4),
+            "fv_at_retirement": round(fv),
+            "cumulative_fv": round(cumulative),
+        })
+        base = total  # next year steps up off this year's total
+
+    excess = cumulative - corpus_needed
+    return {
+        "step_up_pct": round(step_up_pct, 4),
+        "rate": round(rate, 4),
+        "first_year_annual_contribution": round(first_year_annual_contribution),
+        "first_year_monthly_contribution": round(first_year_annual_contribution / 12),
+        "current_corpus_today": round(current_corpus_today),
+        "projected_corpus_at_retirement": round(cumulative),
+        "corpus_needed": round(corpus_needed),
+        "excess_or_gap": round(excess),
+        "excess_pct": round(excess / corpus_needed, 4) if corpus_needed else 0.0,
+        "reaches_goal": excess >= 0,
+        "rows": rows,
+    }
+
+
 # ── Insurance computation (Insurance Computation tab) ────────────────────
 
 def compute_health_cover_required(
@@ -1387,6 +1475,29 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     ]
     retirement["monthly_sip_committed"] = round(ongoing_retirement_sip)
     retirement["existing_sip_fv_at_retirement"] = 0  # SIPs now netted off the PMT, not FV'd into provision
+    # Section-1 extras the firm sheet shows (E17 current living expense, E12 self LE).
+    retirement["annual_living_expense_current"] = round(annual_expenses)
+    retirement["self_life_expectancy"] = life_expectancy
+
+    # ── Retirement Plan §3 — step-up investments table (rows 50-78) ─────
+    # Models the client's CURRENT retirement contributions stepped up each
+    # year (Excel's F51 default = 10%) and future-valued to retirement. If
+    # they have no ongoing retirement SIP, fall back to the level gross SIP
+    # so the table still illustrates a reach-the-goal trajectory.
+    stepup_rate = plan.assumptions.sip_annual_step_up_pct or 0.10
+    first_year_annual = (
+        ongoing_retirement_sip * 12 if ongoing_retirement_sip > 0
+        else retirement.get("gross_monthly_sip", 0) * 12
+    )
+    retirement["stepup_plan"] = compute_retirement_stepup(
+        current_age=current_age,
+        retirement_age=retirement_age,
+        current_corpus_today=retirement_earmarked_today,
+        first_year_annual_contribution=first_year_annual,
+        step_up_pct=stepup_rate,
+        rate=POST_TAX_RETURN["equity_hybrid"],  # 10.5% (Assumptions E22)
+        corpus_needed=retirement["corpus_required"],
+    )
 
     # ── Insurance need ─────────────────────────────────────────────────
     loans = plan.loans_liabilities
