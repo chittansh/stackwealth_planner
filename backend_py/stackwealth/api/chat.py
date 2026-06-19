@@ -27,6 +27,22 @@ from ..validator import collect_numbers, validate_assistant_text
 router = APIRouter()
 
 
+# The frontend appends an agent-only annotation to the user's chat text when
+# files are uploaded ("[Uploaded files (already processed by the intake
+# pipeline — DO NOT re-call intake_ingest): ...]"). That block is context FOR
+# THE LLM — it must never be shown back to the user. Strip it before persisting
+# and when serving history (so already-stored blobs render clean on reopen).
+_UPLOAD_ANNOTATION_RE = re.compile(
+    r"\n*\[Uploaded files \(already processed by the intake pipeline.*", re.DOTALL
+)
+
+
+def _clean_user_message(text: str | None) -> str:
+    if not text:
+        return ""
+    return _UPLOAD_ANNOTATION_RE.sub("", text).strip()
+
+
 def _validate_list_claims(
     text: str,
     *,
@@ -119,7 +135,7 @@ async def list_conversations(id: str) -> dict:
             )
             id_to_text = {r["id"]: r["text"] for r in title_rows}
             for r in rows:
-                t = id_to_text.get(r["first_user_id"])
+                t = _clean_user_message(id_to_text.get(r["first_user_id"]))
                 if t:
                     line = t.strip().split("\n", 1)[0]
                     titles[r["chat_id"]] = line[:60] + ("…" if len(line) > 60 else "")
@@ -144,6 +160,11 @@ async def get_history(id: str, chat_id: Optional[str] = None, limit: int = 500) 
     messages = await load_chat_history(
         household_id=id, chat_id=chat_id or "main", limit=limit
     )
+    # Retroactively strip the agent-only upload annotation from any user
+    # messages already persisted with it, so reopened chats render clean.
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "user" and m.get("text"):
+            m["text"] = _clean_user_message(m["text"])
     return {"chat_id": chat_id or "main", "messages": messages}
 
 
@@ -161,21 +182,25 @@ async def chat(request: Request) -> EventSourceResponse:
     household_id: str = body["household_id"]
     chat_id: Optional[str] = body.get("chat_id")
     message: str = body.get("message") or ""
+    # Clean, user-facing version persisted to history (filename-bearing when
+    # the FE supplies it). The full `message` — with the agent-only upload
+    # annotation — still drives the LLM turn below.
+    display_message: str = _clean_user_message(body.get("display_message") or message)
 
     seen_numbers: set[str] = set()
     prior_plan = await get_plan(household_id)
     if prior_plan:
         collect_numbers(prior_plan.model_dump(mode="python"), seen_numbers)
 
-    # Persist the user message ASAP so a mid-turn disconnect or LLM error
+    # Persist the CLEAN user message ASAP so a mid-turn disconnect or LLM error
     # doesn't drop the input from history. Assistant text is saved after
     # the LLM returns (below, after `validated` is computed).
-    if message.strip():
+    if display_message.strip():
         await save_chat_message(
             household_id=household_id,
             chat_id=chat_id or "main",
             role="user",
-            text=message,
+            text=display_message,
         )
 
     async def event_stream() -> AsyncIterator[dict]:

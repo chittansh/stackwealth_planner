@@ -117,11 +117,12 @@ export async function* streamChat(
   id: string,
   message: string,
   chatId?: string,
+  displayMessage?: string,
 ): AsyncGenerator<ChatEvent> {
   const r = await fetch(`${BASE}/api/chat`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ household_id: id, message, chat_id: chatId }),
+    body: JSON.stringify({ household_id: id, message, chat_id: chatId, display_message: displayMessage }),
   });
   if (!r.body) throw new Error('chat: no body');
 

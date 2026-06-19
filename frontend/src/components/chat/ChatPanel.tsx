@@ -382,6 +382,16 @@ export function ChatPanel({ householdId }: { householdId: string }) {
         : attachments.length
         ? `I uploaded ${attachments.length} file${attachments.length > 1 ? 's' : ''}.${uploadContext}`
         : '';
+      // Clean, user-facing version persisted to history (no agent annotation).
+      // Names the file(s) so the message reads sensibly when the chat reopens.
+      const fileNames = attachments.map((f) => f.name).join(', ');
+      const displayText = text
+        ? attachments.length
+          ? `${text} (attached: ${fileNames})`
+          : text
+        : attachments.length
+        ? `I uploaded ${attachments.length} file${attachments.length > 1 ? 's' : ''}: ${fileNames}`
+        : '';
       void uploadFailedHard; // reserved for future UX hooks
 
       // Captured from the 'trace' SSE event and stamped onto the next
@@ -390,7 +400,7 @@ export function ChatPanel({ householdId }: { householdId: string }) {
       let pendingTrace: { traceId?: string; observationId?: string; turn?: number } = {};
 
       try {
-        for await (const ev of streamChat(householdId, finalText, store.activeChatId)) {
+        for await (const ev of streamChat(householdId, finalText, store.activeChatId, displayText)) {
           if (ev.event === 'tool_call') {
             const data = ev.data as { id: string; name: string; args: unknown };
             setMessages((m) =>
