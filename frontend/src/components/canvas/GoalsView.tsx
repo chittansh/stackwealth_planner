@@ -140,6 +140,15 @@ function buildRetirementBlock(
   const corpus = n('corpus_required');
   if (corpus <= 0) return null;
   const years = Math.round(n('years_to_retire'));
+  // Funded the way the firm sheet judges it — via the step-up plan (Section 3),
+  // not earmarked assets alone. The funded bar reads the step-up funded-%.
+  const stepupFunded = typeof ret['stepup_funded_pct'] === 'number' ? (ret['stepup_funded_pct'] as number) : null;
+  const fvGap = stepupFunded != null
+    ? Math.max(0, corpus * (1 - stepupFunded / 100))
+    : n('corpus_shortfall_after_existing');
+  // The realistic ask is the step-up STARTING SIP (grown 10%/yr), not a flat SIP.
+  const startReq = n('stepup_required_start_sip_monthly') || n('gross_monthly_sip');
+  const ongoing = n('ongoing_retirement_sip_monthly');
   return {
     goal_name: 'Retirement',
     goal_id: '__retirement__',
@@ -150,12 +159,12 @@ function buildRetirementBlock(
     future_value_needed: corpus,
     allocated_today_total: 0,
     gap_today: 0,
-    fv_gap: n('corpus_shortfall_after_existing'),
+    fv_gap: fvGap,
     effective_return: n('sip_funding_return') || 0.105,
-    required_sip_monthly: n('gross_monthly_sip'),
-    existing_sip_monthly: n('ongoing_retirement_sip_monthly'),
-    incremental_sip_monthly: n('required_monthly_sip'),
-    affordable_sip_monthly: n('required_monthly_sip'),
+    required_sip_monthly: startReq,
+    existing_sip_monthly: ongoing,
+    incremental_sip_monthly: n('stepup_additional_start_sip_monthly'),
+    affordable_sip_monthly: n('stepup_additional_start_sip_monthly'),
     sip_shortfall_monthly: 0,
     funded_share_at_affordable_sip: 1,
   };

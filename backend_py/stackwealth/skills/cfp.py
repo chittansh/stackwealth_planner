@@ -695,6 +695,10 @@ def compute_retirement_stepup(
         "current_corpus_today": round(current_corpus_today),
         "projected_corpus_at_retirement": round(cumulative),
         "corpus_needed": round(corpus_needed),
+        # Step-up FUNDING — the firm's actual fulfilment verdict (Section 3 of
+        # the Retirement Plan tab): does the stepped-up contribution + current
+        # corpus reach what's needed?
+        "funded_pct": round((cumulative / corpus_needed) * 100, 1) if corpus_needed else 100.0,
         "excess_or_gap": round(excess),
         "excess_pct": round(excess / corpus_needed, 4) if corpus_needed else 0.0,
         "reaches_goal": excess >= 0,
@@ -1531,6 +1535,21 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         rate=POST_TAX_RETURN["equity_hybrid"],  # 10.5% (Assumptions E22)
         corpus_needed=retirement["corpus_required"],
     )
+
+    # ── Step-up fulfilment (Section 3 is the firm's actual verdict) ─────
+    # The retirement goal is "fulfilled" when the CURRENT retirement
+    # contribution, stepped up 10%/yr, plus the earmarked corpus, reaches the
+    # required corpus — NOT when a flat level-SIP fully funds it (that
+    # over-states the gap). So the canvas/report/suggestions read the goal's
+    # funded-% and on-track verdict off the step-up plan.
+    _sp = retirement["stepup_plan"]
+    retirement["stepup_funded_pct"] = _sp.get("funded_pct")
+    retirement["stepup_reaches_goal"] = _sp.get("reaches_goal")
+    # Additional STARTING SIP (stepped up 10%/yr) needed on top of what's
+    # already flowing to retirement — 0 when the current trajectory reaches it.
+    _req_start = _sp.get("required_first_year_monthly", 0) or 0
+    retirement["stepup_required_start_sip_monthly"] = round(_req_start)
+    retirement["stepup_additional_start_sip_monthly"] = max(0, round(_req_start - ongoing_retirement_sip))
 
     # ── Insurance need ─────────────────────────────────────────────────
     loans = plan.loans_liabilities

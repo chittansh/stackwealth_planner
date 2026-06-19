@@ -432,39 +432,52 @@ def compute_suggestions(plan: PlanState) -> dict:
         })
 
     # ── Retirement domain ─────────────────────────────────────────────
+    # Fulfilment is judged the way the firm's sheet does it — via the STEP-UP
+    # plan (Section 3): does the current retirement contribution, stepped up
+    # 10%/yr, plus the earmarked corpus, reach what's needed? The flat level-SIP
+    # figure is kept as a conservative alternative, not the verdict.
     ret = cfp.retirement
     ret_shortfall = ret.get("corpus_shortfall_after_existing", 0) or 0
-    ret_required = ret.get("required_monthly_sip", 0) or 0
+    ret_required = ret.get("required_monthly_sip", 0) or 0          # flat level SIP (conservative)
     corpus_req = ret.get("corpus_required", 0) or 0
     provisioned = ret.get("projected_existing_corpus_fv", 0) or 0
-    ret_levers = _retirement_levers(plan, ret) if ret_required > 0 else []
-    ret_funded_pct = round((provisioned / corpus_req) * 100, 1) if corpus_req else 100.0
+    ongoing_ret_sip = ret.get("ongoing_retirement_sip_monthly", 0) or 0
+    stepup_reaches = bool(ret.get("stepup_reaches_goal"))
+    stepup_funded = ret.get("stepup_funded_pct")
+    stepup_start_req = ret.get("stepup_required_start_sip_monthly", 0) or 0   # starting SIP to reach via step-up
+    stepup_additional = ret.get("stepup_additional_start_sip_monthly", 0) or 0  # extra over current, stepped up
+    ret_levers = _retirement_levers(plan, ret) if not stepup_reaches else []
     retirement_dom = {
         "title": "Suggested Retirement Glide",
         "corpus_required": round(corpus_req),
         "provisioned": round(provisioned),
         "shortfall": round(ret_shortfall),
+        # step-up verdict (primary)
+        "funded_pct": stepup_funded if stepup_funded is not None else (round((provisioned / corpus_req) * 100, 1) if corpus_req else 100.0),
+        "on_track": stepup_reaches,
+        "stepup_reaches_goal": stepup_reaches,
+        "stepup_required_start_sip_monthly": round(stepup_start_req),
+        "stepup_additional_start_sip_monthly": round(stepup_additional),
+        # flat level-SIP alternative (conservative)
         "required_sip_monthly": round(ret_required),
-        "ongoing_sip_monthly": round(ret.get("ongoing_retirement_sip_monthly", 0) or 0),
-        "funded_pct": ret_funded_pct,
+        "ongoing_sip_monthly": round(ongoing_ret_sip),
         "levers": ret_levers,
-        "on_track": ret_required <= 0,
     }
 
-    # Retirement is a GOAL too — surface it in Suggested Goals with the SIPs
-    # already flowing to it (NPS/VPF/etc.) credited, so we never double-ask.
-    if ret_required > 0:
-        gross_ret_sip = ret.get("gross_monthly_sip", 0) or 0
-        ongoing_ret_sip = ret.get("ongoing_retirement_sip_monthly", 0) or 0
+    # Retirement is a GOAL too — surface it in Suggested Goals (only when the
+    # step-up trajectory does NOT already reach it), with the SIPs already
+    # flowing to it credited and the realistic step-up starting SIP as the ask.
+    if not stepup_reaches:
         retire_year = current_year + round(ret.get("years_to_retire", 0) or 0)
         goal_rows.insert(0, {
             "goal_name": "Retirement",
             "target_year": retire_year,
             "is_retirement": True,
-            "required_sip_monthly": round(gross_ret_sip),
+            "via_stepup": True,
+            "required_sip_monthly": round(stepup_start_req),   # step-up STARTING SIP to reach
             "existing_sip_monthly": round(ongoing_ret_sip),
-            "shortfall_monthly": round(ret_required),
-            "funded_pct": ret_funded_pct,
+            "shortfall_monthly": round(stepup_additional),     # extra to add to the starting SIP
+            "funded_pct": stepup_funded,
             "levers": ret_levers,
         })
 
@@ -571,7 +584,9 @@ def compute_suggestions(plan: PlanState) -> dict:
         },
     }
 
-    has_gaps = bool(goal_rows) or ret_required > 0 or sip_shortfall > 0
+    # A gap exists if any goal is short, retirement's step-up trajectory does
+    # NOT reach the corpus, or the SIPs already exceed monthly surplus.
+    has_gaps = bool(goal_rows) or (not stepup_reaches) or sip_shortfall > 0
 
     return {
         "generated_at": datetime.now().isoformat(),

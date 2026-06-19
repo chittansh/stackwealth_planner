@@ -1750,17 +1750,20 @@ def _sandeep_s4b_suggestions(plan: PlanState) -> str:
     r = s["domains"]["retirement"]
     ret_html = f"""
     <h3>Suggested Retirement Glide</h3>
+    <p class="muted">Funding judged via the step-up plan (the firm's Section 3 method): the corpus is reached by stepping the retirement SIP up {round(0.10*100)}%/yr, not by a flat lump SIP.</p>
     <table>
       <tbody>
         <tr><td>Corpus required</td><td class="num">{_fmt_inr(r['corpus_required'])}</td></tr>
-        <tr><td>Provisioned (earmarked assets)</td><td class="num">{_fmt_inr(r['provisioned'])}</td></tr>
-        <tr><td>Funded</td><td class="num">{r['funded_pct']}%</td></tr>
-        <tr style="font-weight:600;background:#f4f4f5;"><td>Additional SIP to close the gap</td><td class="num">{_fmt_inr(r['required_sip_monthly'])}/mo</td></tr>
+        <tr><td>Funded via step-up plan</td><td class="num">{r['funded_pct']}%</td></tr>
+        <tr><td>Step-up starting SIP to reach</td><td class="num">{_fmt_inr(r.get('stepup_required_start_sip_monthly', 0))}/mo</td></tr>
+        <tr><td>Already contributing to retirement</td><td class="num">{_fmt_inr(r.get('ongoing_sip_monthly', 0))}/mo</td></tr>
+        <tr style="font-weight:600;background:#f4f4f5;"><td>Add to the starting SIP (then step up {round(0.10*100)}%/yr)</td><td class="num">{_fmt_inr(r.get('stepup_additional_start_sip_monthly', 0))}/mo</td></tr>
+        <tr><td class="muted">Conservative flat-SIP alternative</td><td class="num muted">{_fmt_inr(r['required_sip_monthly'])}/mo</td></tr>
       </tbody>
     </table>
-    {_levers_html(r.get('levers', []))}""" if not r.get("on_track") else """
+    {_levers_html(r.get('levers', []))}""" if not r.get("on_track") else f"""
     <h3>Suggested Retirement Glide</h3>
-    <p>Retirement is on track at the current contribution level.</p>"""
+    <p>Retirement is on track — the current retirement SIP, stepped up {round(0.10*100)}%/yr, reaches the corpus ({r.get('funded_pct', 100)}% funded).</p>"""
 
     nudge = s.get("nudges", [{}])[0]
     nudge_html = f"""

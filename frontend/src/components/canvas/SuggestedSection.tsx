@@ -186,14 +186,32 @@ function GoalsBody({ snap }: { snap: SuggestionsSnapshot }) {
 
 function RetirementBody({ snap }: { snap: SuggestionsSnapshot }) {
   const r = snap.domains.retirement;
-  if (r.on_track) return <p className="text-sm text-zinc-600">Retirement is on track at the current contribution level.</p>;
+  if (r.on_track) {
+    return (
+      <p className="text-sm text-zinc-600">
+        Retirement is on track — your current retirement SIP, stepped up 10%/yr, reaches the corpus
+        ({r.funded_pct}% funded).
+      </p>
+    );
+  }
   return (
     <>
+      <p className="text-[11px] text-zinc-500">
+        Funded via the step-up plan (the firm&apos;s method) — reach the corpus by stepping the
+        retirement SIP up 10%/yr, not a flat lump SIP.
+      </p>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
         <Mini label="Corpus required" value={formatINR(r.corpus_required, { compact: true })} />
-        <Mini label="Provisioned" value={formatINR(r.provisioned, { compact: true })} />
-        <Mini label="Funded" value={`${r.funded_pct}%`} />
-        <Mini label="Additional SIP" value={`${formatINR(r.required_sip_monthly)}/mo`} accent="bad" />
+        <Mini label="Funded (step-up)" value={`${r.funded_pct}%`} />
+        <Mini
+          label="Start SIP to reach"
+          value={`${formatINR(r.stepup_required_start_sip_monthly ?? r.required_sip_monthly)}/mo`}
+        />
+        <Mini
+          label="Add to starting SIP"
+          value={`${formatINR(r.stepup_additional_start_sip_monthly ?? 0)}/mo`}
+          accent="bad"
+        />
       </div>
       <LeverList levers={r.levers} />
     </>

@@ -515,8 +515,12 @@ export type SuggestionsSnapshot = {
       shortfall: number;
       required_sip_monthly: number;
       funded_pct: number;
-      levers: SuggestionLever[];
       on_track: boolean;
+      stepup_reaches_goal?: boolean;
+      stepup_required_start_sip_monthly?: number;
+      stepup_additional_start_sip_monthly?: number;
+      ongoing_sip_monthly?: number;
+      levers: SuggestionLever[];
     };
   };
   nudges: { lever: string; title: string; question: string }[];
