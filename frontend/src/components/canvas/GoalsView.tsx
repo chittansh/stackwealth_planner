@@ -22,7 +22,6 @@ export function GoalsView({ plan }: { plan: PlanState | null }) {
   const today = new Date().getFullYear();
   const horizon = plan.computed.horizon_years || 45;
   const driver = plan.computed.risk_profile?.need_primary_goal;
-  const recommendedScore = plan.computed.risk_profile?.recommended_score ?? 50;
   const goalBlocks = (plan.computed.cfp?.goal_blocks as GoalBlock[] | undefined) ?? [];
 
   // Retirement is a goal too — synthesize a block from the Excel-faithful
@@ -49,9 +48,6 @@ export function GoalsView({ plan }: { plan: PlanState | null }) {
           <ul className="flex flex-col gap-3">
             {retirementBlock && (
               <li className="flex items-center gap-3">
-                <Pill tone={(retirementBlock.fv_gap ?? 0) > 0 ? 'muted' : 'matcha'}>
-                  {(retirementBlock.fv_gap ?? 0) > 0 ? 'underfunded' : 'on track'}
-                </Pill>
                 <div className="flex-1">
                   <div className="flex justify-between text-sm">
                     <span className="text-zinc-800">
@@ -72,12 +68,10 @@ export function GoalsView({ plan }: { plan: PlanState | null }) {
               </li>
             )}
             {goals.map((g) => {
-              const status = goalStatus(g, recommendedScore);
               const yr = g.target_year ?? today + (g.horizon_years ?? 10);
               const block = goalBlocks.find((b) => b.goal_id === g.id || b.goal_name === g.goal_name);
               return (
                 <li key={g.id} className="flex items-center gap-3">
-                  <Pill tone={status.tone}>{status.label}</Pill>
                   <div className="flex-1">
                     <div className="flex justify-between text-sm">
                       <span className="text-zinc-800">
@@ -359,13 +353,6 @@ function FeasibilityRow({
   );
 }
 
-function goalStatus(g: Goal, recommendedScore: number): { label: string; tone: 'matcha' | 'muted' | 'dark' } {
-  const r = estReqReturn(g);
-  const need = r <= 0.06 ? 25 : r <= 0.08 ? 40 : r <= 0.10 ? 55 : r <= 0.12 ? 70 : r <= 0.14 ? 85 : 95;
-  if (need <= recommendedScore - 10) return { label: 'on track', tone: 'matcha' };
-  return { label: 'at risk', tone: 'muted' };
-}
-
 const REQ_RETURN_CEILING = 0.30;
 
 function formatReqReturn(r: number): string {
@@ -393,15 +380,4 @@ function estReqReturn(g: Goal): number {
     if (f(mid) < 0) lo = mid; else hi = mid;
   }
   return (lo + hi) / 2;
-}
-
-function Pill({ tone, children }: { tone: 'matcha' | 'muted' | 'dark'; children: React.ReactNode }) {
-  const map = {
-    matcha: 'bg-[var(--color-accent-soft)] text-[color:var(--color-accent)]',
-    muted: 'bg-zinc-100 text-zinc-600',
-    dark: 'bg-zinc-200 text-zinc-800',
-  } as const;
-  return (
-    <span className={`text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full ${map[tone]}`}>{children}</span>
-  );
 }
