@@ -19,18 +19,25 @@ import { SuggestedSection } from './SuggestedSection';
 export function GoalsView({ plan }: { plan: PlanState | null }) {
   if (!plan) return null;
   const goals = plan.financial_goals;
-  if (!goals.length) {
+  const today = new Date().getFullYear();
+  const horizon = plan.computed.horizon_years || 45;
+  const driver = plan.computed.risk_profile?.need_primary_goal;
+  const recommendedScore = plan.computed.risk_profile?.recommended_score ?? 50;
+  const goalBlocks = (plan.computed.cfp?.goal_blocks as GoalBlock[] | undefined) ?? [];
+
+  // Retirement is a goal too — synthesize a block from the Excel-faithful
+  // retirement engine so it appears in the timeline + goal-planning detail
+  // alongside the other goals (the firm sheet keeps it on a separate tab).
+  const retirementBlock = buildRetirementBlock(plan.computed.cfp?.retirement, today);
+  const blocksWithRetire = retirementBlock ? [retirementBlock, ...goalBlocks] : goalBlocks;
+
+  if (!goals.length && !retirementBlock) {
     return (
       <div className="rounded-xl border border-dashed border-zinc-200 p-10 text-sm text-zinc-500 text-center">
         No goals yet. Tell me about retirement, child education, or a property purchase.
       </div>
     );
   }
-  const today = new Date().getFullYear();
-  const horizon = plan.computed.horizon_years || 45;
-  const driver = plan.computed.risk_profile?.need_primary_goal;
-  const recommendedScore = plan.computed.risk_profile?.recommended_score ?? 50;
-  const goalBlocks = (plan.computed.cfp?.goal_blocks as GoalBlock[] | undefined) ?? [];
 
   return (
     <div className="flex flex-col gap-4">
@@ -40,6 +47,30 @@ export function GoalsView({ plan }: { plan: PlanState | null }) {
           <div className="absolute left-[-3px] top-0 w-2 h-2 rounded-full bg-zinc-300" />
           <div className="text-[11px] uppercase tracking-wide text-zinc-400 mb-2 ml-1">today · {today}</div>
           <ul className="flex flex-col gap-3">
+            {retirementBlock && (
+              <li className="flex items-center gap-3">
+                <Pill tone={(retirementBlock.fv_gap ?? 0) > 0 ? 'muted' : 'matcha'}>
+                  {(retirementBlock.fv_gap ?? 0) > 0 ? 'underfunded' : 'on track'}
+                </Pill>
+                <div className="flex-1">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-zinc-800">
+                      Retirement
+                      <span className="ml-1.5 text-[9px] uppercase tracking-wide text-[color:var(--color-accent,#5f7d56)] border border-[color:var(--color-accent,#5f7d56)]/40 rounded px-1 py-0.5">
+                        corpus
+                      </span>
+                    </span>
+                    <span className="tabular-nums text-zinc-700">
+                      {formatINR(retirementBlock.future_value_needed ?? 0, { compact: true })}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-zinc-400">
+                    {retirementBlock.target_year} · priority essential · req. return{' '}
+                    {formatReqReturn(retirementBlock.effective_return ?? 0.105)}
+                  </div>
+                </div>
+              </li>
+            )}
             {goals.map((g) => {
               const status = goalStatus(g, recommendedScore);
               const yr = g.target_year ?? today + (g.horizon_years ?? 10);
@@ -69,7 +100,7 @@ export function GoalsView({ plan }: { plan: PlanState | null }) {
         </div>
       </div>
 
-      {goalBlocks.length > 0 && <GoalBlocksDetail goals={goals} blocks={goalBlocks} />}
+      {blocksWithRetire.length > 0 && <GoalBlocksDetail goals={goals} blocks={blocksWithRetire} />}
 
       <SuggestedSection plan={plan} domain="goals" />
     </div>
@@ -97,6 +128,39 @@ type GoalBlock = {
   funded_share_at_affordable_sip?: number;
 };
 
+/** Synthesize a retirement GoalBlock from the Excel-faithful retirement
+ * engine output so retirement shows up as a first-class goal. The funded bar
+ * reads (corpus − shortfall)/corpus; SIP cells show gross vs existing vs add. */
+function buildRetirementBlock(
+  ret: Record<string, unknown> | undefined | null,
+  today: number,
+): GoalBlock | null {
+  if (!ret) return null;
+  const n = (k: string) => (typeof ret[k] === 'number' ? (ret[k] as number) : 0);
+  const corpus = n('corpus_required');
+  if (corpus <= 0) return null;
+  const years = Math.round(n('years_to_retire'));
+  return {
+    goal_name: 'Retirement',
+    goal_id: '__retirement__',
+    target_year: today + years,
+    years_to_go: years,
+    today_cost: n('annual_expense_today') || n('retirement_annual_expense_today'),
+    inflation_used: n('inflation_during_retirement'),
+    future_value_needed: corpus,
+    allocated_today_total: 0,
+    gap_today: 0,
+    fv_gap: n('corpus_shortfall_after_existing'),
+    effective_return: n('sip_funding_return') || 0.105,
+    required_sip_monthly: n('gross_monthly_sip'),
+    existing_sip_monthly: n('ongoing_retirement_sip_monthly'),
+    incremental_sip_monthly: n('required_monthly_sip'),
+    affordable_sip_monthly: n('required_monthly_sip'),
+    sip_shortfall_monthly: 0,
+    funded_share_at_affordable_sip: 1,
+  };
+}
+
 function GoalBlocksDetail({ goals, blocks }: { goals: Goal[]; blocks: GoalBlock[] }) {
   return (
     <div className="rounded-xl border border-zinc-200 bg-white p-5">
@@ -109,7 +173,9 @@ function GoalBlocksDetail({ goals, blocks }: { goals: Goal[]; blocks: GoalBlock[
       <div className="flex flex-col gap-4">
         {blocks.map((b) => {
           const goal = goals.find((g) => g.id === b.goal_id || g.goal_name === b.goal_name);
-          const importance = goal?.priority === 'essential' ? 'Essential' : goal?.priority === 'aspirational' ? 'Desirable' : 'Important';
+          const importance = b.goal_name === 'Retirement'
+            ? 'Essential'
+            : goal?.priority === 'essential' ? 'Essential' : goal?.priority === 'aspirational' ? 'Desirable' : 'Important';
           const fundedPct = (b.future_value_needed ?? 0) > 0
             ? Math.max(0, Math.min(100, ((b.future_value_needed! - (b.fv_gap ?? 0)) / b.future_value_needed!) * 100))
             : 0;
