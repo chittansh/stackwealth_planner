@@ -2639,11 +2639,15 @@ def _sandeep_s9_roadmap(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     actions = _top_recommendations(plan)
     fsi = plan.freedom_score_inputs
 
+    def _plan_cell(g: dict) -> str:
+        sip = g.get("required_sip_monthly") or 0
+        return f'SIP {_fmt_inr(sip)}/mo' if sip > 0 else '<span class="muted">Funded</span>'
+
     timeline_rows = "".join(
         f'<tr><td class="num">{g["target_year"]}</td>'
         f'<td>{_h(g["goal_name"])}</td>'
         f'<td class="num">{_fmt_inr(g["future_value_needed"])}</td>'
-        f'<td>SIP ₹{g["required_sip_monthly"]:,}/mo</td></tr>'
+        f'<td>{_plan_cell(g)}</td></tr>'
         for g in cfp.goal_blocks
     )
 

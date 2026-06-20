@@ -229,7 +229,9 @@ function GoalBlocksDetail({ goals, blocks }: { goals: Goal[]; blocks: GoalBlock[
                 />
                 <Cell
                   label="SIP needed"
-                  value={formatINR(b.required_sip_monthly ?? 0, { compact: true }) + '/mo'}
+                  value={(b.required_sip_monthly ?? 0) > 0
+                    ? formatINR(b.required_sip_monthly!, { compact: true }) + '/mo'
+                    : 'Funded'}
                   emphasis
                 />
                 <Cell
