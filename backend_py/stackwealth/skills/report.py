@@ -149,6 +149,15 @@ body {
 .page { page-break-after: always; padding-bottom: 18mm; position: relative; }
 .page:last-child { page-break-after: auto; }
 
+/* ── Pagination hygiene ──────────────────────────────────────────────── */
+h2, h3, h4 { page-break-after: avoid; break-after: avoid; }
+table { page-break-inside: auto; }
+tr { page-break-inside: avoid; break-inside: avoid; }
+thead { display: table-header-group; }   /* repeat header when a table splits */
+tfoot { display: table-footer-group; }
+.kpis, .callout, .stat, .kcell { page-break-inside: avoid; break-inside: avoid; }
+p { orphans: 3; widows: 3; }
+
 /* ── Headings ────────────────────────────────────────────────────────── */
 h1 { font-size: 24pt; margin: 0 0 5mm; font-weight: 700; letter-spacing: -0.02em; color: var(--ink); }
 h2 {
@@ -1370,11 +1379,19 @@ def _sandeep_networth_overview(plan: PlanState, cfp: cfp_skill.CFPOutput, sug: d
     (<strong>{'+' if delta_h >= 0 else ''}{_fmt_lakhs(delta_h)}</strong> vs the current plan), and at retirement to
     <strong>{_fmt_lakhs(sug_at_retire or base_at_retire)}</strong>.</p>"""
 
-    # Trajectory table (both series).
+    # Trajectory table (both series). Sample to ~3-year steps so it reads as a
+    # one-page summary (the full year-by-year net worth is in Section 2.4b);
+    # always keep today, the retirement year, and the final year.
     show_sug = sug_has_gaps and bool(sug_series)
     hdr_sug = '<th class="num">Suggested Plan</th>' if show_sug else ""
+    last_year = baseline[-1]["year"]
+
+    def _keep(yr: int, i: int) -> bool:
+        return i == 0 or yr == retire_year or yr == last_year or (yr - start_year) % 3 == 0
+
+    shown = [p for i, p in enumerate(baseline) if _keep(p["year"], i)]
     body = ""
-    for p in baseline:
+    for p in shown:
         yr = p["year"]
         age = int(start_age) + (yr - start_year)
         sug_cell = f'<td class="num">{_fmt_lakhs(sug_by_year.get(yr))}</td>' if show_sug else ""
@@ -1385,8 +1402,8 @@ def _sandeep_networth_overview(plan: PlanState, cfp: cfp_skill.CFPOutput, sug: d
   <h2>NET WORTH TRAJECTORY — {horizon_years}-YEAR OUTLOOK</h2>
   {desc}
   {cards}
-  <h3>Year-by-Year Net Worth{' — Current vs Suggested' if show_sug else ''}</h3>
-  <table style="font-size:8px;">
+  <h3>Net Worth at 3-Year Milestones{' — Current vs Suggested' if show_sug else ''}</h3>
+  <table style="font-size:9px;">
     <thead><tr><th>Year</th><th class="num">Age</th><th class="num">Current Plan</th>{hdr_sug}</tr></thead>
     <tbody>{body}</tbody>
   </table>
@@ -1912,20 +1929,50 @@ def _sandeep_s4_goals(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
              "effective return — equity for the early years de-risking toward debt as the goal approaches. "
              "All SIP calculations use Excel-faithful <code>PMT(rate/12, n×12, 0, −FV_gap)</code>.</p>")
 
+    def _strategy(g: dict) -> str:
+        sip = g.get("required_sip_monthly") or 0
+        if sip > 0:
+            return f"SIP {_fmt_inr(sip)}/mo @ {g['effective_return']*100:.1f}%"
+        return "Funded by existing assets"
+
     overview_rows = "".join(
         f"<tr><td>{_h(g['goal_name'])}</td>"
         f"<td>{g['target_year']} ({g['years_to_go']} yrs)</td>"
         f'<td class="num">{_fmt_lakhs(g["today_cost"])}</td>'
         f'<td class="num">{_fmt_lakhs(g["future_value_needed"])} @ {g["inflation_used"]*100:.0f}%</td>'
-        f'<td>SIP ₹{g["required_sip_monthly"]:,}/mo @ {g["effective_return"]*100:.1f}%</td></tr>'
+        f"<td>{_strategy(g)}</td></tr>"
         for g in cfp.goal_blocks
     )
     if not overview_rows:
         overview_rows = '<tr><td colspan="5" class="muted">No goals set yet — add one in chat.</td></tr>'
 
+    # Split goals: those needing a fresh SIP get the full step-by-step block;
+    # those already covered by allocated assets get a single compact row each
+    # (a full formula trace showing ₹0 everywhere is just noise).
+    funded = [g for g in cfp.goal_blocks if (g.get("required_sip_monthly") or 0) <= 0]
+    needs_sip = [g for g in cfp.goal_blocks if (g.get("required_sip_monthly") or 0) > 0]
     detail_blocks = []
-    for i, g in enumerate(cfp.goal_blocks):
-        h_label = f"4.{i+2}  {_h(g['goal_name'])} ({g['target_year']})"
+    sec = 2
+
+    if funded:
+        frows = "".join(
+            f"<tr><td>{_h(g['goal_name'])}</td><td>{g['target_year']} ({g['years_to_go']}y)</td>"
+            f'<td class="num">{_fmt_lakhs(g["future_value_needed"])}</td>'
+            f'<td class="num">{_fmt_lakhs(g["allocated_today_total"])}</td></tr>'
+            for g in funded
+        )
+        detail_blocks.append(f"""
+        <h3>4.{sec}  Goals Fully Funded by Existing Assets</h3>
+        <p class="muted">These goals are already covered by assets earmarked in priority order — no fresh SIP is required. The inflation-adjusted need and the value allocated today are shown below.</p>
+        <table>
+          <thead><tr><th>Goal</th><th>Target</th><th class="num">Inflation-Adj. Need</th><th class="num">Allocated (today)</th></tr></thead>
+          <tbody>{frows}</tbody>
+        </table>""")
+        sec += 1
+
+    for g in needs_sip:
+        h_label = f"4.{sec}  {_h(g['goal_name'])} ({g['target_year']})"
+        sec += 1
         trace_rows = "".join(
             f'<tr><td>{_h(s["label"])}</td><td>{_h(s["formula"])}</td>'
             f'<td class="num">{_fmt_trace_value(s["value"], s["unit"])}</td></tr>'
@@ -1970,7 +2017,7 @@ def _sandeep_s4_goals(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
         if r.get("one_time_spend_fv") else ""
     )
     retirement_block = f"""
-    <h3>4.{len(cfp.goal_blocks)+2}  Retirement Goal — Detailed Calculation</h3>
+    <h3>4.{sec}  Retirement Goal — Detailed Calculation</h3>
     <p class="muted" style="margin-bottom:1mm;">Cell-for-cell port of the firm's <code>Retirement Plan</code> tab —
     corpus discounted at {r.get('corpus_discount_return', 0)*100:.2f}% (conservative post-tax), SIP funded at
     {r.get('sip_funding_return', 0)*100:.1f}% (hybrid post-tax), horizon sized to {_horizon_note}.</p>
