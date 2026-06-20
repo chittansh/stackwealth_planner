@@ -1850,20 +1850,6 @@ def _sandeep_s4b_suggestions(plan: PlanState, sug: dict | None = None) -> str:
       {('<br/><span style="color:#9a6a00;">' + _h(rec_residual) + '</span>') if rec_residual else ''}
     </div>"""
 
-    cf = s["domains"]["cashflow"]
-    cf_html = f"""
-    <h3>Suggested Cashflow</h3>
-    <table>
-      <tbody>
-        <tr><td>Monthly surplus (pre-SIP)</td><td class="num">{_fmt_inr(cf['monthly_surplus'])}</td></tr>
-        <tr><td>Existing SIPs</td><td class="num">{_fmt_inr(cf['monthly_existing_sip'])}</td></tr>
-        <tr><td>Room for new SIP</td><td class="num">{_fmt_inr(cf['affordable_new_sip'])}</td></tr>
-        <tr><td>Total new SIP required (all goals)</td><td class="num">{_fmt_inr(cf['total_required_incremental_sip'])}</td></tr>
-        <tr style="font-weight:600;background:#f4f4f5;"><td>{'Affordable as-is' if cf['is_affordable'] else 'Monthly shortfall to fund every goal'}</td><td class="num">{_fmt_inr(cf['sip_shortfall_monthly'])}</td></tr>
-      </tbody>
-    </table>
-    {_levers_html(cf.get('levers', []))}"""
-
     goals = s["domains"]["goals"]["goals"]
     goal_rows = "".join(
         f'<tr><td>{_h(g["goal_name"])}{" (retirement)" if g.get("is_retirement") else ""}</td><td class="num">{g["target_year"]}</td>'
@@ -1913,7 +1899,6 @@ def _sandeep_s4b_suggestions(plan: PlanState, sug: dict | None = None) -> str:
   <h2>SECTION 4B — SUGGESTED IMPROVEMENTS</h2>
   <p class="muted">How to do better than the as-is plan — concrete, math-backed levers. Guardrails: never delay children's education/marriage; retirement delay capped at age 62; value cuts bounded.</p>
   {rec_html}
-  {cf_html}
   {goals_html}
   {ret_html}
   {nudge_html}

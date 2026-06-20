@@ -107,6 +107,27 @@ def _liquidation_candidates(plan: PlanState) -> list[dict]:
     return out
 
 
+# Realism ordering — lead with what a household can actually do (step up SIPs
+# with income, give a flexible goal more time), keep the blunt "add a huge flat
+# SIP" and "grow income" toward the end, and push infeasible/locked levers last.
+_LEVER_ORDER = {
+    "step_up_sip": 0,
+    "delay_goal": 1,
+    "reduce_value": 2,
+    "liquidate_assets": 3,
+    "increase_sip": 4,
+    "increase_income": 5,
+    "lumpsum": 6,
+}
+
+
+def _order_levers(levers: list[dict]) -> list[dict]:
+    return sorted(
+        levers,
+        key=lambda l: (0 if l.get("feasible", True) else 10) + _LEVER_ORDER.get(l.get("lever"), 9),
+    )
+
+
 def _lever(lever: str, title: str, change: str, rationale: str, feasible: bool, impact: dict) -> dict:
     return {
         "lever": lever,
@@ -211,7 +232,7 @@ def _goal_levers(goal: Optional[Goal], block: dict, current_year: int,
                        "vs_flat_sip_monthly": round(req)},
             ))
 
-    return levers
+    return _order_levers(levers)
 
 
 # ── Retirement levers (via full re-simulation for consistency) ───────────
@@ -303,7 +324,7 @@ def _retirement_levers(plan: PlanState, ret: dict) -> list[dict]:
             True, {"start_sip_monthly": round(start), "step_up_pct": SIP_STEPUP_PCT,
                    "vs_flat_sip_monthly": round(req)},
         ))
-    return levers
+    return _order_levers(levers)
 
 
 # ── Recommended combined plan ────────────────────────────────────────────

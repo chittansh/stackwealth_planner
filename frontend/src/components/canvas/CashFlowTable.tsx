@@ -3,7 +3,6 @@
 import { useState } from 'react';
 import type { PlanState } from '@/types/plan-state';
 import { formatINR } from '@/lib/utils';
-import { SuggestedSection } from './SuggestedSection';
 
 type Mode = 'excel' | 'assets' | 'cashflow';
 
@@ -43,7 +42,6 @@ export function CashFlowTable({ plan }: { plan: PlanState | null }) {
   }
 
   return (
-    <div className="flex flex-col gap-4">
     <div className="rounded-xl border border-zinc-200 overflow-hidden bg-white">
       <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3">
         <div>
@@ -80,8 +78,6 @@ export function CashFlowTable({ plan }: { plan: PlanState | null }) {
           <CashflowTableInner rows={legacyRows} />
         )}
       </div>
-    </div>
-      <SuggestedSection plan={plan} domain="cashflow" />
     </div>
   );
 }
