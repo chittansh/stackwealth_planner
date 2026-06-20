@@ -38,23 +38,28 @@ export function GoalScenariosCard({ plan }: { plan: PlanState }) {
 
   const incrementalRequired = (s.total_incremental_sip_monthly as number) ?? 0;
   const affordableNewSip = (s.affordable_new_sip_monthly as number) ?? 0;
-  const affordableSipTotal = (s.affordable_sip_total_monthly as number) ?? 0;
   const rationFactor = (s.sip_ration_factor as number) ?? 1;
   const isAffordable = (s.is_plan_affordable as boolean) ?? incrementalRequired <= affordableNewSip;
 
-  // Per-goal rows for the side-by-side comparison
+  // Per-goal rows for the side-by-side comparison. Everything is on the
+  // NEW-SIP basis (the fresh SIP each goal needs beyond what's already
+  // running) — the same basis as the headline totals and the "what to do"
+  // note — so Required ≥ Feasible and the funded %s reconcile.
+  const feasiblePlanTotal = isAffordable ? incrementalRequired : affordableNewSip;
   const rows = goalBlocks
     .filter((g) => (g.required_sip_monthly ?? 0) > 0 || (g.incremental_sip_monthly ?? 0) > 0)
-    .map((g) => ({
-      name: g.goal_name ?? 'Unnamed',
-      year: g.target_year,
-      years: g.years_to_go,
-      fv: g.future_value_needed ?? 0,
-      requiredSip: g.required_sip_monthly ?? 0,
-      incrementalSip: g.incremental_sip_monthly ?? 0,
-      affordableSip: g.affordable_sip_monthly ?? 0,
-      fundedShare: g.funded_share_at_affordable_sip ?? 1,
-    }));
+    .map((g) => {
+      const requiredNewSip = g.incremental_sip_monthly ?? g.required_sip_monthly ?? 0;
+      return {
+        name: g.goal_name ?? 'Unnamed',
+        year: g.target_year,
+        years: g.years_to_go,
+        fv: g.future_value_needed ?? 0,
+        requiredNewSip,
+        feasibleNewSip: requiredNewSip * rationFactor,
+        fundedShare: rationFactor,
+      };
+    });
 
   if (rows.length === 0) return null;
 
@@ -91,7 +96,7 @@ export function GoalScenariosCard({ plan }: { plan: PlanState }) {
               ? 'Surplus covers everything'
               : `Capped at your monthly surplus (${formatINR(affordableNewSip, { compact: true })})`
           }
-          sipTotal={affordableSipTotal}
+          sipTotal={feasiblePlanTotal}
           fundedFraction={rationFactor}
           tone={isAffordable ? 'matcha' : 'amber'}
         />
@@ -124,11 +129,11 @@ export function GoalScenariosCard({ plan }: { plan: PlanState }) {
                     {formatINR(r.fv, { compact: true })}
                   </td>
                   <td className="py-1.5 text-right tabular-nums text-zinc-700">
-                    {formatINR(r.incrementalSip || r.requiredSip, { compact: true })}/mo
+                    {formatINR(r.requiredNewSip, { compact: true })}/mo
                   </td>
                   <td className="py-1.5 text-right tabular-nums">
                     <span className={fullyFunded ? 'text-[color:var(--color-accent,#5f7d56)]' : 'text-amber-700'}>
-                      {formatINR(r.affordableSip, { compact: true })}/mo
+                      {formatINR(r.feasibleNewSip, { compact: true })}/mo
                     </span>
                   </td>
                   <td className="py-1.5 text-right pr-1">
