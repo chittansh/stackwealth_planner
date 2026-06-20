@@ -120,6 +120,9 @@ type GoalBlock = {
   affordable_sip_monthly?: number;
   sip_shortfall_monthly?: number;
   funded_share_at_affordable_sip?: number;
+  /** Raw retirement engine output — present only on the synthesized retirement
+   * block, so the card can render the step-up vs current-SIP comparison. */
+  retirement_raw?: Record<string, unknown>;
 };
 
 /** Synthesize a retirement GoalBlock from the Excel-faithful retirement
@@ -164,6 +167,7 @@ function buildRetirementBlock(
     affordable_sip_monthly: 0,
     sip_shortfall_monthly: 0,
     funded_share_at_affordable_sip: 1,
+    retirement_raw: ret as Record<string, unknown>,
   };
 }
 
@@ -259,6 +263,9 @@ function GoalBlocksDetail({ goals, blocks }: { goals: Goal[]; blocks: GoalBlock[
                 </div>
               )}
 
+              {/* Step-up comparison — only on the retirement block */}
+              {b.retirement_raw && <StepupComparison ret={b.retirement_raw} />}
+
               {/* Funded progress bar */}
               <div className="mt-3">
                 <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
@@ -267,12 +274,78 @@ function GoalBlocksDetail({ goals, blocks }: { goals: Goal[]; blocks: GoalBlock[
                     style={{ width: `${fundedPct}%` }}
                   />
                 </div>
-                <div className="text-[10px] text-zinc-500 mt-1 tabular-nums">{fundedPct.toFixed(1)}% funded from existing assets</div>
+                <div className="text-[10px] text-zinc-500 mt-1 tabular-nums">
+                  {b.retirement_raw
+                    ? `${fundedPct.toFixed(1)}% funded if you step up your current SIP ${(((b.retirement_raw['stepup_plan'] as Record<string, unknown> | undefined)?.['step_up_pct'] as number ?? 0.10) * 100).toFixed(0)}%/yr`
+                    : `${fundedPct.toFixed(1)}% funded from existing assets`}
+                </div>
               </div>
             </div>
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/** Two-scenario comparison for retirement: the CURRENT plan (step up the existing
+ * SIP at the assumed rate → reaches X% of the corpus) vs the STEP-UP plan that
+ * fully funds it (start higher, same step-up → ~100%). Mirrors Section 3 of the
+ * firm Excel, where retirement is judged on the step-up schedule, not a flat SIP. */
+function StepupComparison({ ret }: { ret: Record<string, unknown> }) {
+  const n = (k: string) => (typeof ret[k] === 'number' ? (ret[k] as number) : 0);
+  const sp = (ret['stepup_plan'] as Record<string, unknown> | undefined) ?? {};
+  const spn = (k: string) => (typeof sp[k] === 'number' ? (sp[k] as number) : 0);
+
+  const corpus = n('corpus_required');
+  if (corpus <= 0) return null;
+  const stepPct = spn('step_up_pct') || 0.10;
+
+  // Current: existing SIP stepped up at stepPct (this is exactly what stepup_plan
+  // projects, since it's seeded from the ongoing SIP).
+  const curStart = n('ongoing_retirement_sip_monthly');
+  const curCorpus = spn('projected_corpus_at_retirement');
+  const curFunded = n('stepup_funded_pct') || (corpus > 0 ? (curCorpus / corpus) * 100 : 0);
+  const reaches = ret['stepup_reaches_goal'] === true;
+
+  // Required: start SIP needed so the same step-up schedule reaches 100%.
+  const reqStart = n('stepup_required_start_sip_monthly') || n('gross_monthly_sip');
+  const addlStart = n('stepup_additional_start_sip_monthly') || Math.max(0, reqStart - curStart);
+
+  return (
+    <div className="mt-4">
+      <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-2">
+        Step-up plan (Section 3) — SIP rises {(stepPct * 100).toFixed(0)}%/yr with income
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* Current scenario */}
+        <div className="rounded-lg border border-zinc-200 bg-white p-3">
+          <div className="text-[11px] font-medium text-zinc-700 mb-2">Current plan</div>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <Cell label={`Start SIP (+${(stepPct * 100).toFixed(0)}%/yr)`} value={formatINR(curStart, { compact: true }) + '/mo'} />
+            <Cell label="Reaches corpus" value={formatINR(curCorpus, { compact: true })} emphasis />
+            <Cell label="Funded" value={`${curFunded.toFixed(1)}%`} />
+            <Cell label="Status" value={reaches ? 'On track' : `${formatINR(Math.max(0, corpus - curCorpus), { compact: true })} short`} />
+          </div>
+        </div>
+        {/* Required step-up scenario */}
+        <div className="rounded-lg border border-[color:var(--color-accent,#5f7d56)]/40 bg-[color:var(--color-accent,#5f7d56)]/5 p-3">
+          <div className="text-[11px] font-medium text-zinc-700 mb-2">Step-up plan to fully fund</div>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <Cell label={`Start SIP (+${(stepPct * 100).toFixed(0)}%/yr)`} value={formatINR(reqStart, { compact: true }) + '/mo'} emphasis />
+            <Cell label="Reaches corpus" value={formatINR(corpus, { compact: true })} emphasis />
+            <Cell label="Funded" value="~100%" />
+            <Cell label="Extra vs current" value={addlStart > 0 ? '+' + formatINR(addlStart, { compact: true }) + '/mo' : '—'} />
+          </div>
+        </div>
+      </div>
+      {!reaches && addlStart > 0 && (
+        <p className="text-[10px] text-zinc-500 mt-2">
+          Stepping up the current {formatINR(curStart, { compact: true })}/mo SIP {(stepPct * 100).toFixed(0)}%/yr reaches
+          ~{curFunded.toFixed(0)}% of the corpus. Starting at {formatINR(reqStart, { compact: true })}/mo instead
+          (+{formatINR(addlStart, { compact: true })}/mo) closes the gap on the same schedule.
+        </p>
+      )}
     </div>
   );
 }
