@@ -155,7 +155,7 @@ table { page-break-inside: auto; }
 tr { page-break-inside: avoid; break-inside: avoid; }
 thead { display: table-header-group; }   /* repeat header when a table splits */
 tfoot { display: table-footer-group; }
-.kpis, .callout, .stat, .kcell { page-break-inside: avoid; break-inside: avoid; }
+.kbox, .callout, .stat, .kcell { page-break-inside: avoid; break-inside: avoid; }
 p { orphans: 3; widows: 3; }
 
 /* ── Headings ────────────────────────────────────────────────────────── */
@@ -1359,7 +1359,7 @@ def _sandeep_networth_overview(plan: PlanState, cfp: cfp_skill.CFPOutput, sug: d
 
     # Headline stat cards.
     cards = f"""
-    <div class="kpis">
+    <div class="kbox kbox-3">
       <div class="kcell"><div class="label">Net Worth Today</div><div class="val">{_fmt_lakhs(current_nw)}</div></div>
       <div class="kcell"><div class="label">At Retirement ({retire_year})</div><div class="val">{_fmt_lakhs(base_at_retire)}</div><div class="note">current plan</div></div>
       <div class="kcell"><div class="label">At Age {int(start_age) + horizon_years} ({baseline[-1]["year"]})</div><div class="val">{_fmt_lakhs(base_at_horizon)}</div><div class="note">current plan, {horizon_years}-yr horizon</div></div>
