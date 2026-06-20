@@ -21,6 +21,7 @@ const VIEWS = [
   { value: 'tax', label: 'Tax' },
   { value: 'debt', label: 'Debt Paydown' },
   { value: 'retirement', label: 'Retirement Glide' },
+  { value: 'scenarios', label: 'Scenarios' },
 ] as const;
 
 const HORIZONS = [

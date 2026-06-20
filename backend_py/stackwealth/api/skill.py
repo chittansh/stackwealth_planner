@@ -16,6 +16,7 @@ from ..skills.debt import paydown as debt_paydown
 from ..skills.freedom import score as freedom_score
 from ..skills.risk import assess as risk_assess
 from ..skills.scenario import run_monte_carlo
+from ..skills.scenarios import compute_scenarios
 from ..skills.suggestions import compute_suggestions
 from ..skills.tax import harvest as tax_harvest
 
@@ -140,4 +141,24 @@ async def suggestions(id: str) -> JSONResponse:
         await save_plan(plan)
     except Exception:
         pass  # returning the fresh snapshot matters more than persisting it
+    return _json(snapshot)
+
+
+@router.post("/scenarios/{id}")
+@router.get("/scenarios/{id}")
+async def scenarios(id: str) -> JSONResponse:
+    """Scenario engine (brief §6) — investable-surplus derivation, a
+    constructive verdict + confidence, and either a single optimised plan (if
+    on track) or Baseline / Easy / Aggressive paths (if there's a gap), built
+    from the six levers within the hard subjectivity rules. Powers the
+    Scenarios tab and the report's Section 8."""
+    plan = await get_plan(id)
+    if not plan:
+        return _json({"error": "household_not_found"})
+    snapshot = compute_scenarios(plan)
+    plan.computed.scenarios_v2 = snapshot
+    try:
+        await save_plan(plan)
+    except Exception:
+        pass
     return _json(snapshot)

@@ -170,6 +170,12 @@ export async function fetchSuggestions(id: string): Promise<unknown> {
   return r.json();
 }
 
+export async function fetchScenariosV2(id: string): Promise<unknown> {
+  const r = await fetch(`${BASE}/api/skill/scenarios/${id}`, { method: 'POST' });
+  if (!r.ok) throw new Error(`fetchScenariosV2 ${r.status}`);
+  return r.json();
+}
+
 export async function resetChat(id: string, chatId?: string) {
   const qs = chatId ? `?chat_id=${encodeURIComponent(chatId)}` : '';
   return fetch(`${BASE}/api/chat/${id}/reset${qs}`, { method: 'POST' }).then((r) => r.json());

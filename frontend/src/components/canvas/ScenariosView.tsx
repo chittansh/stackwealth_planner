@@ -1,0 +1,239 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+
+import type { PlanState, ScenariosSnapshot, ScenarioPath } from '@/types/plan-state';
+import { fetchScenariosV2 } from '@/lib/api';
+import { formatINR } from '@/lib/utils';
+
+/**
+ * Scenarios tab — the brief's §8 Scenario Analysis on screen. Shows the
+ * verdict + confidence, top-3 actions, the investable-surplus derivation, and
+ * either a single optimised plan (on track) or Baseline / Easy / Aggressive
+ * paths side-by-side with a comparison and "which path suits you".
+ *
+ * Reads `plan.computed.scenarios_v2`; fetches once if absent.
+ */
+export function ScenariosView({ plan }: { plan: PlanState | null }) {
+  const persisted = (plan?.computed?.scenarios_v2 ?? null) as ScenariosSnapshot | null;
+  const [local, setLocal] = useState<ScenariosSnapshot | null>(null);
+  const [loading, setLoading] = useState(false);
+  const id = plan?.household_id;
+  const hasCfp = !!plan?.computed?.cfp;
+
+  useEffect(() => {
+    if (persisted || local || !id || !hasCfp || loading) return;
+    setLoading(true);
+    fetchScenariosV2(id)
+      .then((s) => setLocal(s as ScenariosSnapshot))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [id, hasCfp, persisted, local, loading]);
+
+  const s = persisted ?? local;
+
+  if (!plan) return null;
+  if (!hasCfp) {
+    return (
+      <div className="rounded-xl border border-dashed border-zinc-200 p-10 text-sm text-zinc-500 text-center">
+        Add income and goals first — the scenario engine needs a baseline to compare against.
+      </div>
+    );
+  }
+  if (loading && !s) {
+    return (
+      <div className="rounded-xl border border-dashed border-[color:var(--color-accent,#5f7d56)]/40 p-10 text-sm text-zinc-500 text-center">
+        Running the scenario engine…
+      </div>
+    );
+  }
+  if (!s) return null;
+
+  const conf = s.verdict?.confidence ?? 'Medium';
+  const confTone =
+    conf.toLowerCase().includes('high')
+      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+      : conf.toLowerCase().includes('medium')
+      ? 'bg-amber-50 text-amber-700 border-amber-200'
+      : 'bg-rose-50 text-rose-700 border-rose-200';
+
+  const paths = (s.scenarios ?? []).filter((p) => p.key !== 'baseline');
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* Verdict */}
+      <div className="rounded-xl border border-[color:var(--color-accent,#5f7d56)]/30 bg-[color:var(--color-accent,#5f7d56)]/[0.05] p-5">
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-[10px] uppercase tracking-wide font-semibold text-[color:var(--color-accent,#5f7d56)]">
+            The Verdict
+          </span>
+          <span className={`text-[10px] uppercase tracking-wide border rounded-full px-2 py-0.5 ${confTone}`}>
+            Confidence: {conf}
+          </span>
+        </div>
+        <p className="text-base font-medium text-zinc-800 leading-snug">{s.verdict?.text}</p>
+      </div>
+
+      {/* Surplus derivation + headline numbers */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Stat label="Investable surplus" value={`${formatINR(s.surplus?.investable_surplus ?? 0)}/mo`} />
+        <Stat label="Total SIP needed" value={`${formatINR(s.total_sip_needed ?? 0)}/mo`} />
+        <Stat
+          label="Gap / cushion"
+          value={`${formatINR(Math.abs((s.surplus?.investable_surplus ?? 0) - (s.total_sip_needed ?? 0)))}/mo`}
+          accent={(s.surplus?.investable_surplus ?? 0) >= (s.total_sip_needed ?? 0) ? 'good' : 'bad'}
+        />
+        <Stat label="Emergency fund target" value={formatINR(s.surplus?.emergency_target ?? 0, { compact: true })} />
+      </div>
+
+      {/* Top 3 actions */}
+      {s.top_actions?.length > 0 && (
+        <div className="rounded-xl border border-zinc-200 bg-white p-5">
+          <h3 className="text-sm font-medium text-zinc-700 mb-2">Three things to do, whichever path you choose</h3>
+          <ol className="list-decimal ml-5 text-sm text-zinc-700 flex flex-col gap-1.5">
+            {s.top_actions.map((a, i) => (
+              <li key={i}>{a}</li>
+            ))}
+          </ol>
+        </div>
+      )}
+
+      {/* Single plan (on track) OR Easy/Aggressive paths */}
+      {s.achievable && s.single_plan ? (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-5">
+          <h3 className="text-sm font-medium text-emerald-800 mb-1">Your single optimised plan</h3>
+          <p className="text-sm text-zinc-700">{s.single_plan.headline}</p>
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {paths.map((p) => (
+              <PathCard key={p.key} path={p} />
+            ))}
+          </div>
+          {s.comparison && s.comparison.length > 0 && <ComparisonTable s={s} />}
+          {s.which_path && s.which_path.length > 0 && (
+            <div className="rounded-xl border border-zinc-200 bg-white p-5">
+              <h3 className="text-sm font-medium text-zinc-700 mb-2">Which path is right for you?</h3>
+              <div className="flex flex-col gap-2 text-sm text-zinc-700">
+                {s.which_path.map((w) => (
+                  <p key={w.path}>
+                    <span className="font-medium text-zinc-900">{w.path}.</span> {w.suits}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function PathCard({ path }: { path: ScenarioPath }) {
+  const fundedPct = Math.max(0, Math.min(100, path.corpus_required > 0 ? (path.retirement_corpus / path.corpus_required) * 100 : 100));
+  const isAggressive = path.key === 'aggressive';
+  return (
+    <div
+      className={`rounded-xl border p-5 ${
+        isAggressive ? 'border-[color:var(--color-accent,#5f7d56)]/40 bg-[color:var(--color-accent,#5f7d56)]/[0.04]' : 'border-zinc-200 bg-white'
+      }`}
+    >
+      <h3 className="text-sm font-semibold text-zinc-800">{path.name}</h3>
+      <p className="text-xs text-zinc-600 mt-1 mb-3">{path.headline}</p>
+
+      <div className="grid grid-cols-2 gap-2 text-xs mb-3">
+        <Mini label="Monthly SIP" value={`${formatINR(path.monthly_sip)}/mo`} />
+        <Mini label="Retire at" value={`${path.retirement_age}`} />
+        <Mini label="Net worth at retirement" value={formatINR(path.retirement_corpus, { compact: true })} />
+        <Mini label="Goals funded" value={`${path.goals_met_pct}%`} />
+      </div>
+
+      <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Levers pulled</div>
+      <ul className="text-xs text-zinc-700 flex flex-col gap-1 mb-3">
+        {path.levers.map((l, i) => (
+          <li key={i} className="flex gap-1.5">
+            <span className="text-[color:var(--color-accent,#5f7d56)]">•</span>
+            <span>{l}</span>
+          </li>
+        ))}
+      </ul>
+
+      {path.outcomes && path.outcomes.length > 0 && (
+        <div className="mb-3">
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Per-goal outcome</div>
+          <table className="w-full text-[11px]">
+            <tbody>
+              {path.outcomes.map((o) => (
+                <tr key={o.goal} className="border-b border-zinc-100 last:border-0">
+                  <td className="py-1 text-zinc-700">{o.goal}</td>
+                  <td className="py-1 text-zinc-500 tabular-nums">{o.target_year}</td>
+                  <td className="py-1 text-right text-zinc-700">{o.status}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden mb-1">
+        <div className="h-full bg-[color:var(--color-accent,#5f7d56)]" style={{ width: `${fundedPct}%` }} />
+      </div>
+      <p className="text-[11px] text-zinc-500 italic">{path.trade_off}</p>
+    </div>
+  );
+}
+
+function ComparisonTable({ s }: { s: ScenariosSnapshot }) {
+  const fmt = (v: unknown, kind: string) => {
+    if (v === null || v === undefined) return '—';
+    if (kind === 'money') return formatINR(Number(v), { compact: true });
+    if (kind === 'pct') return `${v}%`;
+    if (kind === 'age') return `Age ${v}`;
+    return String(v);
+  };
+  return (
+    <div className="rounded-xl border border-zinc-200 bg-white p-5 overflow-x-auto">
+      <h3 className="text-sm font-medium text-zinc-700 mb-3">Side-by-side comparison</h3>
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-left text-zinc-500 border-b border-zinc-100">
+            <th className="py-1.5 font-medium">Metric</th>
+            <th className="py-1.5 font-medium">Baseline</th>
+            <th className="py-1.5 font-medium">Easy Path</th>
+            <th className="py-1.5 font-medium">Aggressive Path</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(s.comparison ?? []).map((r) => (
+            <tr key={r.metric} className="border-b border-zinc-100 last:border-0 align-top">
+              <td className="py-1.5 text-zinc-700">{r.metric}</td>
+              <td className="py-1.5 text-zinc-700">{fmt(r.baseline, r.kind)}</td>
+              <td className="py-1.5 text-zinc-700">{fmt(r.easy, r.kind)}</td>
+              <td className="py-1.5 text-zinc-700">{fmt(r.aggressive, r.kind)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function Stat({ label, value, accent }: { label: string; value: string; accent?: 'good' | 'bad' }) {
+  const cls = accent === 'bad' ? 'text-rose-700' : accent === 'good' ? 'text-emerald-700' : 'text-zinc-800';
+  return (
+    <div className="rounded-xl border border-zinc-200 bg-white px-4 py-3">
+      <div className="text-[10px] uppercase tracking-wide text-zinc-400">{label}</div>
+      <div className={`text-base font-semibold tabular-nums mt-0.5 ${cls}`}>{value}</div>
+    </div>
+  );
+}
+
+function Mini({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex flex-col">
+      <span className="text-[10px] uppercase tracking-wide text-zinc-500">{label}</span>
+      <span className="tabular-nums font-medium text-zinc-800">{value}</span>
+    </div>
+  );
+}

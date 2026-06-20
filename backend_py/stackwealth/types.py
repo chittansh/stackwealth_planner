@@ -622,6 +622,9 @@ class ComputedSnapshot(StrictModel):
     # skills/suggestions.py. Loose dict (like `cfp`) so the canvas/report/
     # agent read the same shape without a strict round-trip.
     suggestions: Optional[dict] = None
+    # Scenario engine (brief §6) — verdict + Baseline/Easy/Aggressive paths.
+    # See skills/scenarios.py. Loose dict, same rationale as `cfp`.
+    scenarios_v2: Optional[dict] = None
 
 
 class ScenarioOp(StrictModel):

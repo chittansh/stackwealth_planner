@@ -454,6 +454,47 @@ export type ComputedSnapshot = {
   milestone_pins: MilestonePin[];
   cfp?: CFPSnapshot | null;
   suggestions?: SuggestionsSnapshot | null;
+  scenarios_v2?: ScenariosSnapshot | null;
+};
+
+export type ScenarioPath = {
+  key: 'baseline' | 'easy' | 'aggressive';
+  name: string;
+  headline: string;
+  levers: string[];
+  monthly_sip: number;
+  total_sip_needed?: number;
+  retirement_age: number;
+  retirement_corpus: number;
+  corpus_required: number;
+  goals_met_pct: number;
+  outcomes?: { goal: string; target_year?: number; status: string }[];
+  net_worth_series?: { year: number; value: number }[];
+  trade_off: string;
+};
+
+export type ScenariosSnapshot = {
+  generated_at: string;
+  surplus: {
+    monthly_income: number;
+    gross_surplus: number;
+    bare_minimum_expense: number;
+    emergency_target: number;
+    emergency_current: number;
+    emergency_build_sip: number;
+    investable_surplus: number;
+  };
+  total_sip_needed: number;
+  goal_sip_needed: number;
+  retirement_sip_needed: number;
+  verdict: { confidence: string; achievable: boolean; text: string };
+  top_actions: string[];
+  achievable: boolean;
+  single_plan?: { headline: string; monthly_sip: number; cushion_monthly: number; step_up_pct: number };
+  baseline: ScenarioPath;
+  scenarios: ScenarioPath[];
+  comparison?: { metric: string; kind: string; baseline: unknown; easy: unknown; aggressive: unknown }[];
+  which_path?: { path: string; suits: string }[];
 };
 
 export type SuggestionLever = {

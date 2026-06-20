@@ -29,6 +29,7 @@ from .. import config
 from ..db import get_plan
 from ..types import PlanState
 from . import cfp as cfp_skill
+from . import scenarios as scenarios_skill
 from . import suggestions as suggestions_skill
 
 
@@ -1233,25 +1234,31 @@ def _build_html(plan: PlanState) -> str:
 
 def _build_sandeep_html(plan: PlanState) -> str:
     cfp = cfp_skill.compute_cfp(plan)
-    # Compute the AI suggestions once and share across the net-worth overview
-    # (top of report) and the Section-4B suggestions block.
+    # Compute the AI layers once and share across sections.
     try:
         sug = suggestions_skill.compute_suggestions(plan)
     except Exception:
         sug = None
+    try:
+        scen = scenarios_skill.compute_scenarios(plan)
+    except Exception:
+        scen = None
+    # Brief structure: Page-1 exec summary → §1 Profile → §2 Cash Flow →
+    # §3 Net Worth → §4 Goals → §6 Risk → §7 Tax → §8 Scenario Analysis →
+    # §9 Roadmap → §11 Data Gaps. (§5 Investment Strategy is out of v1 scope.)
     sections = [
-        _sandeep_cover(plan, cfp),
+        _sandeep_page1(plan, cfp, scen),
         _sandeep_networth_overview(plan, cfp, sug),
         _sandeep_s1_profile(plan),
         _sandeep_s2_cashflow(plan, cfp),
         _sandeep_s3_networth(plan),
         _sandeep_s4_goals(plan, cfp),
         _sandeep_s4b_suggestions(plan, sug),
-        _sandeep_s5_strategy(plan, cfp),
         _sandeep_s6_risk(plan, cfp),
         _sandeep_s7_tax(plan),
-        _sandeep_s8_future(plan, cfp),
+        _sandeep_s8_scenarios(plan, cfp, scen),
         _sandeep_s9_roadmap(plan, cfp),
+        _sandeep_s11_datagaps(plan, scen),
     ]
     name = plan.personal_details.full_name or plan.household_id
     return f"""<!doctype html>
@@ -1262,6 +1269,244 @@ def _build_sandeep_html(plan: PlanState) -> str:
 </head><body>
 {''.join(sections)}
 </body></html>"""
+
+
+def _confidence_class(conf: str) -> str:
+    c = (conf or "").lower()
+    if "high" in c:
+        return "good"
+    if "medium" in c:
+        return "warn"
+    return "bad"
+
+
+def _life_timeline(plan: PlanState, scen: dict | None) -> str:
+    """Horizontal time-bar today → life expectancy with goal + retirement
+    markers, coloured by funded status. Pure CSS (print-safe)."""
+    fsi = plan.freedom_score_inputs
+    pd = plan.personal_details
+    today = datetime.now().year
+    age = fsi.age or 30
+    le = (plan.assumptions.persons[0].life_expectancy if plan.assumptions.persons else 85) or 85
+    end = today + max(20, le - age)
+    span = max(1, end - today)
+    retire_year = today + max(0, (pd.retirement_age_target or 60) - age)
+
+    # Goal funded status from scenarios baseline outcomes (best effort).
+    funded_by_year: dict[int, str] = {}
+    if scen:
+        for sc_ in (scen.get("scenarios") or []):
+            if sc_.get("key") != "baseline":
+                continue
+        # use suggestions/cfp shortfall: mark goals with shortfall as at-risk
+    short_names = set()
+    if plan.computed.cfp:
+        for b in (plan.computed.cfp.get("goal_blocks") or []):
+            if (b.get("sip_shortfall_monthly", 0) or 0) > 0:
+                short_names.add(b.get("goal_name"))
+
+    markers = []
+    seen_years = set()
+    pts = [(retire_year, "Retirement", "retire")]
+    for g in plan.financial_goals:
+        if g.target_year:
+            pts.append((g.target_year, g.goal_name or "Goal", "short" if g.goal_name in short_names else "ok"))
+    for yr, label, kind in sorted(pts):
+        if yr < today or yr > end:
+            continue
+        # nudge overlapping labels
+        row = 1 if yr in seen_years else 0
+        seen_years.add(yr)
+        pos = (yr - today) / span * 100
+        colour = {"retire": "var(--brand-deep)", "short": "var(--warn)", "ok": "var(--good)"}.get(kind, "var(--ink-soft)")
+        top = 6 if row == 0 else 13
+        markers.append(
+            f'<div style="position:absolute;left:{pos:.1f}%;top:0;width:1px;height:5mm;background:{colour};"></div>'
+            f'<div style="position:absolute;left:{pos:.1f}%;top:{top}mm;transform:translateX(-50%);font-size:6.5pt;color:{colour};white-space:nowrap;">{_h(label)} <span style="color:var(--ink-muted);">{yr}</span></div>'
+        )
+    return f"""
+  <div style="margin:3mm 0 2mm;">
+    <div style="position:relative;height:24mm;">
+      <div style="position:absolute;top:5mm;left:0;right:0;height:1.2mm;background:var(--brand-soft);border-radius:1mm;"></div>
+      <div style="position:absolute;top:2.5mm;left:0;font-size:6.5pt;color:var(--ink-muted);">Today · {today}</div>
+      <div style="position:absolute;top:2.5mm;right:0;font-size:6.5pt;color:var(--ink-muted);">Age {le} · {end}</div>
+      {''.join(markers)}
+    </div>
+  </div>"""
+
+
+def _sandeep_page1(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -> str:
+    """Page 1 — the stand-alone executive summary (brief §7 / Table 10)."""
+    pd = plan.personal_details
+    fsi = plan.freedom_score_inputs
+    nw = plan.computed.net_worth
+    persons = plan.assumptions.persons
+    name = pd.full_name or plan.household_id
+    spouse = persons[1].name if len(persons) > 1 and persons[1].name else None
+    headline = f"Mr. {name}" + (f" & Mrs. {spouse}" if spouse else "")
+    today = datetime.now().strftime("%B %Y")
+    age = fsi.age or 30
+    years_to_retire = max(0, (pd.retirement_age_target or 60) - age)
+
+    surplus_blk = (scen or {}).get("surplus") or {}
+    investable = surplus_blk.get("investable_surplus", (fsi.monthly_income or 0) - (fsi.monthly_expenses or 0) - (fsi.monthly_emi or 0))
+    verdict = (scen or {}).get("verdict") or {}
+    conf = verdict.get("confidence", "Medium")
+    verdict_text = verdict.get("text", "Your plan summary will appear here once goals and income are captured.")
+    top_actions = (scen or {}).get("top_actions") or []
+    n_goals = len([g for g in plan.financial_goals if (g.target_year or 0) > 0])
+
+    tiles = [
+        ("Monthly Net Income", _fmt_inr(fsi.monthly_income or 0)),
+        ("Investable Surplus", _fmt_inr(investable)),
+        ("Net Worth", _fmt_lakhs(nw.total)),
+        ("Active Goals", str(n_goals)),
+        ("Years to Retirement", str(years_to_retire)),
+    ]
+    tile_html = "".join(
+        f'<div style="flex:1;min-width:0;background:white;border:1px solid var(--line);border-top:2.5px solid var(--brand);border-radius:1.5mm;padding:3mm;">'
+        f'<div style="font-size:7.5pt;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-soft);font-weight:600;">{_h(lbl)}</div>'
+        f'<div style="font-size:13pt;font-weight:700;color:var(--brand-deep);margin-top:1mm;">{val}</div></div>'
+        for lbl, val in tiles
+    )
+
+    actions_html = "".join(
+        f'<li style="margin-bottom:1.5mm;">{_h(a)}</li>' for a in top_actions
+    ) or '<li class="muted">Actions appear once the plan is computed.</li>'
+
+    risk_note = "Risk profile: to be assessed — questionnaire not yet completed." if not plan.computed.risk_profile else ""
+
+    return f"""<section class="page cover">
+  <div class="cover-band">
+    <p class="brand">Stack Wealth — Research Desk</p>
+    <h1>Your Financial Plan</h1>
+    <p class="sub">Prepared for {_h(headline)} · {_h(pd.city_of_residence or '')} · {_h(today)}</p>
+  </div>
+
+  <div style="display:flex;gap:2.5mm;margin:6mm 0 5mm;">{tile_html}</div>
+
+  <div style="background:var(--brand-soft);border-left:3.5mm solid var(--brand);border-radius:0 2mm 2mm 0;padding:4mm 5mm;margin:0 0 4mm;">
+    <div style="font-size:8.5pt;text-transform:uppercase;letter-spacing:0.08em;color:var(--brand-deep);font-weight:600;margin-bottom:1.5mm;">The Verdict</div>
+    <div style="font-size:14pt;font-weight:600;line-height:1.45;color:var(--ink);">{_h(verdict_text)}</div>
+    <div style="margin-top:2.5mm;font-size:9pt;color:var(--ink-soft);">
+      Confidence: <span class="badge {_confidence_class(conf)}">{_h(conf)}</span>{(' · ' + _h(risk_note)) if risk_note else ''}
+    </div>
+  </div>
+
+  <h3>Three things to do, whichever path you choose</h3>
+  <ol style="margin-left:5mm;">{actions_html}</ol>
+
+  <h3>Your life timeline</h3>
+  {_life_timeline(plan, scen)}
+
+  <div style="margin-top:4mm;background:var(--cream);border:1px solid var(--line);border-radius:1.5mm;padding:3mm 4mm;font-size:8.5pt;color:var(--ink-soft);">
+    <strong style="color:var(--brand-deep);">What's in this report:</strong>
+    Cash Flow (§2) · Net Worth (§3) · Goal Plan (§4) · Protection (§6) · Tax info (§7) ·
+    <strong>The scenarios you can choose between (§8)</strong> · Roadmap (§9).
+  </div>
+</section>"""
+
+
+def _sandeep_s8_scenarios(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -> str:
+    """Section 8 — Scenario Analysis (brief §8). Baseline + Easy + Aggressive
+    + side-by-side comparison + which-path."""
+    if not scen:
+        return ""
+    scenarios = scen.get("scenarios") or []
+    baseline = next((s for s in scenarios if s.get("key") == "baseline"), None)
+
+    def _corpus_line(s: dict) -> str:
+        corpus = s.get("retirement_corpus", 0)
+        need = s.get("corpus_required", 0)
+        pct = round(corpus / need * 100) if need else 100
+        return f'Net worth at retirement (age {s.get("retirement_age")}): <strong>{_fmt_lakhs(corpus)}</strong> · corpus needed {_fmt_lakhs(need)} ({pct}%)'
+
+    # 8.1 baseline
+    parts = [f"""
+  <h3>8.1  The baseline — what happens if nothing changes</h3>
+  <p>{_h((baseline or {}).get('headline', ''))}</p>
+  <p class="muted">{_corpus_line(baseline) if baseline else ''}</p>"""]
+
+    if scen.get("achievable"):
+        sp = scen.get("single_plan") or {}
+        parts.append(f"""
+  <h3>8.2  Your single optimised plan</h3>
+  <p>{_h(sp.get('headline',''))}</p>""")
+    else:
+        for idx, key in enumerate(("easy", "aggressive"), start=2):
+            s = next((x for x in scenarios if x.get("key") == key), None)
+            if not s:
+                continue
+            levers = "".join(f"<li>{_h(l)}</li>" for l in s.get("levers", []))
+            outcomes = "".join(
+                f'<tr><td>{_h(o["goal"])}</td><td class="num">{o.get("target_year","")}</td><td>{_h(o["status"])}</td></tr>'
+                for o in s.get("outcomes", [])
+            )
+            parts.append(f"""
+  <h3>8.{idx}  {_h(s['name'])}</h3>
+  <p><strong>{_h(s.get('headline',''))}</strong></p>
+  <p class="muted" style="margin-bottom:1mm;">Levers pulled:</p>
+  <ul style="margin-left:5mm;">{levers}</ul>
+  <p class="muted">{_corpus_line(s)} · about {s.get('goals_met_pct')}% of goals funded.</p>
+  {('<table><thead><tr><th>Goal</th><th class="num">Year</th><th>Outcome</th></tr></thead><tbody>'+outcomes+'</tbody></table>') if outcomes else ''}
+  <p>{_h(s.get('trade_off',''))}</p>""")
+
+        # 8.4 comparison
+        comp = scen.get("comparison") or []
+        if comp:
+            def _cell(v, kind):
+                if v is None:
+                    return "—"
+                if kind == "money":
+                    return _fmt_lakhs(v)
+                if kind == "pct":
+                    return f"{v}%"
+                if kind == "age":
+                    return f"Age {v}"
+                return _h(str(v))
+            comp_rows = "".join(
+                f'<tr><td>{_h(r["metric"])}</td><td>{_cell(r["baseline"], r["kind"])}</td>'
+                f'<td>{_cell(r["easy"], r["kind"])}</td><td>{_cell(r["aggressive"], r["kind"])}</td></tr>'
+                for r in comp
+            )
+            parts.append(f"""
+  <h3>8.4  Side-by-side comparison</h3>
+  <table>
+    <thead><tr><th>Metric</th><th>Baseline</th><th>Easy Path</th><th>Aggressive Path</th></tr></thead>
+    <tbody>{comp_rows}</tbody>
+  </table>""")
+
+        # 8.5 which path
+        wp = scen.get("which_path") or []
+        if wp:
+            wp_html = "".join(f"<p><strong>{_h(w['path'])}.</strong> {_h(w['suits'])}</p>" for w in wp)
+            parts.append(f"""
+  <h3>8.5  Which path is right for you?</h3>
+  {wp_html}""")
+
+    return f"""<section class="page">
+  <h2>SECTION 8 — SCENARIO ANALYSIS</h2>
+  <p class="muted">The paths below all start from where you are today. They use the same six levers — how much you invest, how long you give a goal, its size, a one-time inflow, an idle asset, or income growth — within sensible limits (we never delay your children's education or push retirement past 65).</p>
+  {''.join(parts)}
+</section>"""
+
+
+def _sandeep_s11_datagaps(plan: PlanState, scen: dict | None) -> str:
+    """Section 11 — Data gaps (brief §11). Honest list of what's missing so the
+    client knows the plan's confidence boundaries."""
+    gaps = list(plan.missing_fields or [])
+    rows = "".join(f"<li>{_h(g)}</li>" for g in gaps[:25])
+    risk_note = "" if plan.computed.risk_profile else "<li>Risk questionnaire not completed — risk profile shown as 'to be assessed'.</li>"
+    if not rows and not risk_note:
+        return f"""<section class="page">
+  <h2>SECTION 11 — DATA COMPLETENESS</h2>
+  <p>All key inputs were captured. This plan is computed on a complete data set.</p>
+</section>"""
+    return f"""<section class="page">
+  <h2>SECTION 11 — DATA COMPLETENESS</h2>
+  <p>This plan is computed from the inputs provided. The items below were missing or partial — filling them will sharpen the projections. Nothing here was invented; where an input was absent, the plan proceeded conservatively with what was available.</p>
+  <ul style="margin-left:5mm;">{risk_note}{rows}</ul>
+</section>"""
 
 
 def _sandeep_cover(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
@@ -1495,6 +1740,40 @@ def _sandeep_s1_profile(plan: PlanState) -> str:
 </section>"""
 
 
+def _investable_surplus_block(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
+    """Brief §8.2 fix — show the Investable-Surplus derivation step-by-step and
+    compare it to the total SIP the goals actually need (no isolated savings-%)."""
+    blk = scenarios_skill.compute_investable_surplus(plan, cfp)
+    s = cfp.summary
+    income = blk["monthly_income"]
+    gross = blk["gross_surplus"]
+    ef_sip = blk["emergency_build_sip"]
+    investable = blk["investable_surplus"]
+    goal_sip = s.get("total_incremental_sip_monthly", 0) or 0
+    retire_sip = cfp.retirement.get("required_monthly_sip", 0) or 0
+    total_needed = goal_sip + retire_sip
+    diff = investable - total_needed
+    funding_rate = round(min(100, investable / total_needed * 100)) if total_needed else 100
+    verdict_row = (
+        f'<tr class="total"><td>Cushion vs goal needs</td><td class="num">+{_fmt_inr(diff)}/mo</td></tr>'
+        if diff >= 0 else
+        f'<tr class="total"><td>Shortfall vs goal needs</td><td class="num">−{_fmt_inr(-diff)}/mo</td></tr>'
+    )
+    return f"""
+  <table>
+    <tbody>
+      <tr><td>Net monthly income</td><td class="num">{_fmt_inr(income)}</td></tr>
+      <tr><td>Less: all expenses + EMIs + insurance premiums</td><td class="num">−{_fmt_inr(income - gross)}</td></tr>
+      <tr><td>= Gross monthly surplus</td><td class="num">{_fmt_inr(gross)}</td></tr>
+      <tr><td>Less: emergency-fund build SIP{(' (building to ' + _fmt_lakhs(blk['emergency_target']) + ')') if ef_sip else ' (fund already adequate)'}</td><td class="num">−{_fmt_inr(ef_sip)}</td></tr>
+      <tr class="subtotal"><td><strong>= Investable Surplus available for goals</strong></td><td class="num"><strong>{_fmt_inr(investable)}</strong></td></tr>
+      <tr><td>Total SIP needed across all goals + retirement</td><td class="num">{_fmt_inr(total_needed)}</td></tr>
+      {verdict_row}
+    </tbody>
+  </table>
+  <p class="muted">Goal-funding rate: <strong>{funding_rate}%</strong> — the share of the required SIP your investable surplus can cover today. {'The plan is fully fundable from current surplus.' if diff >= 0 else 'Section 8 lays out three paths to close the rest.'}</p>"""
+
+
 def _yoy_cashflow_tables(cfp: cfp_skill.CFPOutput) -> str:
     """The full year-by-year cash-flow projection — same data the canvas
     Cashflow tab renders. Two compact tables: income→surplus, and the
@@ -1634,16 +1913,8 @@ def _sandeep_s2_cashflow(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     </tbody>
   </table>
 
-  <h3>2.2  Savings Rate Analysis</h3>
-  <table>
-    <thead><tr><th>Metric</th><th class="num">Current</th><th>Target / Notes</th></tr></thead>
-    <tbody>
-      <tr><td>Gross Savings Rate</td><td class="num">{_fmt_pct(gross_rate * 100)}</td><td>Target: 50%+ for peak-accumulation households</td></tr>
-      <tr><td>Equity Investment Rate (SIP only)</td><td class="num">{_fmt_pct(invest_rate * 100)}</td><td>Lift toward 30-40% via goal-linked SIPs</td></tr>
-      <tr><td>EMI as % of Income</td><td class="num">{_fmt_pct(emi_rate * 100)}</td><td>Below 35% is healthy</td></tr>
-      <tr><td>Net Surplus (Monthly)</td><td class="num">{_fmt_inr(net_surplus)}</td><td>Remaining capacity to deploy</td></tr>
-    </tbody>
-  </table>
+  <h3>2.2  Investable Surplus → Goal Funding</h3>
+  {_investable_surplus_block(plan, cfp)}
 
   <h3>2.3  Expense Review — Optimisation Opportunities</h3>
   {_sandeep_expense_opportunities(plan)}
@@ -1675,6 +1946,44 @@ def _sandeep_expense_opportunities(plan: PlanState) -> str:
     <thead><tr><th>Expense Head</th><th class="num">Monthly (₹)</th><th>Observation</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>"""
+
+
+def _concentration_flags(plan: PlanState) -> str:
+    """Brief §3 — flag single asset >50% of net worth, real estate >60%, any
+    single stock >5% of financial assets. Flag only; never prescribe a switch."""
+    mf = sum((h.current_value or 0) for h in plan.mutual_funds)
+    eq = sum((h.current_value or 0) for h in plan.equity_stocks)
+    fi = sum((h.current_value or 0) for h in plan.fixed_income)
+    liq = _sum_optionals(plan.liquid_capital)
+    fa = mf + eq + fi + liq
+    re = sum((h.current_value or 0) for h in (plan.real_estate or []))
+    gold = sum((h.current_value or 0) for h in (plan.gold or []))
+    total = fa + re + gold
+    flags: list[str] = []
+    if total > 0:
+        # single largest holding
+        biggest = max(
+            [(h.fund_name or "a mutual fund", h.current_value or 0) for h in plan.mutual_funds]
+            + [(h.stock_name or "a stock", h.current_value or 0) for h in plan.equity_stocks]
+            + [(h.instrument or "a holding", h.current_value or 0) for h in plan.fixed_income]
+            + [((h.label or h.kind or "a property"), h.current_value or 0) for h in (plan.real_estate or [])],
+            key=lambda x: x[1], default=("", 0))
+        if biggest[1] > 0.50 * total:
+            flags.append(f"{_h(biggest[0])} is {_fmt_pct(biggest[1]/total*100)} of your net worth — a single asset above 50% concentrates your risk. Worth diversifying over time.")
+        if re > 0.60 * total:
+            flags.append(f"Real estate is {_fmt_pct(re/total*100)} of your net worth (above the 60% guideline). It's illiquid — make sure goals due before any sale are funded from financial assets.")
+    if fa > 0:
+        for h in plan.equity_stocks:
+            v = h.current_value or 0
+            if v > 0.05 * fa:
+                flags.append(f"{_h(h.stock_name or 'A single stock')} is {_fmt_pct(v/fa*100)} of your financial assets (above the 5% single-stock guideline).")
+    # Regular vs Direct (informational, computable)
+    reg = [h.fund_name for h in plan.mutual_funds if "regular" in (h.fund_name or "").lower()]
+    if reg:
+        flags.append(f"{len(reg)} fund(s) appear to be Regular plans. Direct plans cost ~0.5–1%/yr less in fees; switching has LTCG-tax implications, so prefer routing future SIPs to Direct and discuss timing with your advisor.")
+    if not flags:
+        return '<p>No concentration flags — your assets are reasonably diversified across classes.</p>'
+    return '<ul style="margin-left:5mm;">' + "".join(f"<li>{f}</li>" for f in flags) + "</ul>"
 
 
 def _sandeep_s3_networth(plan: PlanState) -> str:
@@ -1770,11 +2079,8 @@ def _sandeep_s3_networth(plan: PlanState) -> str:
     <tbody>{liab_html}</tbody>
   </table>
 
-  <h3>3.3  Mutual Fund Portfolio — Quality Audit</h3>
-  <table>
-    <thead><tr><th>Fund</th><th>Category</th><th>Plan</th><th class="num">SIP (₹)</th><th class="num">Current Value (₹)</th><th>Action</th></tr></thead>
-    <tbody>{mf_rows}</tbody>
-  </table>
+  <h3>3.3  Concentration Check</h3>
+  {_concentration_flags(plan)}
 
   <h3>Net Worth Summary</h3>
   {nw_summary}

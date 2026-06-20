@@ -23,6 +23,7 @@ from ..skills import knowledge as knowledge_skill
 from ..skills import news as news_skill
 from ..skills import risk as risk_skill
 from ..skills import scenario as scenario_skill
+from ..skills import scenarios as scenarios_skill
 from ..skills import suggestions as suggestions_skill
 from ..skills import tax as tax_skill
 from ..skills.allocate import compute_allocation
@@ -253,6 +254,21 @@ async def _suggest_optimizations(**kwargs: Any) -> Any:
         return {"error": "household_not_found"}
     snapshot = suggestions_skill.compute_suggestions(plan)
     return await _persist_computed(kwargs["household_id"], "suggestions", snapshot)
+
+
+async def _generate_scenarios(**kwargs: Any) -> Any:
+    """The Scenario Engine (brief §6). Returns the investable-surplus
+    derivation, a constructive verdict + confidence (High/Medium/Low/Very Low),
+    the top-3 actions, and either a single optimised plan (on track) or the
+    Baseline / Easy / Aggressive paths (if there's a gap) — each with the
+    levers pulled, per-goal outcomes, retirement corpus vs target, and trade-
+    offs. Persisted to plan.computed.scenarios_v2."""
+    kwargs = _coerce_kwargs(kwargs)
+    plan = await get_plan(kwargs["household_id"])
+    if plan is None:
+        return {"error": "household_not_found"}
+    snapshot = scenarios_skill.compute_scenarios(plan)
+    return await _persist_computed(kwargs["household_id"], "scenarios_v2", snapshot)
 
 
 class CashflowArgs(BaseModel):
@@ -650,6 +666,23 @@ def make_tools() -> list[StructuredTool]:
             ),
             args_schema=HouseholdOnlyArgs,
             coroutine=_suggest_optimizations,
+        ),
+        StructuredTool.from_function(
+            name="generate_scenarios",
+            description=(
+                "The Scenario Engine (the report's Section 8 and the Scenarios tab). Call this to answer "
+                "'can the client meet all their goals, and if not what are the paths?'. Returns the "
+                "investable-surplus derivation, a CONSTRUCTIVE verdict + confidence (High/Medium/Low/Very "
+                "Low per the brief's thresholds), top-3 actions, and either a single optimised plan (if on "
+                "track) or Baseline / Easy / Aggressive paths (if short). Hard subjectivity rules are "
+                "enforced server-side: retirement never past 65; never delay child education/marriage or "
+                "parent-medical; never cut a goal below 30%; emergency fund never reduced; liquidation is "
+                "last resort; income is a nudge only. When you narrate, keep the constructive tone — lead "
+                "with what IS funded, name a path, use 'roughly' for big gaps, and never use words like "
+                "'failure', 'crisis', or 'you cannot afford'."
+            ),
+            args_schema=HouseholdOnlyArgs,
+            coroutine=_generate_scenarios,
         ),
         StructuredTool.from_function(
             name="cashflow_project",

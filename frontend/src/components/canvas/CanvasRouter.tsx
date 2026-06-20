@@ -14,6 +14,7 @@ import { InsuranceView } from './InsuranceView';
 import { InvestmentsView } from './InvestmentsView';
 import { DebtPaydownView } from './DebtPaydownView';
 import { RetirementGlideView } from './RetirementGlideView';
+import { ScenariosView } from './ScenariosView';
 import { RiskAssessmentView } from './RiskAssessmentView';
 import { PlanBlocks } from './PlanBlocks';
 import { Scenarios } from './Scenarios';
@@ -38,6 +39,7 @@ export function CanvasRouter({
     | 'tax'
     | 'debt'
     | 'retirement'
+    | 'scenarios'
     | 'risk';
   horizon: number;
 }) {
@@ -147,6 +149,11 @@ export function CanvasRouter({
       {view === 'retirement' && (
         <div className="mt-6">
           <RetirementGlideView plan={plan} />
+        </div>
+      )}
+      {view === 'scenarios' && (
+        <div className="mt-6">
+          <ScenariosView plan={plan} />
         </div>
       )}
       {view === 'risk' && (
