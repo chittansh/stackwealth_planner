@@ -157,8 +157,11 @@ function buildRetirementBlock(
     effective_return: n('sip_funding_return') || 0.105,
     required_sip_monthly: startReq,
     existing_sip_monthly: ongoing,
-    incremental_sip_monthly: n('stepup_additional_start_sip_monthly'),
-    affordable_sip_monthly: n('stepup_additional_start_sip_monthly'),
+    // Retirement is funded via the step-up plan, not the goal surplus-rationing
+    // feasibility check — so leave incremental at 0 to skip the FeasibilityRow.
+    // The funded bar + grid (SIP needed vs existing) already convey the gap.
+    incremental_sip_monthly: 0,
+    affordable_sip_monthly: 0,
     sip_shortfall_monthly: 0,
     funded_share_at_affordable_sip: 1,
   };
@@ -233,8 +236,8 @@ function GoalBlocksDetail({ goals, blocks }: { goals: Goal[]; blocks: GoalBlock[
 
               {(b.incremental_sip_monthly ?? 0) > 0 && (
                 <FeasibilityRow
-                  required={b.incremental_sip_monthly ?? 0}
-                  affordable={b.affordable_sip_monthly ?? b.incremental_sip_monthly ?? 0}
+                  required={b.required_sip_monthly ?? 0}
+                  affordable={b.affordable_sip_monthly ?? b.required_sip_monthly ?? 0}
                   shortfall={b.sip_shortfall_monthly ?? 0}
                   fundedShare={b.funded_share_at_affordable_sip ?? 1}
                 />
@@ -328,11 +331,11 @@ function FeasibilityRow({
         )}
       </div>
       <div className="flex items-baseline justify-between text-sm">
-        <span className="text-zinc-700">Required SIP</span>
+        <span className="text-zinc-700">Required SIP (total)</span>
         <span className="text-zinc-900 tabular-nums">{formatINR(required, { compact: true })}/mo</span>
       </div>
       <div className="flex items-baseline justify-between text-sm">
-        <span className="text-zinc-700">Feasible SIP (after rationing surplus)</span>
+        <span className="text-zinc-700">Feasible SIP (total, after rationing surplus)</span>
         <span className={`tabular-nums ${fully ? 'text-zinc-900' : 'text-amber-800'} font-medium`}>
           {formatINR(affordable, { compact: true })}/mo
         </span>
