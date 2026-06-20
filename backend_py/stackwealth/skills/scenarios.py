@@ -31,6 +31,7 @@ from .suggestions import (
     SIP_STEPUP_PCT,
     _liquidation_candidates,
     _rupees,
+    _stepup_start_monthly,
 )
 
 # ── Guardrails reconciled to the brief (§6.4 / §11) ─────────────────────────
@@ -156,9 +157,68 @@ def _reduction_rank(g: Goal) -> int:
     return 0
 
 
-def compute_scenarios(plan: PlanState) -> dict:
+def _apply_overrides(plan: PlanState, overrides: Optional[dict]) -> PlanState:
+    """RM 'additional inputs' (Scenarios page) reshape the BASELINE plan before
+    the engine runs, so the scenarios build on top of them. Supports: expected
+    lumpsum (amount+year), income increase %, SIP step-up %, and per-goal
+    delay-years / reduce-% (within guardrails — child goals never delayed,
+    no goal cut below 30%, retirement never past 65)."""
+    if not overrides:
+        return plan
+    p = copy.deepcopy(plan)
+    inc = float(overrides.get("income_increase_pct") or 0)
+    if inc and p.freedom_score_inputs.monthly_income:
+        p.freedom_score_inputs.monthly_income = round(p.freedom_score_inputs.monthly_income * (1 + inc / 100))
+    step = overrides.get("step_up_pct")
+    if step is not None:
+        p.assumptions.sip_annual_step_up_pct = float(step) / 100 if float(step) > 1 else float(step)
+    lump_amt = float(overrides.get("lumpsum_amount") or 0)
+    lump_yr = int(overrides.get("lumpsum_year") or 0)
+    if lump_amt > 0 and lump_yr > 0:
+        p.assumptions.lumpsum_events = list(p.assumptions.lumpsum_events or []) + [
+            type(p.assumptions.lumpsum_events[0])(year=lump_yr, amount=lump_amt, label="Expected lumpsum (RM)")
+            if p.assumptions.lumpsum_events else __import__("stackwealth.types", fromlist=["LumpsumEvent"]).LumpsumEvent(year=lump_yr, amount=lump_amt, label="Expected lumpsum (RM)")
+        ]
+    goal_ovr = overrides.get("goal_overrides") or {}
+    for g in p.financial_goals:
+        ov = goal_ovr.get(g.id) or goal_ovr.get(g.goal_name)
+        if not ov:
+            continue
+        delay = int(ov.get("delay_years") or 0)
+        if delay and g.target_year and (g.kind or "") not in LOCKED_TIME_GOALS and g.kind != "retirement":
+            g.target_year += min(delay, GOAL_DELAY_CAP_YEARS)
+        red = float(ov.get("reduce_pct") or 0)
+        if red and g.target_amount and "emergency" not in (g.goal_name or "").lower():
+            g.target_amount = round(g.target_amount * (1 - min(red, 1 - GOAL_REDUCTION_FLOOR) / 100)) if red > 1 else round(g.target_amount * (1 - min(red, 1 - GOAL_REDUCTION_FLOOR)))
+    return p
+
+
+def _stepup_funded(sug_cfp: dict, sug_ret: dict, step_up_rate: float, investable: float) -> dict:
+    """Achievement on the step-up basis — the realistic 'start lower, grow with
+    income' funding. For each goal we compute the STARTING monthly SIP that,
+    stepped up `step_up_rate`/yr, reaches its remaining gap by its (possibly
+    delayed/reduced) target year; sum with the retirement step-up start. The
+    plan is achieved when the investable surplus covers that total. Responds to
+    every lever: step-up rate ↓, delays ↓, reductions ↓, income ↑ surplus."""
+    goal_start = 0.0
+    for b in sug_cfp.get("goal_blocks", []):
+        gap = b.get("fv_gap", 0) or 0
+        yrs = b.get("years_to_go", 0) or 0
+        r = b.get("effective_return", 0.105) or 0.105
+        if gap > 0 and yrs > 0:
+            goal_start += _stepup_start_monthly(gap, yrs, r, step_up_rate)
+    retire_start = sug_ret.get("stepup_additional_start_sip_monthly", 0) or 0
+    total_start = goal_start + retire_start
+    funded_pct = round(min(100.0, investable / total_start * 100)) if total_start > 0 else 100
+    achieved = total_start <= 0 or investable >= total_start * 0.99
+    return {"funded_pct": funded_pct, "achieved": achieved, "total_start_needed": round(total_start),
+            "goal_start_needed": round(goal_start), "retire_start_needed": round(retire_start)}
+
+
+def compute_scenarios(plan: PlanState, overrides: Optional[dict] = None) -> dict:
     from .scenario import simulate_mutation  # local import avoids cycle
 
+    plan = _apply_overrides(plan, overrides)
     cfp = compute_cfp(plan)
     s = cfp.summary
     ret = cfp.retirement
@@ -279,13 +339,22 @@ def _build_scenario(plan, cfp, simulate_mutation, *, key, name, step_up, delay_f
         ops.append({"path": "monthly_investments.mutual_fund_sip", "op": "set", "value": round(base_mf + deploy)})
         levers.append(f"Direct your full investable surplus ({_rupees(deploy)}/mo) into goal SIPs")
 
+    # Aggressive path also leans on a realistic income lift (≤10%).
+    if key == "aggressive":
+        income = float((plan.freedom_score_inputs.monthly_income or 0))
+        bump = round(income * INCOME_BUMP_CAP_PCT)
+        if bump > 0:
+            ops.append({"path": "freedom_score_inputs.monthly_income", "op": "set", "value": round(income + bump)})
+            levers.append(f"A realistic ~{round(INCOME_BUMP_CAP_PCT*100)}% income lift (+{_rupees(bump)}/mo) via a raise or side income")
+
     delayed_names: list[str] = []
     if delay_flexible:
-        # Lever 2 — delay year-flexible shortfall goals by up to the cap.
+        # Lever 2 — give year-flexible shortfall goals more time (Easy path
+        # leans on this to stay 'least disruption' while closing the gap).
         for i, g in enumerate(plan.financial_goals):
             if g.id not in short_goal_ids or not _is_year_flexible(g) or not g.target_year:
                 continue
-            delay = min(GOAL_DELAY_CAP_YEARS, 2)  # Easy path: gentle 2-year nudge
+            delay = GOAL_DELAY_CAP_YEARS
             ops.append({"path": f"financial_goals.{i}.target_year", "op": "set", "value": g.target_year + delay})
             delayed_names.append(f"{g.goal_name} → {g.target_year + delay}")
         if delayed_names:
@@ -313,26 +382,34 @@ def _build_scenario(plan, cfp, simulate_mutation, *, key, name, step_up, delay_f
         m = next((p for p in series if p.get("year") == year), None)
         return float((m or (series[-1] if series else {})).get("value", 0) or 0)
 
-    # After-levers residual SIP need vs the same investable surplus.
-    residual_need = (sug_summary.get("total_incremental_sip_monthly", 0) or 0) + (sug_ret.get("required_monthly_sip", 0) or 0)
-    goals_met_pct = round(min(100.0, (investable / residual_need * 100) if residual_need > 0 else 100.0))
-    monthly_sip = round(min(investable, residual_need)) if residual_need else round(investable)
+    # Achievement on the STEP-UP basis (responds to step-up rate, delays,
+    # reductions, income, lumpsum) — the realistic 'start lower, grow with
+    # income' funding the levers actually deliver.
+    fund = _stepup_funded(sug_cfp, sug_ret, step_up, investable)
+    goals_met_pct = fund["funded_pct"]
+    achieved = fund["achieved"]
+    monthly_sip = round(min(investable, fund["total_start_needed"])) if fund["total_start_needed"] else round(investable)
 
-    # Per-goal outcomes.
+    # Per-goal outcomes (step-up basis).
     outcomes = []
     for b in sug_cfp.get("goal_blocks", []):
         g = goals_by_id.get(b.get("goal_id"))
-        delayed = g and any(g.goal_name in d for d in delayed_names)
-        shortfall = b.get("sip_shortfall_monthly", 0) or 0
-        if shortfall <= 0:
+        delayed = g and any((g.goal_name or "") in d for d in delayed_names)
+        gap = b.get("fv_gap", 0) or 0
+        if gap <= 0:
             status = "Met in full"
-        elif delayed:
-            status = "Met — moved out a couple of years"
+        elif achieved and delayed:
+            status = f"Met — date moved to {b.get('target_year')}"
+        elif achieved:
+            status = "Met in full"
         else:
-            status = f"Partially funded — about {_rupees(shortfall)}/mo short"
+            start_g = _stepup_start_monthly(gap, b.get("years_to_go", 0) or 0, b.get("effective_return", 0.105) or 0.105, step_up)
+            status = f"Start ~{_rupees(start_g)}/mo (stepped up) to fund"
         outcomes.append({"goal": b.get("goal_name"), "target_year": b.get("target_year"), "status": status})
 
-    corpus_at_retire = _nw_at(retire_year)
+    # Retirement corpus the step-up plan accumulates (positive, lever-aware).
+    sp = sug_ret.get("stepup_plan") or {}
+    corpus_at_retire = sp.get("projected_corpus_at_retirement", 0) or _nw_at(retire_year)
     trade_off = (
         "Your essential goals and retirement stay on track; a flexible goal or two simply moves out a little."
         if key == "easy" else
@@ -345,11 +422,12 @@ def _build_scenario(plan, cfp, simulate_mutation, *, key, name, step_up, delay_f
         "headline": _scenario_headline(key, retire_age, delayed_names, liquidated, step_up),
         "levers": levers,
         "monthly_sip": monthly_sip,
-        "total_sip_needed": round(residual_need),
+        "total_sip_needed": round(total_needed),
         "retirement_age": retire_age,
         "retirement_corpus": round(corpus_at_retire),
         "corpus_required": round(corpus_required),
         "goals_met_pct": goals_met_pct,
+        "achieved": achieved,
         "outcomes": outcomes,
         "net_worth_series": series,
         "trade_off": _constructive(trade_off),

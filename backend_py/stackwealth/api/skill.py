@@ -146,19 +146,34 @@ async def suggestions(id: str) -> JSONResponse:
 
 @router.post("/scenarios/{id}")
 @router.get("/scenarios/{id}")
-async def scenarios(id: str) -> JSONResponse:
+async def scenarios(id: str, request: Request) -> JSONResponse:
     """Scenario engine (brief §6) — investable-surplus derivation, a
     constructive verdict + confidence, and either a single optimised plan (if
     on track) or Baseline / Easy / Aggressive paths (if there's a gap), built
     from the six levers within the hard subjectivity rules. Powers the
-    Scenarios tab and the report's Section 8."""
+    Scenarios tab and the report's Section 8.
+
+    A POST body may carry RM 'additional inputs' that reshape the baseline
+    before the engine runs: {lumpsum_amount, lumpsum_year, income_increase_pct,
+    step_up_pct, goal_overrides:{<goal>:{delay_years,reduce_pct}}}."""
     plan = await get_plan(id)
     if not plan:
         return _json({"error": "household_not_found"})
-    snapshot = compute_scenarios(plan)
-    plan.computed.scenarios_v2 = snapshot
-    try:
-        await save_plan(plan)
-    except Exception:
-        pass
+    overrides = None
+    if request.method == "POST":
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and body.get("overrides"):
+                overrides = body["overrides"]
+        except Exception:
+            overrides = None
+    snapshot = compute_scenarios(plan, overrides)
+    # Only persist the un-overridden baseline so a transient RM what-if doesn't
+    # overwrite the canonical snapshot.
+    if not overrides:
+        plan.computed.scenarios_v2 = snapshot
+        try:
+            await save_plan(plan)
+        except Exception:
+            pass
     return _json(snapshot)

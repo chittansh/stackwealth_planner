@@ -18,6 +18,8 @@ export function ScenariosView({ plan }: { plan: PlanState | null }) {
   const persisted = (plan?.computed?.scenarios_v2 ?? null) as ScenariosSnapshot | null;
   const [local, setLocal] = useState<ScenariosSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
+  const [whatif, setWhatif] = useState<ScenariosSnapshot | null>(null); // RM override result
+  const [running, setRunning] = useState(false);
   const id = plan?.household_id;
   const hasCfp = !!plan?.computed?.cfp;
 
@@ -30,7 +32,17 @@ export function ScenariosView({ plan }: { plan: PlanState | null }) {
       .finally(() => setLoading(false));
   }, [id, hasCfp, persisted, local, loading]);
 
-  const s = persisted ?? local;
+  const base = persisted ?? local;
+  const s = whatif ?? base;
+
+  const applyOverrides = (ov: Record<string, unknown>) => {
+    if (!id) return;
+    setRunning(true);
+    fetchScenariosV2(id, ov)
+      .then((r) => setWhatif(r as ScenariosSnapshot))
+      .catch(() => {})
+      .finally(() => setRunning(false));
+  };
 
   if (!plan) return null;
   if (!hasCfp) {
@@ -61,6 +73,14 @@ export function ScenariosView({ plan }: { plan: PlanState | null }) {
 
   return (
     <div className="flex flex-col gap-5">
+      {/* What-if banner */}
+      {whatif && (
+        <div className="flex items-center justify-between rounded-lg border border-sky-200 bg-sky-50 px-4 py-2.5 text-xs">
+          <span className="text-sky-800">Showing a <strong>what-if</strong> with your additional inputs applied. The saved plan is unchanged.</span>
+          <button className="text-sky-700 underline" onClick={() => setWhatif(null)}>Reset to baseline</button>
+        </div>
+      )}
+
       {/* Verdict */}
       <div className="rounded-xl border border-[color:var(--color-accent,#5f7d56)]/30 bg-[color:var(--color-accent,#5f7d56)]/[0.05] p-5">
         <div className="flex items-center justify-between mb-1.5">
@@ -74,17 +94,20 @@ export function ScenariosView({ plan }: { plan: PlanState | null }) {
         <p className="text-base font-medium text-zinc-800 leading-snug">{s.verdict?.text}</p>
       </div>
 
-      {/* Surplus derivation + headline numbers */}
+      {/* Surplus → SIP feasibility (goals + retirement explicit) */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Stat label="Investable surplus" value={`${formatINR(s.surplus?.investable_surplus ?? 0)}/mo`} />
-        <Stat label="Total SIP needed" value={`${formatINR(s.total_sip_needed ?? 0)}/mo`} />
+        <Stat label="Goal SIP needed" value={`${formatINR(s.goal_sip_needed ?? 0)}/mo`} />
+        <Stat label="Retirement SIP needed" value={`${formatINR(s.retirement_sip_needed ?? 0)}/mo`} />
         <Stat
-          label="Gap / cushion"
+          label="Gap vs total SIP"
           value={`${formatINR(Math.abs((s.surplus?.investable_surplus ?? 0) - (s.total_sip_needed ?? 0)))}/mo`}
           accent={(s.surplus?.investable_surplus ?? 0) >= (s.total_sip_needed ?? 0) ? 'good' : 'bad'}
         />
-        <Stat label="Emergency fund target" value={formatINR(s.surplus?.emergency_target ?? 0, { compact: true })} />
       </div>
+
+      {/* RM additional inputs */}
+      <RMInputs plan={plan} onApply={applyOverrides} running={running} />
 
       {/* Top 3 actions */}
       {s.top_actions?.length > 0 && (
@@ -127,6 +150,133 @@ export function ScenariosView({ plan }: { plan: PlanState | null }) {
         </>
       )}
     </div>
+  );
+}
+
+function RMInputs({
+  plan,
+  onApply,
+  running,
+}: {
+  plan: PlanState;
+  onApply: (ov: Record<string, unknown>) => void;
+  running: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [lumpAmt, setLumpAmt] = useState('');
+  const [lumpYr, setLumpYr] = useState('');
+  const [incomePct, setIncomePct] = useState('');
+  const [stepUp, setStepUp] = useState('');
+  const [goalOv, setGoalOv] = useState<Record<string, { delay_years?: string; reduce_pct?: string }>>({});
+
+  // Flexible goals only (the engine ignores delays on child/retirement anyway).
+  const flexGoals = (plan.financial_goals || []).filter(
+    (g) => !['child_education', 'child_marriage', 'retirement'].includes((g.kind as string) || ''),
+  );
+
+  const submit = () => {
+    const overrides: Record<string, unknown> = {};
+    if (lumpAmt && lumpYr) {
+      overrides.lumpsum_amount = Number(lumpAmt);
+      overrides.lumpsum_year = Number(lumpYr);
+    }
+    if (incomePct) overrides.income_increase_pct = Number(incomePct);
+    if (stepUp) overrides.step_up_pct = Number(stepUp);
+    const go: Record<string, unknown> = {};
+    for (const [gid, v] of Object.entries(goalOv)) {
+      const o: Record<string, number> = {};
+      if (v.delay_years) o.delay_years = Number(v.delay_years);
+      if (v.reduce_pct) o.reduce_pct = Number(v.reduce_pct);
+      if (Object.keys(o).length) go[gid] = o;
+    }
+    if (Object.keys(go).length) overrides.goal_overrides = go;
+    onApply(overrides);
+  };
+
+  return (
+    <div className="rounded-xl border border-zinc-200 bg-white p-5">
+      <button
+        className="flex items-center justify-between w-full text-left"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <h3 className="text-sm font-medium text-zinc-700">Adjust the scenario — additional inputs</h3>
+        <span className="text-xs text-zinc-400">{open ? '−' : '+'}</span>
+      </button>
+      {!open && (
+        <p className="text-[11px] text-zinc-400 mt-1">
+          Add an expected lumpsum, an income lift, a step-up rate, or nudge specific goals — the scenarios re-run on your inputs.
+        </p>
+      )}
+      {open && (
+        <div className="mt-3 flex flex-col gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="Expected lumpsum (₹)" placeholder="e.g. 3000000" value={lumpAmt} onChange={setLumpAmt} />
+            <Field label="…in year" placeholder="e.g. 2028" value={lumpYr} onChange={setLumpYr} />
+            <Field label="Income increase (%)" placeholder="e.g. 10" value={incomePct} onChange={setIncomePct} />
+            <Field label="SIP step-up (%/yr)" placeholder="e.g. 12" value={stepUp} onChange={setStepUp} />
+          </div>
+          {flexGoals.length > 0 && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1.5">Per-goal nudges (flexible goals)</div>
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-zinc-500 border-b border-zinc-100">
+                    <th className="py-1 font-medium">Goal</th>
+                    <th className="py-1 font-medium">Delay (yrs, ≤5)</th>
+                    <th className="py-1 font-medium">Reduce (%, ≤30)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {flexGoals.map((g) => (
+                    <tr key={g.id} className="border-b border-zinc-100 last:border-0">
+                      <td className="py-1 text-zinc-700">{g.goal_name}</td>
+                      <td className="py-1">
+                        <input
+                          className="w-16 border border-zinc-200 rounded px-1.5 py-0.5 text-xs"
+                          value={goalOv[g.id]?.delay_years ?? ''}
+                          onChange={(e) => setGoalOv((p) => ({ ...p, [g.id]: { ...p[g.id], delay_years: e.target.value } }))}
+                        />
+                      </td>
+                      <td className="py-1">
+                        <input
+                          className="w-16 border border-zinc-200 rounded px-1.5 py-0.5 text-xs"
+                          value={goalOv[g.id]?.reduce_pct ?? ''}
+                          onChange={(e) => setGoalOv((p) => ({ ...p, [g.id]: { ...p[g.id], reduce_pct: e.target.value } }))}
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div>
+            <button
+              onClick={submit}
+              disabled={running}
+              className="text-xs font-medium bg-[color:var(--color-accent,#5f7d56)] text-white rounded-md px-4 py-2 disabled:opacity-50"
+            >
+              {running ? 'Re-running…' : 'Apply & re-run scenarios'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Field({ label, placeholder, value, onChange }: { label: string; placeholder: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[10px] uppercase tracking-wide text-zinc-500">{label}</span>
+      <input
+        className="border border-zinc-200 rounded-md px-2.5 py-1.5 text-sm"
+        inputMode="numeric"
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </label>
   );
 }
 

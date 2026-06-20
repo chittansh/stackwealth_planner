@@ -468,6 +468,7 @@ export type ScenarioPath = {
   retirement_corpus: number;
   corpus_required: number;
   goals_met_pct: number;
+  achieved?: boolean;
   outcomes?: { goal: string; target_year?: number; status: string }[];
   net_worth_series?: { year: number; value: number }[];
   trade_off: string;

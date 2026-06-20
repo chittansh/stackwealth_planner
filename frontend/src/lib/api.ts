@@ -170,8 +170,12 @@ export async function fetchSuggestions(id: string): Promise<unknown> {
   return r.json();
 }
 
-export async function fetchScenariosV2(id: string): Promise<unknown> {
-  const r = await fetch(`${BASE}/api/skill/scenarios/${id}`, { method: 'POST' });
+export async function fetchScenariosV2(id: string, overrides?: Record<string, unknown>): Promise<unknown> {
+  const r = await fetch(`${BASE}/api/skill/scenarios/${id}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(overrides ? { overrides } : {}),
+  });
   if (!r.ok) throw new Error(`fetchScenariosV2 ${r.status}`);
   return r.json();
 }
