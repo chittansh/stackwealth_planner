@@ -1,8 +1,9 @@
-# Frontend — Fly.io app config.
-# Run `fly deploy --config frontend/fly.toml --dockerfile frontend/Dockerfile \
-#                 --build-arg NEXT_PUBLIC_BACKEND_URL=https://stackwealth-backend.fly.dev \
-#                 --build-arg BACKEND_URL=https://stackwealth-backend.fly.dev`
-# from the REPO ROOT.
+# Frontend — Fly.io app config. Deploy from the REPO ROOT:
+#   fly deploy --remote-only -c frontend/fly.toml
+# The backend URL is baked at BUILD time (NEXT_PUBLIC_* is inlined into the
+# client bundle), so the build args below are REQUIRED — without them the bundle
+# falls back to http://localhost:4000 and every client fetch fails in prod.
+# They live in [build.args] so a bare `fly deploy` can't drop them.
 
 app = "stackwealth-frontend"
 primary_region = "bom"
@@ -12,6 +13,10 @@ kill_timeout = "10s"
 
 [build]
   dockerfile = "Dockerfile"
+
+  [build.args]
+    NEXT_PUBLIC_BACKEND_URL = "https://stackwealth-backend-py.fly.dev"
+    BACKEND_URL = "https://stackwealth-backend-py.fly.dev"
 
 [env]
   PORT = "3000"
