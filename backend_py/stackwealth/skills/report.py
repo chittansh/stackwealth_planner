@@ -1305,32 +1305,37 @@ def _life_timeline(plan: PlanState, scen: dict | None) -> str:
             if (b.get("sip_shortfall_monthly", 0) or 0) > 0:
                 short_names.add(b.get("goal_name"))
 
-    markers = []
-    seen_years = set()
+    def _short(label: str) -> str:
+        label = label or "Goal"
+        return label if len(label) <= 16 else label[:15] + "…"
+
     pts = [(retire_year, "Retirement", "retire")]
     for g in plan.financial_goals:
         if g.target_year:
-            pts.append((g.target_year, g.goal_name or "Goal", "short" if g.goal_name in short_names else "ok"))
-    for yr, label, kind in sorted(pts):
-        if yr < today or yr > end:
-            continue
-        # nudge overlapping labels
-        row = 1 if yr in seen_years else 0
-        seen_years.add(yr)
+            pts.append((g.target_year, _short(g.goal_name or "Goal"), "short" if g.goal_name in short_names else "ok"))
+    pts = [p for p in sorted(pts) if today <= p[0] <= end]
+
+    ticks, labels = [], []
+    # Stagger labels across 4 rows so clustered goal-years don't collide.
+    for i, (yr, label, kind) in enumerate(pts):
         pos = (yr - today) / span * 100
         colour = {"retire": "var(--brand-deep)", "short": "var(--warn)", "ok": "var(--good)"}.get(kind, "var(--ink-soft)")
-        top = 6 if row == 0 else 13
-        markers.append(
-            f'<div style="position:absolute;left:{pos:.1f}%;top:0;width:1px;height:5mm;background:{colour};"></div>'
-            f'<div style="position:absolute;left:{pos:.1f}%;top:{top}mm;transform:translateX(-50%);font-size:6.5pt;color:{colour};white-space:nowrap;">{_h(label)} <span style="color:var(--ink-muted);">{yr}</span></div>'
+        tick_h = 7 if kind == "retire" else 5
+        ticks.append(f'<div style="position:absolute;left:{pos:.1f}%;top:0;width:{1.2 if kind=="retire" else 1}px;height:{tick_h}mm;background:{colour};"></div>')
+        top = 8 + (i % 4) * 4  # 8, 12, 16, 20 mm rows
+        align = "left" if pos < 12 else ("right" if pos > 88 else "center")
+        tx = "0" if align == "left" else ("-100%" if align == "right" else "-50%")
+        labels.append(
+            f'<div style="position:absolute;left:{pos:.1f}%;top:{top}mm;transform:translateX({tx});font-size:6pt;line-height:1.1;color:{colour};white-space:nowrap;">{_h(label)} <span style="color:var(--ink-muted);">’{str(yr)[2:]}</span></div>'
         )
     return f"""
   <div style="margin:3mm 0 2mm;">
-    <div style="position:relative;height:24mm;">
+    <div style="position:relative;height:28mm;">
       <div style="position:absolute;top:5mm;left:0;right:0;height:1.2mm;background:var(--brand-soft);border-radius:1mm;"></div>
-      <div style="position:absolute;top:2.5mm;left:0;font-size:6.5pt;color:var(--ink-muted);">Today · {today}</div>
-      <div style="position:absolute;top:2.5mm;right:0;font-size:6.5pt;color:var(--ink-muted);">Age {le} · {end}</div>
-      {''.join(markers)}
+      <div style="position:absolute;top:1.5mm;left:0;font-size:6pt;color:var(--ink-muted);">Today {today}</div>
+      <div style="position:absolute;top:1.5mm;right:0;font-size:6pt;color:var(--ink-muted);">Age {le} · {end}</div>
+      {''.join(ticks)}
+      {''.join(labels)}
     </div>
   </div>"""
 
