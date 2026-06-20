@@ -1424,7 +1424,7 @@ def _sandeep_s8_scenarios(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict 
         corpus = s.get("retirement_corpus", 0)
         need = s.get("corpus_required", 0)
         pct = round(corpus / need * 100) if need else 100
-        return f'Net worth at retirement (age {s.get("retirement_age")}): <strong>{_fmt_lakhs(corpus)}</strong> · corpus needed {_fmt_lakhs(need)} ({pct}%)'
+        return f'Retirement corpus (age {s.get("retirement_age")}): <strong>{_fmt_lakhs(corpus)}</strong> · corpus needed {_fmt_lakhs(need)} ({pct}%)'
 
     # 8.1 baseline
     parts = [f"""

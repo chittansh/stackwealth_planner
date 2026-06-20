@@ -295,7 +295,7 @@ function PathCard({ path }: { path: ScenarioPath }) {
       <div className="grid grid-cols-2 gap-2 text-xs mb-3">
         <Mini label="Monthly SIP" value={`${formatINR(path.monthly_sip)}/mo`} />
         <Mini label="Retire at" value={`${path.retirement_age}`} />
-        <Mini label="Net worth at retirement" value={formatINR(path.retirement_corpus, { compact: true })} />
+        <Mini label="Retirement corpus" value={formatINR(path.retirement_corpus, { compact: true })} />
         <Mini label="Goals funded" value={`${path.goals_met_pct}%`} />
       </div>
 

@@ -251,15 +251,20 @@ def compute_scenarios(plan: PlanState, overrides: Optional[dict] = None) -> dict
     goals_by_id = {g.id: g for g in plan.financial_goals}
     short_goal_ids = [b["goal_id"] for b in cfp.goal_blocks if (b.get("sip_shortfall_monthly", 0) or 0) > 0]
 
+    existing_sip = float(s.get("monthly_existing_sip", 0) or 0)
     baseline_scenario = {
         "key": "baseline",
         "name": "Baseline — current trajectory",
         "headline": _constructive(verdict["text"]),
         "levers": [],
-        "monthly_sip": round(min(investable, total_needed)) if total_needed else 0,
+        # Monthly SIP = what's actually being invested today (no new commitment).
+        "monthly_sip": round(existing_sip),
         "total_sip_needed": round(total_needed),
         "retirement_age": retire_age,
-        "retirement_corpus": round(_nw_at(baseline_series, retire_year)),
+        # Retirement corpus on the step-up basis — same metric the scenarios use,
+        # so the comparison is consistent and bounded (not the full net worth,
+        # which over-compounds across the horizon).
+        "retirement_corpus": round((ret.get("stepup_plan") or {}).get("projected_corpus_at_retirement", 0) or 0),
         "corpus_required": round(corpus_required),
         "net_worth_series": baseline_series,
         "goals_met_pct": round(min(100.0, (investable / total_needed * 100) if total_needed else 100.0)),
@@ -388,7 +393,12 @@ def _build_scenario(plan, cfp, simulate_mutation, *, key, name, step_up, delay_f
     fund = _stepup_funded(sug_cfp, sug_ret, step_up, investable)
     goals_met_pct = fund["funded_pct"]
     achieved = fund["achieved"]
-    monthly_sip = round(min(investable, fund["total_start_needed"])) if fund["total_start_needed"] else round(investable)
+    # Monthly SIP = total monthly investment commitment under this path: the
+    # full investable surplus deployed (+ the income lift for Aggressive). This
+    # rises across Baseline → Easy → Aggressive (more commitment, more cushion).
+    income = float((plan.freedom_score_inputs.monthly_income or 0))
+    income_bump = round(income * INCOME_BUMP_CAP_PCT) if key == "aggressive" else 0
+    monthly_sip = round(investable) + income_bump
 
     # Per-goal outcomes (step-up basis).
     outcomes = []
@@ -407,9 +417,9 @@ def _build_scenario(plan, cfp, simulate_mutation, *, key, name, step_up, delay_f
             status = f"Start ~{_rupees(start_g)}/mo (stepped up) to fund"
         outcomes.append({"goal": b.get("goal_name"), "target_year": b.get("target_year"), "status": status})
 
-    # Retirement corpus the step-up plan accumulates (positive, lever-aware).
-    sp = sug_ret.get("stepup_plan") or {}
-    corpus_at_retire = sp.get("projected_corpus_at_retirement", 0) or _nw_at(retire_year)
+    # Retirement corpus on the step-up basis (rises with the path's step-up
+    # rate) — same metric as the baseline, bounded and consistent.
+    corpus_at_retire = (sug_ret.get("stepup_plan") or {}).get("projected_corpus_at_retirement", 0) or _nw_at(retire_year)
     trade_off = (
         "Your essential goals and retirement stay on track; a flexible goal or two simply moves out a little."
         if key == "easy" else
@@ -451,7 +461,7 @@ def _comparison(baseline, easy, aggressive) -> list[dict]:
         ("Monthly SIP", "monthly_sip", "money"),
         ("Goals funded", "goals_met_pct", "pct"),
         ("Retirement age", "retirement_age", "age"),
-        ("Net worth at retirement", "retirement_corpus", "money"),
+        ("Retirement corpus", "retirement_corpus", "money"),
     ]
     out = []
     for label, k, kind in rows:
