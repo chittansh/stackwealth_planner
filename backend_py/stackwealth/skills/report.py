@@ -2528,42 +2528,58 @@ def _sandeep_s6_risk(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     family = plan.insurance_details.family_floater
     fs = plan.computed.freedom_score
 
-    req_life = (fs.required_life_cover if fs else None) or ins["average"]
-    req_med = (fs.required_medical_cover if fs else 1500000) or 1500000
+    insd = ins if isinstance(ins, dict) else {}
+    health_blk = insd.get("health") or {}
+    # Excel-faithful (Insurance Computation tab) — NOT the freedom-score estimate.
+    req_life = insd.get("total_need_including_loans") or insd.get("average") or 0
+    req_med = health_blk.get("required") or (fs.required_medical_cover if fs else 0) or 1500000
     actual_life = (term.cover_amount if term else 0) or 0
-    actual_health = ((health.cover_amount if health else 0) or 0) + ((family.cover_amount if family else 0) or 0)
+    life_assets = insd.get("investable_assets", 0) or 0
+    # Life is "covered" by existing term cover PLUS disposable financial assets
+    # (Excel F37) — the additional need credits both.
+    life_covered = actual_life + life_assets
+    life_additional = insd.get("additional_cover_required", max(0, req_life - life_covered))
+    actual_health = health_blk.get("existing_cover")
+    if actual_health is None:
+        actual_health = ((health.cover_amount if health else 0) or 0) + ((family.cover_amount if family else 0) or 0)
+    med_additional = health_blk.get("additional_cover_required", max(0, req_med - actual_health))
 
-    def status(actual: float, req: float) -> str:
-        if actual >= req:
+    def status_gap(additional: float, req: float) -> str:
+        if additional <= 0:
             return '<span class="badge good">Adequate</span>'
-        if actual >= req * 0.7:
-            return f'<span class="badge warn">Short {_fmt_lakhs(req - actual)}</span>'
-        return f'<span class="badge bad">Gap {_fmt_lakhs(req - actual)}</span>'
+        if additional <= req * 0.3:
+            return f'<span class="badge warn">Short {_fmt_lakhs(additional)}</span>'
+        return f'<span class="badge bad">Gap {_fmt_lakhs(additional)}</span>'
 
     cover_table = f"""
     <table>
       <thead><tr><th>Cover Type</th><th class="num">Current</th><th class="num">Required</th><th>Status</th></tr></thead>
       <tbody>
-        <tr><td>Term Life Insurance</td><td class="num">{_fmt_lakhs(actual_life)}</td><td class="num">{_fmt_lakhs(req_life)}</td><td>{status(actual_life, req_life)}</td></tr>
-        <tr><td>Health (Self + Family Floater)</td><td class="num">{_fmt_lakhs(actual_health)}</td><td class="num">{_fmt_lakhs(req_med)}</td><td>{status(actual_health, req_med)}</td></tr>
+        <tr><td>Term Life (cover {_fmt_lakhs(actual_life)} + {_fmt_lakhs(life_assets)} disposable assets)</td><td class="num">{_fmt_lakhs(life_covered)}</td><td class="num">{_fmt_lakhs(req_life)}</td><td>{status_gap(life_additional, req_life)}</td></tr>
+        <tr><td>Health (Self + Family Floater)</td><td class="num">{_fmt_lakhs(actual_health)}</td><td class="num">{_fmt_lakhs(req_med)}</td><td>{status_gap(med_additional, req_med)}</td></tr>
         <tr><td>Critical Illness (standalone)</td><td class="num">—</td><td class="num">{_fmt_lakhs(5000000)}</td><td><span class="bad">Recommended add-on</span></td></tr>
         <tr><td>Personal Accident / Disability</td><td class="num">—</td><td class="num">{_fmt_lakhs(10000000)}</td><td><span class="warn">Income-protection layer</span></td></tr>
       </tbody>
     </table>"""
 
-    # Why-table for life cover (only when underinsured)
+    # Why-table for life cover (only when additional cover is needed). Mirrors
+    # the Excel: average of HLV & needs methods, + loans, − existing cover −
+    # disposable financial assets = additional cover required.
     why_block = ""
-    if actual_life < req_life:
+    if life_additional > 0:
+        loans_obl = insd.get("total_need_including_loans", 0) - insd.get("average", 0)
         why_block = f"""
-        <h4>Why ₹{actual_life/100000:.0f} Lakh Term Cover Is Insufficient</h4>
+        <h4>How the Additional Cover Is Computed</h4>
         <table>
           <tbody>
-            <tr><td>Loans + Obligations</td><td class="num">{_fmt_inr((cfp.insurance.get('total_need_including_loans', 0) - cfp.insurance['average']) if isinstance(cfp.insurance, dict) else 0)}</td></tr>
-            <tr><td>Children's Future Education</td><td class="num">{_fmt_lakhs(sum(g['future_value_needed'] for g in cfp.goal_blocks if 'education' in (g['goal_name'] or '').lower()))}</td></tr>
-            <tr><td>Spouse Income Replacement (per Needs method)</td><td class="num">{_fmt_lakhs(cfp.insurance['needs_based_corpus'])}</td></tr>
-            <tr style="font-weight:600;background:#f4f4f5;"><td>TOTAL NEED</td><td class="num">{_fmt_lakhs(req_life)}</td></tr>
-            <tr><td>Current Term Cover</td><td class="num">{_fmt_lakhs(actual_life)}</td></tr>
-            <tr style="font-weight:600;"><td>Additional Cover Needed</td><td class="num">{_fmt_lakhs(req_life - actual_life)}</td></tr>
+            <tr><td>Human Life Value (income replacement)</td><td class="num">{_fmt_lakhs(insd.get('human_life_value', 0))}</td></tr>
+            <tr><td>Needs-based corpus (family expenses)</td><td class="num">{_fmt_lakhs(insd.get('needs_based_corpus', 0))}</td></tr>
+            <tr><td>Average of the two methods</td><td class="num">{_fmt_lakhs(insd.get('average', 0))}</td></tr>
+            <tr><td>+ Loans &amp; obligations outstanding</td><td class="num">{_fmt_lakhs(loans_obl)}</td></tr>
+            <tr style="font-weight:600;background:#f4f4f5;"><td>Total cover need</td><td class="num">{_fmt_lakhs(req_life)}</td></tr>
+            <tr><td>− Existing term cover</td><td class="num">{_fmt_lakhs(actual_life)}</td></tr>
+            <tr><td>− Disposable financial assets</td><td class="num">{_fmt_lakhs(life_assets)}</td></tr>
+            <tr style="font-weight:600;"><td>Additional cover needed</td><td class="num">{_fmt_lakhs(life_additional)}</td></tr>
           </tbody>
         </table>"""
 
