@@ -930,17 +930,20 @@ def compute_yoy_cashflow(
         lumpsum_evs = lumpsum_events_by_year.get(year, [])
         lumpsum_total = float(sum(amt for amt, _ in lumpsum_evs))
 
-        # Remarks cell — explains where a major withdrawal goes. The goal
-        # name(s) maturing this year are listed first (so the RM can read the
-        # outflow against its purpose), then any lumpsum / maturity labels.
-        # Dedupe identical labels (e.g. two bonds maturing the same year both
-        # read "Bonds matures") while preserving first-seen order.
-        remark_parts = [lbl for lbl in goal_labels_by_year.get(year, []) if lbl]
-        remark_parts += [lbl for _, lbl in lumpsum_evs if lbl]
-        _seen: set[str] = set()
-        remark = " · ".join(
-            p for p in remark_parts if not (p in _seen or _seen.add(p))
-        )
+        # Two separate remark cells, deduped (first-seen order):
+        #   • goal_remarks — the goal(s) the major withdrawal funds, shown
+        #     beside the Withdraw column so the RM reads the outflow against
+        #     its purpose (Car Purchase, House Purchase, ...).
+        #   • remarks — lumpsum / maturity labels (FD matures, ...), shown
+        #     beside the Lumpsum column as in the firm workbook.
+        def _dedupe_join(labels: list[str]) -> str:
+            seen: set[str] = set()
+            return " · ".join(
+                lbl for lbl in labels if lbl and not (lbl in seen or seen.add(lbl))
+            )
+
+        goal_remark = _dedupe_join([lbl for lbl in goal_labels_by_year.get(year, [])])
+        lumpsum_remark = _dedupe_join([lbl for _, lbl in lumpsum_evs])
 
         # Fixed-income maturities: at the maturity year, the instrument
         # leaves the FA pool (it's been cashed out) and re-enters as a
@@ -982,7 +985,8 @@ def compute_yoy_cashflow(
             "major_withdrawals": round(-withdrawal) if withdrawal else 0,
             "investment_returns": round(fa_returns),
             "lumpsum_deposit_withdrawal": round(lumpsum_total) if lumpsum_total else 0,
-            "remarks": remark,
+            "goal_remarks": goal_remark,
+            "remarks": lumpsum_remark,
             "financial_assets_closing": round(fa_close),
             # Non-financial-asset waterfall (Excel cols X–AA)
             "nfa_opening": round(nfa_open),
