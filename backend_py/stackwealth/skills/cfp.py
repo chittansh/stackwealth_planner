@@ -857,6 +857,7 @@ def compute_yoy_cashflow(
     start_year: int,
     start_age: int,
     retirement_age: int,
+    business_until_age: int | None = None,
     monthly_income_employment: float,
     monthly_income_business: float,
     monthly_income_rental: float,
@@ -879,7 +880,6 @@ def compute_yoy_cashflow(
     goal_outflows_by_year: dict[int, float] | None = None,
     goal_labels_by_year: dict[int, list[str]] | None = None,
     lumpsum_events_by_year: dict[int, list[tuple[float, str]]] | None = None,
-    fa_transfers_out_by_year: dict[int, float] | None = None,
 ) -> list[dict]:
     """Excel's `YoY Cash Flow` sheet — row-by-row. Each year:
         income_source[y]  = income_source[y-1] × (1 + per_source_growth)
@@ -896,7 +896,6 @@ def compute_yoy_cashflow(
     goal_outflows_by_year = goal_outflows_by_year or {}
     goal_labels_by_year = goal_labels_by_year or {}
     lumpsum_events_by_year = lumpsum_events_by_year or {}
-    fa_transfers_out_by_year = fa_transfers_out_by_year or {}
 
     rows: list[dict] = []
     income_emp = monthly_income_employment * 12
@@ -911,11 +910,15 @@ def compute_yoy_cashflow(
     for i in range(horizon_years):
         year = start_year + i
         age = start_age + i
-        earning = age < retirement_age
+        # Excel pays the salary IN the year the client turns the retirement age
+        # (employment runs through age == retirement_age, stops the year after);
+        # `< retirement_age` dropped that final earning year. Business income
+        # follows the same boundary unless a later `business_until_age` is set.
+        earning = age <= retirement_age
 
         # Employment + business stop at retirement; rental + other carry on.
         annual_emp = income_emp if earning else 0
-        annual_biz = income_biz if earning else 0
+        annual_biz = income_biz if (age <= (business_until_age if business_until_age else retirement_age)) else 0
         total_income = annual_emp + annual_biz + income_rent + income_oth
         annual_loan = loan if earning else 0
         total_outflow = expense + annual_loan
@@ -945,23 +948,14 @@ def compute_yoy_cashflow(
         goal_remark = _dedupe_join([lbl for lbl in goal_labels_by_year.get(year, [])])
         lumpsum_remark = _dedupe_join([lbl for _, lbl in lumpsum_evs])
 
-        # Fixed-income maturities: at the maturity year, the instrument
-        # leaves the FA pool (it's been cashed out) and re-enters as a
-        # Lumpsum inflow. Net effect on fa_close is small (~M × ROI lost
-        # for that one year because the principal sits as cash, not in
-        # the interest-bearing pool, for the maturity year). Without this
-        # transfer, emitting the maturity as a positive lumpsum would
-        # double-count: instrument keeps growing inside fa_open AND we'd
-        # inject the same money on top.
-        fa_transfer_out = float(fa_transfers_out_by_year.get(year, 0))
-        fa_open_effective = fa_open - fa_transfer_out
-
-        # Mid-year compounding (Excel S6 convention). Lumpsum hits at
-        # year-end (compounded for the remainder of the year, simplified
-        # to zero — matches Excel's column V where the lumpsum is added
-        # AFTER the return-on-mid-year-cash formula, not before).
-        fa_returns = (fa_open_effective + surplus / 2 - withdrawal) * financial_asset_roi
-        fa_close = fa_open_effective + surplus - withdrawal + fa_returns + lumpsum_total
+        # FA returns — Excel `YoY Cash Flow!S6` = (P + Q/2 − R) × S5, where R is
+        # the goal withdrawal carried as a NEGATIVE value. With `withdrawal`
+        # positive here, that is (fa_open + surplus/2 + withdrawal) × roi — the
+        # withdrawal earns a full year of return before it leaves at year-end.
+        # Excel `V6` (closing) = P + Q + R + S + T = open + surplus − withdrawal
+        # + returns + manual lumpsum. Matched cell-for-cell.
+        fa_returns = (fa_open + surplus / 2 + withdrawal) * financial_asset_roi
+        fa_close = fa_open + surplus - withdrawal + fa_returns + lumpsum_total
         nfa_close = nfa_open * (1 + non_financial_appreciation)
 
         nfa_appreciation_this_yr = nfa_open * non_financial_appreciation
@@ -1035,67 +1029,56 @@ async def run_cfp(household_id: str) -> dict[str, Any]:
     return compute_cfp(plan).__dict__
 
 
+# Excel `YoY Cash Flow!S5` = `11. Inc Exp,Networth,Rec Invest!K42`
+# = SUMPRODUCT(FA values, per-asset post-tax rate) / total FA. These are the
+# firm's standard post-tax rates for the FA-pool ROI, reconciled cell-for-cell
+# against the reference workbook's K-column (NOT the goal glide-path returns,
+# which use POST_TAX_RETURN). Equity & equity MFs 10.5%; FD/Bonds/EPF 5.6%;
+# PPF/NPS/Post-Office 4.9%; NSC & liquid 4.2%.
+_EXCEL_FA_ROI = {
+    "equity": 0.105, "fd": 0.056, "bonds": 0.056, "epf": 0.056,
+    "ppf": 0.049, "nps": 0.049, "post_office": 0.049, "nsc": 0.042, "liquid": 0.042,
+}
+
+
 def _holdings_weighted_post_tax_roi(plan: PlanState) -> tuple[float, dict[str, float]]:
-    """Excel S5 = `1_Surplus and Net Worth!K38` = SUMPRODUCT(value, rate)/total
-    — the holdings-weighted average post-tax return across the FA pool.
-    Falls back to the equal-weight blended ROI when the FA pool is empty.
+    """Excel `YoY Cash Flow!S5` = SUMPRODUCT(value, rate)/total — the
+    holdings-weighted average post-tax return across the FA pool, using the
+    firm's per-asset rates (`_EXCEL_FA_ROI`). Falls back to the equal-weight
+    blended ROI when the FA pool is empty.
 
     Returns (rate, breakdown) — breakdown shows how each class contributed."""
     buckets: list[tuple[str, float, float]] = []  # (label, value, post_tax_rate)
-    # Equity defaults match the firm's standard CFP convention: when an
-    # equity holding (stock or MF) doesn't carry an explicit cap
-    # classification, assume large-cap / conservative. The previous
-    # "everything → hybrid (10.5%)" was too aggressive — for a typical
-    # advisor's client whose portfolio is mostly large-cap stocks and
-    # multi-cap funds, the firm-applied blended FA ROI sits closer to
-    # 6.4% than 7.9%. Tag-driven overrides (e.g. fund_name containing
-    # "small cap" / "midcap") win when present.
+    # Equity & equity mutual funds both take the firm's 10.5% FA rate.
     for mf in plan.mutual_funds or []:
         v = float(mf.current_value or 0)
-        if v <= 0:
-            continue
-        name = (mf.fund_name or "").lower()
-        if "small" in name or "smallcap" in name:
-            r = POST_TAX_RETURN["equity_aggressive"]   # 12.25%
-        elif "mid" in name or "midcap" in name or "flexi" in name or "multi" in name:
-            r = POST_TAX_RETURN["equity_hybrid"]       # 10.5%
-        else:
-            r = POST_TAX_RETURN["equity_conservative"] # 8.75% — large-cap default
-        buckets.append(("mutual_funds", v, r))
+        if v > 0:
+            buckets.append(("mutual_funds", v, _EXCEL_FA_ROI["equity"]))
     for eq in plan.equity_stocks or []:
         v = float(eq.current_value or 0)
         if v > 0:
-            # Direct equity holdings — default to conservative (large-cap)
-            # since the firm's reference Excel applies the conservative
-            # post-tax rate (8.75%) to undifferentiated stock portfolios.
-            buckets.append(("equity_stocks", v, POST_TAX_RETURN["equity_conservative"]))
+            buckets.append(("equity_stocks", v, _EXCEL_FA_ROI["equity"]))
     for fi in plan.fixed_income or []:
         v = float(fi.current_value or 0)
         if v <= 0:
             continue
         inst = (fi.instrument or "").lower()
         if "ppf" in inst:
-            r = POST_TAX_RETURN["ppf"]
-            label = "ppf"
+            r, label = _EXCEL_FA_ROI["ppf"], "ppf"
         elif "epf" in inst:
-            r = POST_TAX_RETURN["epf"]
-            label = "epf"
+            r, label = _EXCEL_FA_ROI["epf"], "epf"
         elif "nps" in inst:
-            r = POST_TAX_RETURN["nps"]
-            label = "nps"
+            r, label = _EXCEL_FA_ROI["nps"], "nps"
         elif "sukanya" in inst:
-            r = POST_TAX_RETURN["sukanya"]
-            label = "sukanya"
-        elif "nsc" in inst or "bond" in inst:
-            r = POST_TAX_RETURN["bonds"]
-            label = "bonds_nsc"
-        elif "postoffice" in inst or "post office" in inst or "posa" in inst:
-            # Post Office Savings A/c — similar rate band to bank FD post-tax.
-            r = POST_TAX_RETURN["bank_fd"]
-            label = "post_office"
+            r, label = _EXCEL_FA_ROI["ppf"], "sukanya"
+        elif "nsc" in inst:
+            r, label = _EXCEL_FA_ROI["nsc"], "nsc"
+        elif "bond" in inst:
+            r, label = _EXCEL_FA_ROI["bonds"], "bonds"
+        elif "postoffice" in inst or "post office" in inst or "posa" in inst or "post" in inst:
+            r, label = _EXCEL_FA_ROI["post_office"], "post_office"
         else:
-            r = POST_TAX_RETURN["bank_fd"]
-            label = "fd"
+            r, label = _EXCEL_FA_ROI["fd"], "fd"
         buckets.append((label, v, r))
     # Liquid
     lc = plan.liquid_capital
@@ -1103,7 +1086,7 @@ def _holdings_weighted_post_tax_roi(plan: PlanState) -> tuple[float, dict[str, f
               ("savings_account_balance", "idle_cash_for_investment",
                "fd_breakable_for_investment", "bonus_expected_for_investment"))
     if liq > 0:
-        buckets.append(("liquid", float(liq), POST_TAX_RETURN["liquid_fund"]))
+        buckets.append(("liquid", float(liq), _EXCEL_FA_ROI["liquid"]))
 
     total = sum(v for _, v, _ in buckets)
     if total <= 0:
@@ -1710,37 +1693,13 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
             (float(ev.amount), ev.label or "")
         )
 
-    # Fixed-income maturities are MODELLED as pool transfers, not new money:
-    # at maturity year, the instrument's current_value leaves the FA pool
-    # (it's been cashed out) and re-enters via a positive Lumpsum inflow.
-    # The fa_transfers_out_by_year dict makes this explicit so fa_close
-    # stays consistent (instead of double-counting growth on an already-
-    # matured asset). The user sees the actual maturity amount in the
-    # Lumpsum column AND the instrument label in Remarks.
-    fa_transfers_out_by_year: dict[int, float] = {}
-    for fi in plan.fixed_income or []:
-        if not fi.maturity_date:
-            continue
-        # maturity_date may be a date / datetime / string. Best-effort year extract.
-        m_year: int | None = None
-        try:
-            m_year = int(getattr(fi.maturity_date, "year", None) or 0) or None
-        except Exception:
-            m_year = None
-        if not m_year:
-            s = str(fi.maturity_date)
-            for token in s.replace("-", " ").replace("/", " ").split():
-                if token.isdigit() and len(token) == 4:
-                    m_year = int(token)
-                    break
-        if not m_year or m_year < current_year:
-            continue
-        val = float(fi.current_value or 0)
-        if val <= 0:
-            continue
-        label = f"{fi.instrument or 'FD'} matures"
-        lumpsum_by_year.setdefault(m_year, []).append((val, label))
-        fa_transfers_out_by_year[m_year] = fa_transfers_out_by_year.get(m_year, 0) + val
+    # NOTE: fixed-income instruments (FD, Bonds, NSC, PPF, EPF, NPS, Post-Office)
+    # are ALREADY part of the opening FA pool and compound inside it at the
+    # blended FA ROI — exactly as the Excel does (P6 carries them; they grow via
+    # column S). We do NOT re-inject them as Lumpsum inflows at an inferred
+    # maturity year: that double-counts money the opening balance already holds
+    # (the firm Excel's Lumpsum column R/T carries ONLY RM-entered events such as
+    # a bonus, an asset disposal, or a reverse mortgage — never auto maturities).
 
     yoy = compute_yoy_cashflow(
         horizon_years=int(min(40, max(life_expectancy - current_age, 10))),
@@ -1765,7 +1724,6 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         goal_outflows_by_year=goal_outflows_by_year,
         goal_labels_by_year=goal_labels_by_year,
         lumpsum_events_by_year=lumpsum_by_year,
-        fa_transfers_out_by_year=fa_transfers_out_by_year,
     )
 
     # ── Summary ────────────────────────────────────────────────────────
