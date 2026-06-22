@@ -1448,11 +1448,6 @@ def _v2_s1_cashflow(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None
     retire_year = cur + round(ret.get("years_to_retire", 0) or 0)
     rows = [r for r in yoy if r["year"] <= retire_year] or yoy[:15]
 
-    chart = _v2_line_chart(
-        [(r["year"], r.get("financial_assets_closing", 0)) for r in rows],
-        f"Financial assets trajectory — {rows[0]['year']} to {rows[-1]['year']}",
-    )
-
     emi_years = [r["year"] for r in yoy if (r.get("loan_repayment") or 0) > 0]
     loan_paid_year = (max(emi_years) + 1) if emi_years else None
     ef = plan.emergency_fund
@@ -1504,7 +1499,6 @@ def _v2_s1_cashflow(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None
     return f"""<section class="page">
   <h2>1.  Cash Flow</h2>
   <p>Your money flow today, and how it compounds across the next {len(rows)-1} years to fund every goal you've set.</p>
-  {chart}
   <h3>Year-by-year view</h3>
   <p>This is your baseline trajectory — what unfolds at your current pace, with the goals you've stated taken in the years you've stated. Years that compound quietly through returns and ongoing SIPs are left blank; only material events are called out. The three paths in Section 4 show how this baseline changes.</p>
   <table>
@@ -1526,15 +1520,14 @@ def _v2_s2_networth(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     nfa0 = rows[0].get("nfa_opening", 0) or 0
     tot0 = (fa0 + nfa0) or 1
     fa_pct = round(fa0 / tot0 * 100)
-    chart = _v2_stacked_chart(
-        [(r["year"], r.get("financial_assets_closing", 0), r.get("non_financial_assets_closing", 0)) for r in rows],
-        f"Net worth growth {rows[0]['year']}–{rows[-1]['year']} — financial vs hard assets",
-    )
+    fa_ret = rows[-1].get("financial_assets_closing", 0) or 0
+    nfa_ret = rows[-1].get("non_financial_assets_closing", 0) or 0
+    tot_ret = (fa_ret + nfa_ret) or 1
+    fa_pct_ret = round(fa_ret / tot_ret * 100)
     return f"""<section class="page">
   <h2>2.  Net Worth</h2>
   <p>Your wealth today is anchored in real estate and gold ({100-fa_pct}% of total assets). Financial assets — the part that actually funds your goals — are {fa_pct}%. As your SIPs run over the years to retirement, that mix shifts steadily toward financial assets.</p>
-  {chart}
-  <p>The graph above projects how your asset mix evolves. Real estate appreciates around 7% post-tax; your equity and SIPs compound faster. By retirement, a growing share of your net worth sits in financial assets — the liquid kind you can spend from in retirement, without needing to sell the home you live in.</p>
+  <p>Real estate appreciates around 7% post-tax; your equity and SIPs compound faster. By retirement ({rows[-1]['year']}) about {fa_pct_ret}% of your net worth sits in financial assets — the liquid kind you can spend from in retirement, without needing to sell the home you live in. The year-by-year split is in the cash-flow table (Open FA) and the Net Worth view on the platform.</p>
 </section>"""
 
 
