@@ -552,6 +552,19 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
             yoy_manual = {}
         chunks: list[str] = []
         for sn in wb.sheetnames:
+            # Skip COMPUTED / projection tabs — they hold derived figures
+            # (future balances, corpus, FV, networth roll-forwards) that the LLM
+            # otherwise mistakes for input asset values, inflating the opening
+            # pool 10-100×. The deterministic parsers (_parse_yoy_manual_inputs,
+            # the expense-footer reconcile) read these tabs directly when needed;
+            # the LLM only ever sees the raw INPUT sheets.
+            _s = sn.lower()
+            if any(p in _s for p in (
+                "yoy", "cash flow", "cashflow", "retirement plan", "assumption",
+                "insurance computation", "debt mgt", "tax planning", "checks",
+                "list of tab", "networth", "inc exp", "asset returns", "case study",
+            )):
+                continue
             ws = wb[sn]
             # Only include sheets with at least one non-blank row, and
             # skip blank rows within a sheet. The firm's templates pad
