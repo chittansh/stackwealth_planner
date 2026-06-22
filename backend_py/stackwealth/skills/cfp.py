@@ -1818,7 +1818,13 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
             biz_until = cand
 
     yoy = compute_yoy_cashflow(
-        horizon_years=int(min(40, max(life_expectancy - current_age, 10))),
+        # Run to the LONGEST-lived household member's lifetime (the plan must
+        # cover the surviving spouse), like the firm Excel's 50-year YoY — not
+        # just the primary's. Capped at 55 years for sanity.
+        horizon_years=int(min(55, max(
+            max(((ps.life_expectancy or life_expectancy) - (_age_from_dob(ps.date_of_birth, now) or current_age)
+                 for ps in plan.assumptions.persons), default=life_expectancy - current_age),
+            10))),
         start_year=current_year,
         start_age=int(round(current_age)),
         retirement_age=retirement_age,
