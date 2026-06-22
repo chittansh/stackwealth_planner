@@ -929,16 +929,18 @@ def compute_yoy_cashflow(
         # year are summed; labels are concatenated for the remarks cell.
         lumpsum_evs = lumpsum_events_by_year.get(year, [])
         lumpsum_total = float(sum(amt for amt, _ in lumpsum_evs))
-        lumpsum_remark = " · ".join(lbl for _, lbl in lumpsum_evs if lbl) if lumpsum_evs else ""
 
         # Remarks cell — explains where a major withdrawal goes. The goal
         # name(s) maturing this year are listed first (so the RM can read the
-        # outflow against its purpose), then any lumpsum/maturity labels.
-        goal_remarks = [lbl for lbl in goal_labels_by_year.get(year, []) if lbl]
-        remark_parts = list(goal_remarks)
-        if lumpsum_remark:
-            remark_parts.append(lumpsum_remark)
-        remark = " · ".join(remark_parts)
+        # outflow against its purpose), then any lumpsum / maturity labels.
+        # Dedupe identical labels (e.g. two bonds maturing the same year both
+        # read "Bonds matures") while preserving first-seen order.
+        remark_parts = [lbl for lbl in goal_labels_by_year.get(year, []) if lbl]
+        remark_parts += [lbl for _, lbl in lumpsum_evs if lbl]
+        _seen: set[str] = set()
+        remark = " · ".join(
+            p for p in remark_parts if not (p in _seen or _seen.add(p))
+        )
 
         # Fixed-income maturities: at the maturity year, the instrument
         # leaves the FA pool (it's been cashed out) and re-enters as a
