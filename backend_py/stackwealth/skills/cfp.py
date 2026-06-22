@@ -877,6 +877,7 @@ def compute_yoy_cashflow(
     financial_asset_roi: float = None,   # S$5 — holdings-weighted (see compute_cfp)
     non_financial_appreciation: float = 0.07,  # Z$5 — real estate / gold blend
     goal_outflows_by_year: dict[int, float] | None = None,
+    goal_labels_by_year: dict[int, list[str]] | None = None,
     lumpsum_events_by_year: dict[int, list[tuple[float, str]]] | None = None,
     fa_transfers_out_by_year: dict[int, float] | None = None,
 ) -> list[dict]:
@@ -893,6 +894,7 @@ def compute_yoy_cashflow(
     if financial_asset_roi is None:
         financial_asset_roi = BLENDED_ROI_POST_TAX
     goal_outflows_by_year = goal_outflows_by_year or {}
+    goal_labels_by_year = goal_labels_by_year or {}
     lumpsum_events_by_year = lumpsum_events_by_year or {}
     fa_transfers_out_by_year = fa_transfers_out_by_year or {}
 
@@ -928,6 +930,15 @@ def compute_yoy_cashflow(
         lumpsum_evs = lumpsum_events_by_year.get(year, [])
         lumpsum_total = float(sum(amt for amt, _ in lumpsum_evs))
         lumpsum_remark = " · ".join(lbl for _, lbl in lumpsum_evs if lbl) if lumpsum_evs else ""
+
+        # Remarks cell — explains where a major withdrawal goes. The goal
+        # name(s) maturing this year are listed first (so the RM can read the
+        # outflow against its purpose), then any lumpsum/maturity labels.
+        goal_remarks = [lbl for lbl in goal_labels_by_year.get(year, []) if lbl]
+        remark_parts = list(goal_remarks)
+        if lumpsum_remark:
+            remark_parts.append(lumpsum_remark)
+        remark = " · ".join(remark_parts)
 
         # Fixed-income maturities: at the maturity year, the instrument
         # leaves the FA pool (it's been cashed out) and re-enters as a
@@ -969,7 +980,7 @@ def compute_yoy_cashflow(
             "major_withdrawals": round(-withdrawal) if withdrawal else 0,
             "investment_returns": round(fa_returns),
             "lumpsum_deposit_withdrawal": round(lumpsum_total) if lumpsum_total else 0,
-            "remarks": lumpsum_remark,
+            "remarks": remark,
             "financial_assets_closing": round(fa_close),
             # Non-financial-asset waterfall (Excel cols X–AA)
             "nfa_opening": round(nfa_open),
@@ -1229,6 +1240,7 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     asset_pool = _build_asset_pool(plan)
     goal_blocks: list[dict] = []
     goal_outflows_by_year: dict[int, float] = {}
+    goal_labels_by_year: dict[int, list[str]] = {}
     # Non-retirement, one-time goals whose target year falls AT/AFTER the
     # retirement year are post-retirement spends (Excel `Retirement Plan`
     # E26-E29 / `10_Financial_Goals` row 20 — e.g. a legacy gift). They are
@@ -1246,6 +1258,9 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         if block["target_year"] and block["future_value_needed"]:
             goal_outflows_by_year[block["target_year"]] = (
                 goal_outflows_by_year.get(block["target_year"], 0) + block["future_value_needed"]
+            )
+            goal_labels_by_year.setdefault(block["target_year"], []).append(
+                block.get("goal_name") or g.goal_name or "Goal"
             )
 
     total_required_sip = sum(b["required_sip_monthly"] for b in goal_blocks)
@@ -1723,6 +1738,7 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         financial_asset_roi=fa_roi,
         non_financial_appreciation=POST_TAX_RETURN["real_estate"],
         goal_outflows_by_year=goal_outflows_by_year,
+        goal_labels_by_year=goal_labels_by_year,
         lumpsum_events_by_year=lumpsum_by_year,
         fa_transfers_out_by_year=fa_transfers_out_by_year,
     )

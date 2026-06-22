@@ -6,7 +6,9 @@ import type { PlanState } from '@/types/plan-state';
 
 import { Headline } from './Headline';
 import { NetWorthChart } from './NetWorthChart';
+import { NetWorthCompositionChart } from './NetWorthCompositionChart';
 import { CashFlowTable } from './CashFlowTable';
+import { CashFlowChart } from './CashFlowChart';
 import { AllocationView } from './AllocationView';
 import { TaxView } from './TaxView';
 import { GoalsView } from './GoalsView';
@@ -18,7 +20,6 @@ import { ScenariosView } from './ScenariosView';
 import { RiskAssessmentView } from './RiskAssessmentView';
 import { PlanBlocks } from './PlanBlocks';
 import { Scenarios } from './Scenarios';
-import { ScenarioChips } from './ScenarioChips';
 import { RiskBanner } from './RiskBanner';
 import { CalculationsChip } from './CalculationsChip';
 
@@ -98,13 +99,14 @@ export function CanvasRouter({
       </div>
 
       {view === 'net-worth' && (
-        <div className="mt-6">
+        <div className="mt-6 flex flex-col gap-6">
           <NetWorthChart householdId={householdId} plan={plan} />
-          <ScenarioChips plan={plan} />
+          <NetWorthCompositionChart plan={plan} />
         </div>
       )}
       {view === 'cash-flow' && (
-        <div className="mt-6">
+        <div className="mt-6 flex flex-col gap-6">
+          <CashFlowChart plan={plan} />
           <CashFlowTable plan={plan} />
         </div>
       )}
@@ -154,9 +156,14 @@ export function CanvasRouter({
         </div>
       )}
 
-      <div className="mt-10">
-        <Scenarios householdId={householdId} plan={plan} />
-      </div>
+      {/* Scenario tooling lives on its own Scenarios tab now — keep it off the
+          net-worth page (and out of the dedicated Scenarios view, which renders
+          the full engine itself). */}
+      {view !== 'net-worth' && view !== 'scenarios' && (
+        <div className="mt-10">
+          <Scenarios householdId={householdId} plan={plan} />
+        </div>
+      )}
       <div className="mt-8">
         <PlanBlocks plan={plan} />
       </div>

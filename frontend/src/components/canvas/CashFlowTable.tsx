@@ -152,9 +152,9 @@ function ExcelTable({ rows }: { rows: YoyRow[] }) {
           <Th right strong>Surplus</Th>
           <Th right>Open FA</Th>
           <Th right>Withdraw</Th>
+          <Th>Remarks</Th>
           <Th right>Returns</Th>
           <Th right>Lumpsum</Th>
-          <Th>Remarks</Th>
           <Th right strong>Close FA</Th>
           <Th right>Open NFA</Th>
           <Th right>Apprn</Th>
@@ -191,11 +191,11 @@ function ExcelTable({ rows }: { rows: YoyRow[] }) {
               <Td right tone={withdraw < 0 ? 'warn' : undefined}>
                 {withdraw !== 0 ? fmt(withdraw) : '—'}
               </Td>
+              <Td>{remarks ? <span className="text-zinc-600 italic whitespace-normal">{remarks}</span> : <span className="text-zinc-300">—</span>}</Td>
               <Td right>{fmt(r.investment_returns ?? 0)}</Td>
               <Td right tone={lumpsum !== 0 ? (lumpsum > 0 ? 'good' : 'warn') : undefined}>
                 {lumpsum !== 0 ? fmt(lumpsum) : '—'}
               </Td>
-              <Td>{remarks ? <span className="text-zinc-500 italic">{remarks}</span> : ''}</Td>
               <Td right strong>{fmt(r.financial_assets_closing)}</Td>
               <Td right>{fmt(r.nfa_opening ?? 0)}</Td>
               <Td right>{fmt(r.nfa_appreciation ?? 0)}</Td>

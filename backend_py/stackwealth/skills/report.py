@@ -1401,9 +1401,6 @@ def _sandeep_page1(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None)
   <h3>Three things to do, whichever path you choose</h3>
   <ol style="margin-left:5mm;">{actions_html}</ol>
 
-  <h3>Your life timeline</h3>
-  {_life_timeline(plan, scen)}
-
   <div style="margin-top:4mm;background:var(--cream);border:1px solid var(--line);border-radius:1.5mm;padding:3mm 4mm;font-size:8.5pt;color:var(--ink-soft);">
     <strong style="color:var(--brand-deep);">What's in this report:</strong>
     Cash Flow (§2) · Net Worth (§3) · Goal Plan (§4) · Protection (§6) · Tax info (§7) ·
