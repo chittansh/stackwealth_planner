@@ -537,6 +537,60 @@ def _parse_yoy_manual_inputs(wb) -> dict[str, Any]:
     return out
 
 
+def _parse_equity_stocks(wb) -> list[dict] | None:
+    """Deterministically read the firm '4B_Equity_Stocks' tab. Its columns are
+    mislabelled — the 'Current Price' column actually holds each holding's TOTAL
+    current value, and the 'Current Value' column holds the strength tag — so the
+    LLM intermittently computes Quantity × 'Current Price' and inflates equity
+    100×. Read the value column directly (the numeric one among Current
+    Value / Current Price) and never multiply by quantity."""
+    ws = None
+    for sn in wb.sheetnames:
+        s = sn.lower()
+        if "equity" in s or s.strip().startswith("4b"):
+            ws = wb[sn]
+            break
+    if ws is None:
+        return None
+    max_c = ws.max_column
+    hdr = None
+    name_c = val_candidates = None
+    cand: list[int] = []
+    for r in range(1, min(8, ws.max_row) + 1):
+        vals = [ws.cell(row=r, column=c).value for c in range(1, max_c + 1)]
+        joined = " ".join(str(v).lower() for v in vals if v)
+        if "stock name" in joined or ("stock" in joined and ("current value" in joined or "current price" in joined)):
+            hdr = r
+            for c, v in enumerate(vals, start=1):
+                t = str(v or "").lower().strip()
+                if "stock name" in t or t == "stock name":
+                    name_c = c
+                if "current value" in t or "current price" in t:
+                    cand.append(c)
+            break
+    if not hdr or not name_c or not cand:
+        return None
+    # Pick the candidate value column whose data rows are numeric.
+    val_c = None
+    for c in cand:
+        for rr in range(hdr + 1, min(hdr + 6, ws.max_row) + 1):
+            v = ws.cell(row=rr, column=c).value
+            if isinstance(v, (int, float)) and v > 0:
+                val_c = c
+                break
+        if val_c:
+            break
+    if not val_c:
+        return None
+    out: list[dict] = []
+    for r in range(hdr + 1, ws.max_row + 1):
+        name = ws.cell(row=r, column=name_c).value
+        val = ws.cell(row=r, column=val_c).value
+        if isinstance(name, str) and name.strip() and isinstance(val, (int, float)) and val > 0:
+            out.append({"stock_name": name.strip(), "current_value": float(val)})
+    return out or None
+
+
 async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
     expense_footer_total: float | None = None
     try:
@@ -550,6 +604,10 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
             yoy_manual = _parse_yoy_manual_inputs(wb)
         except Exception:
             yoy_manual = {}
+        try:
+            equity_rows = _parse_equity_stocks(wb)
+        except Exception:
+            equity_rows = None
         chunks: list[str] = []
         for sn in wb.sheetnames:
             # Skip COMPUTED / projection tabs — they hold derived figures
@@ -602,6 +660,10 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
     # over the LLM (which extracts these unreliably). Reverse mortgages / asset
     # sales / bonuses go to assumptions.lumpsum_events; the business-income
     # cut-off age to personal_details.business_retirement_age.
+    # Deterministic equity holdings override the LLM (mislabelled-column safety).
+    if equity_rows and result.get("partial_state") is not None:
+        result["partial_state"]["equity_stocks"] = equity_rows
+
     if yoy_manual and result.get("partial_state") is not None:
         ps = result["partial_state"]
         if yoy_manual.get("lumpsum_events"):
