@@ -185,7 +185,49 @@ def _find_duplicate(path: str, list_: list[Any], row: Any) -> dict | None:
                     "index": i,
                     "hint": f"Use plan_set on financial_goals.{i}.<field> to update, or plan_remove first.",
                 }
+
+    # Asset / recurring lists — idempotency guard. Re-uploading the same file (or
+    # re-running an import) must not append duplicate holdings. A row is a
+    # duplicate when its identifying label AND its principal value match an
+    # existing row (two genuinely distinct holdings won't share both).
+    _ASSET_LIST_PATHS = {
+        "mutual_funds", "equity_stocks", "fixed_income",
+        "real_estate", "gold", "recurring_investments",
+    }
+    if path in _ASSET_LIST_PATHS:
+        sig = _row_signature(r)
+        if sig[0] or sig[1]:  # need at least a label or a value to compare
+            for i, e in enumerate(list_):
+                if isinstance(e, dict) and _row_signature(e) == sig:
+                    return {
+                        "reason": f"An identical {path} entry already exists ({sig[0] or 'unnamed'})",
+                        "id": e.get("id") or "",
+                        "index": i,
+                        "hint": f"Use plan_set on {path}.{i}.<field> to update, or plan_remove first.",
+                    }
     return None
+
+
+def _row_signature(row: Any) -> tuple[str, str]:
+    """(label, principal-value) signature for asset/recurring rows — used to
+    detect re-uploaded duplicates regardless of row id."""
+    if not isinstance(row, dict):
+        return ("", "")
+    label = str(
+        row.get("fund_name") or row.get("stock_name") or row.get("instrument")
+        or row.get("label") or row.get("name") or ""
+    ).strip().lower()
+    val = (
+        row.get("current_value") if row.get("current_value") is not None
+        else row.get("invested_amount") if row.get("invested_amount") is not None
+        else row.get("monthly_amount") if row.get("monthly_amount") is not None
+        else row.get("amount")
+    )
+    try:
+        val_s = str(int(round(float(val)))) if val is not None else ""
+    except (TypeError, ValueError):
+        val_s = str(val or "")
+    return (label, val_s)
 
 
 # ── apply_* ────────────────────────────────────────────────────────────────

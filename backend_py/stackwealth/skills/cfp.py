@@ -1657,11 +1657,15 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         p.date_of_birth and (current_year - int((p.date_of_birth or "0000")[-4:] or 0)) < 25
         for p in persons[2:]
     ))
-    n_senior_parents = sum(
-        1 for g in plan.financial_goals
-        if "parent" in (g.goal_name or "").lower()
-        and any(k in (g.goal_name or "").lower() for k in ("medical", "surgery", "health"))
-    )
+    # Senior dependent parents needing a separate health policy — the RM-entered
+    # count wins; otherwise infer from a parent-medical/surgery goal.
+    n_senior_parents = plan.personal_details.dependent_senior_parents
+    if n_senior_parents is None:
+        n_senior_parents = sum(
+            1 for g in plan.financial_goals
+            if "parent" in (g.goal_name or "").lower()
+            and any(k in (g.goal_name or "").lower() for k in ("medical", "surgery", "health"))
+        )
     if n_persons <= 1 and not has_children:
         family_kind = "single"
     elif has_children:
@@ -1744,6 +1748,7 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         start_year=current_year,
         start_age=int(round(current_age)),
         retirement_age=retirement_age,
+        business_until_age=plan.personal_details.business_retirement_age,
         monthly_income_employment=income_emp_monthly,
         monthly_income_business=income_biz_monthly,
         monthly_income_rental=income_rent_monthly,

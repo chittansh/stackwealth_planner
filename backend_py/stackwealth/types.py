@@ -83,6 +83,14 @@ class PersonalDetails(StrictModel):
     city_type: Optional[CityType] = None
     occupation: Optional[str] = None
     retirement_age_target: Optional[int] = None
+    # RM-entered: the age the client's BUSINESS income continues to (often later
+    # than the salaried retirement age — a business runs past the owner's
+    # employment retirement). Drives the YoY Cash Flow business-income cut-off.
+    # None → business stops at retirement_age_target (same as employment).
+    business_retirement_age: Optional[int] = None
+    # RM-entered: number of senior dependent parents who need a SEPARATE health
+    # policy (Excel Insurance Computation G60 — ~₹20L each on top of family cover).
+    dependent_senior_parents: Optional[int] = None
 
 
 class IncomeDetails(StrictModel):
