@@ -9,6 +9,7 @@ import { NetWorthChart } from './NetWorthChart';
 import { NetWorthCompositionChart } from './NetWorthCompositionChart';
 import { CashFlowTable } from './CashFlowTable';
 import { CashFlowChart } from './CashFlowChart';
+import { RMInputsCard } from './RMInputsCard';
 import { AllocationView } from './AllocationView';
 import { TaxView } from './TaxView';
 import { GoalsView } from './GoalsView';
@@ -108,6 +109,7 @@ export function CanvasRouter({
         <div className="mt-6 flex flex-col gap-6">
           <CashFlowChart plan={plan} />
           <CashFlowTable plan={plan} />
+          {plan && <RMInputsCard plan={plan} />}
         </div>
       )}
       {view === 'investments' && plan && (

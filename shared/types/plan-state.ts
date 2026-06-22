@@ -18,6 +18,10 @@ export type PersonalDetails = {
   city_type?: 'Metro' | 'Non-metro' | null;
   occupation?: string | null;
   retirement_age_target?: number | null;
+  /** Age the client's business income runs to (defaults to retirement age). */
+  business_retirement_age?: number | null;
+  /** Count of senior dependent parents needing a separate health policy. */
+  dependent_senior_parents?: number | null;
 };
 
 export type IncomeDetails = {
