@@ -1233,42 +1233,628 @@ def _build_html(plan: PlanState) -> str:
 
 
 def _build_sandeep_html(plan: PlanState) -> str:
+    """Client-facing plan, structured to the v2 sample: Page 1 exec summary →
+    1 Cash Flow → 2 Net Worth → 3 Risk → 4 Goal Planning (+ three paths) →
+    5 Tax → Appendix."""
     cfp = cfp_skill.compute_cfp(plan)
-    # Compute the AI layers once and share across sections.
-    try:
-        sug = suggestions_skill.compute_suggestions(plan)
-    except Exception:
-        sug = None
     try:
         scen = scenarios_skill.compute_scenarios(plan)
     except Exception:
         scen = None
-    # Brief structure: Page-1 exec summary → §1 Profile → §2 Cash Flow →
-    # §3 Net Worth → §4 Goals → §6 Risk → §7 Tax → §8 Scenario Analysis →
-    # §9 Roadmap → §11 Data Gaps. (§5 Investment Strategy is out of v1 scope.)
     sections = [
-        _sandeep_page1(plan, cfp, scen),
-        _sandeep_networth_overview(plan, cfp, sug),
-        _sandeep_s1_profile(plan),
-        _sandeep_s2_cashflow(plan, cfp),
-        _sandeep_s3_networth(plan),
-        _sandeep_s4_goals(plan, cfp),
-        _sandeep_s4b_suggestions(plan, sug),
-        _sandeep_s6_risk(plan, cfp),
-        _sandeep_s7_tax(plan),
-        _sandeep_s8_scenarios(plan, cfp, scen),
-        _sandeep_s9_roadmap(plan, cfp),
-        _sandeep_s11_datagaps(plan, scen),
+        _v2_page1(plan, cfp, scen),
+        _v2_s1_cashflow(plan, cfp, scen),
+        _v2_s2_networth(plan, cfp),
+        _v2_s3_risk(plan, cfp, scen),
+        _v2_s4_goals(plan, cfp, scen),
+        _v2_s5_tax(plan, cfp),
+        _v2_appendix(plan, cfp),
     ]
     name = plan.personal_details.full_name or plan.household_id
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"/>
-<title>Comprehensive Financial Plan — {_h(name)}</title>
+<title>Financial Plan — {_h(name)}</title>
 <style>{CSS}</style>
 </head><body>
 {''.join(sections)}
 </body></html>"""
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  v2 client-facing report — mirrors Sandeep_Financial_Plan_v2_SAMPLE.docx
+# ════════════════════════════════════════════════════════════════════════════
+
+def _v2c(n: float | int | None) -> str:
+    """Compact ₹ — Cr (2dp) / L (1dp) / K, with a real minus sign."""
+    n = round(n or 0)
+    a = abs(n)
+    sign = "−" if n < 0 else ""
+    if a >= 1_00_00_000:
+        return f"{sign}₹{a / 1e7:.2f} Cr"
+    if a >= 1_00_000:
+        return f"{sign}₹{a / 1e5:.1f} L"
+    if a >= 1000:
+        return f"{sign}₹{a / 1000:.0f}K"
+    return f"{sign}₹{a:,.0f}"
+
+
+def _v2_line_chart(series: list[tuple[int, float]], caption: str) -> str:
+    """Inline-SVG line of financial assets over time (print-safe)."""
+    pts = [(int(y), float(v or 0)) for y, v in series if y is not None]
+    if len(pts) < 2:
+        return ""
+    W, H, padL, padB, padT = 520, 150, 6, 14, 8
+    ys = [v for _, v in pts]
+    lo, hi = min(ys + [0]), max(ys)
+    rng = (hi - lo) or 1
+    n = len(pts)
+    def X(i): return padL + i / (n - 1) * (W - padL - 6)
+    def Y(v): return padT + (1 - (v - lo) / rng) * (H - padT - padB)
+    poly = " ".join(f"{X(i):.1f},{Y(v):.1f}" for i, (_, v) in enumerate(pts))
+    area = f"{X(0):.1f},{Y(lo):.1f} " + poly + f" {X(n-1):.1f},{Y(lo):.1f}"
+    xlabels = ""
+    for i in (0, n // 2, n - 1):
+        xlabels += f'<text x="{X(i):.0f}" y="{H-2}" font-size="8" fill="#a1a1aa" text-anchor="middle">{pts[i][0]}</text>'
+    return (
+        f'<div style="background:white;border:1px solid var(--line);border-radius:1.5mm;padding:3mm 4mm;margin:2mm 0 3mm;">'
+        f'<svg viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="xMidYMid meet">'
+        f'<polygon points="{area}" fill="var(--brand-soft)"/>'
+        f'<polyline points="{poly}" fill="none" stroke="var(--brand)" stroke-width="2"/>'
+        f'{xlabels}</svg>'
+        f'<div style="font-size:8.5pt;color:var(--ink-soft);margin-top:1.5mm;">{_h(caption)}</div></div>'
+    )
+
+
+def _v2_stacked_chart(rows: list[tuple[int, float, float]], caption: str) -> str:
+    """Inline-SVG stacked bars: financial (brand) over hard (sand) assets."""
+    data = [(int(y), float(f or 0), float(h or 0)) for y, f, h in rows if y is not None]
+    if len(data) < 2:
+        return ""
+    W, H, padB, padT = 520, 150, 14, 6
+    hi = max((f + h) for _, f, h in data) or 1
+    n = len(data)
+    bw = (W / n) * 0.62
+    bars = ""
+    for i, (yr, fa, ha) in enumerate(data):
+        cx = (i + 0.5) * (W / n)
+        x = cx - bw / 2
+        hh = (ha / hi) * (H - padT - padB)
+        fh = (fa / hi) * (H - padT - padB)
+        y_h = H - padB - hh
+        y_f = y_h - fh
+        bars += f'<rect x="{x:.1f}" y="{y_h:.1f}" width="{bw:.1f}" height="{hh:.1f}" fill="#c4a878"/>'
+        bars += f'<rect x="{x:.1f}" y="{y_f:.1f}" width="{bw:.1f}" height="{fh:.1f}" fill="var(--brand)"/>'
+        if i in (0, n // 2, n - 1):
+            bars += f'<text x="{cx:.0f}" y="{H-2}" font-size="8" fill="#a1a1aa" text-anchor="middle">{yr}</text>'
+    legend = ('<span style="color:var(--brand);">■</span> Financial assets&nbsp;&nbsp;'
+              '<span style="color:#c4a878;">■</span> Hard assets (real estate, gold)')
+    return (
+        f'<div style="background:white;border:1px solid var(--line);border-radius:1.5mm;padding:3mm 4mm;margin:2mm 0 3mm;">'
+        f'<svg viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="xMidYMid meet">{bars}</svg>'
+        f'<div style="font-size:8pt;color:var(--ink-soft);margin-top:1mm;">{legend}</div>'
+        f'<div style="font-size:8.5pt;color:var(--ink-soft);margin-top:1mm;">{_h(caption)}</div></div>'
+    )
+
+
+def _v2_household(plan: PlanState) -> dict:
+    persons = plan.assumptions.persons or []
+    pd = plan.personal_details
+    primary = persons[0].name if persons and persons[0].name else (pd.full_name or "Client")
+    spouse = persons[1].name if len(persons) > 1 and persons[1].name else None
+    return {"primary": primary, "spouse": spouse}
+
+
+def _v2_page1(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -> str:
+    s = cfp.summary
+    ret = cfp.retirement or {}
+    hh = _v2_household(plan)
+    cur = datetime.now().year
+    nw = plan.computed.net_worth.total if plan.computed.net_worth else (
+        (s.get("opening_financial_assets", 0) or 0) + (s.get("opening_non_financial_assets", 0) or 0))
+    income = s.get("monthly_income", 0) or 0
+    investable = (scen or {}).get("surplus", {}).get("investable_surplus") or s.get("monthly_surplus_pre_sip", 0) or 0
+    retire_age = int(s.get("retirement_age", 60) or 60)
+    yrs_to_ret = round(ret.get("years_to_retire", 0) or 0)
+    retire_year = cur + yrs_to_ret
+
+    title_name = hh["primary"] + (f" & {hh['spouse']}" if hh["spouse"] else "")
+    city = plan.personal_details.city_of_residence or ""
+    when = datetime.now().strftime("%B %Y")
+
+    tiles = [
+        ("Monthly Income", _v2c(income), "Salary, in-hand"),
+        ("Investable Surplus", _v2c(investable) + " /mo", "After essentials & EMI"),
+        ("Net Worth", _v2c(nw), "Assets less liabilities"),
+        ("Retirement", f"Age {retire_age} ({retire_year})", f"{yrs_to_ret} years from today"),
+    ]
+    tile_html = "".join(
+        f'<div class="kcell"><div class="label">{_h(lbl)}</div><div class="val">{val}</div><div class="note">{_h(note)}</div></div>'
+        for lbl, val, note in tiles
+    )
+
+    # Profile narrative — data-driven, brief tone.
+    risk = ""
+    rp = plan.computed.risk_profile
+    if rp and getattr(rp, "recommended_profile", None):
+        risk = f" Risk profile: {rp.recommended_profile}."
+    n_kids = plan.personal_details.number_of_children or 0
+    kids_txt = f", with {n_kids} child{'ren' if n_kids != 1 else ''}" if n_kids else ""
+    profile = (f"{hh['primary']}"
+               + (f" and {hh['spouse']}" if hh["spouse"] else "")
+               + f"{kids_txt}. You are in your peak accumulation years — strong earnings, "
+               f"goals approaching, and a clear horizon to retirement at {retire_age}.{risk}")
+
+    # On-track vs attention (data-driven).
+    on_track, attention = [], []
+    achievable = bool((scen or {}).get("achievable"))
+    gap = max(0, ((scen or {}).get("total_sip_needed", 0) or 0) - investable)
+    funded_goals = [g for g in cfp.goal_blocks if (g.get("required_sip_monthly", 0) or 0) <= 0]
+    if funded_goals:
+        on_track.append(f"{len(funded_goals)} of your goals are already funded by existing assets at your current pace.")
+    on_track.append(f"A strong asset base of {_v2c(nw)} anchors the plan.")
+    if (scen or {}).get("surplus", {}).get("investable_surplus", 0):
+        on_track.append(f"You have {_v2c(investable)}/month of investable surplus after essentials and EMI.")
+    ins = cfp.insurance or {}
+    add_cover = ins.get("additional_cover_required", 0) or 0
+    if not achievable and gap > 0:
+        attention.append(f"Your full plan needs about {_v2c(gap)}/month more than you currently invest.")
+    if add_cover > 0:
+        existing = ins.get("existing_cover", 0) or 0
+        need = ins.get("total_need_including_loans", 1) or 1
+        pct = round(existing / need * 100) if need else 0
+        attention.append(f"Term insurance covers only {pct}% of your family's actual need — the biggest risk for the earner.")
+    ef = plan.emergency_fund
+    ef_cur = float((ef.total_emergency_corpus if ef else 0) or 0)
+    if ef_cur <= 0:
+        attention.append("No emergency fund — a job disruption today would force tough EMI and fee decisions within weeks.")
+    on_track_html = "".join(f"<li>{_h(x)}</li>" for x in on_track) or "<li>—</li>"
+    attention_html = "".join(f"<li>{_h(x)}</li>" for x in attention) or "<li>—</li>"
+
+    # Three-paths teaser.
+    paths = [sc for sc in (scen or {}).get("scenarios", []) if sc.get("key") in ("path1", "path2", "path3")]
+    paths_html = ""
+    if paths:
+        rows = "".join(
+            f'<tr><td class="label-cell" style="white-space:nowrap;">{_h(p.get("name",""))}</td>'
+            f'<td>{_h(p.get("headline",""))}</td></tr>'
+            for p in paths
+        )
+        paths_html = f"""
+  <h3>Three paths to close the gap</h3>
+  <table><tbody>{rows}</tbody></table>"""
+
+    return f"""<section class="page cover">
+  <div class="cover-band">
+    <p class="brand">Stack Wealth</p>
+    <h1>Financial Plan</h1>
+    <p class="sub">{_h(title_name)}</p>
+    <p style="opacity:.85;margin-top:1mm;">{_h(city)}{' · ' if city else ''}{_h(when)} · Prepared by Stack Wealth</p>
+  </div>
+  <div class="kbox kbox-4">{tile_html}</div>
+  <div class="callout info"><p>{_h(profile)}</p></div>
+  <div class="kbox">
+    <div class="callout good"><strong>✓  What's on track today</strong><ul style="margin-bottom:0;">{on_track_html}</ul></div>
+    <div class="callout warn"><strong>⚠  What needs attention</strong><ul style="margin-bottom:0;">{attention_html}</ul></div>
+  </div>
+  {paths_html}
+</section>"""
+
+
+def _v2_s1_cashflow(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -> str:
+    yoy = cfp.yoy_cashflow or []
+    ret = cfp.retirement or {}
+    cur = datetime.now().year
+    retire_year = cur + round(ret.get("years_to_retire", 0) or 0)
+    rows = [r for r in yoy if r["year"] <= retire_year] or yoy[:15]
+
+    chart = _v2_line_chart(
+        [(r["year"], r.get("financial_assets_closing", 0)) for r in rows],
+        f"Financial assets trajectory — {rows[0]['year']} to {rows[-1]['year']}",
+    )
+
+    emi_years = [r["year"] for r in yoy if (r.get("loan_repayment") or 0) > 0]
+    loan_paid_year = (max(emi_years) + 1) if emi_years else None
+    ef = plan.emergency_fund
+    ef_cur = float((ef.total_emergency_corpus if ef else 0) or 0)
+    ef_target = 6 * ((cfp.summary.get("monthly_expenses", 0) or 0) + (cfp.summary.get("monthly_emi", 0) or 0))
+    ef_year = cur + 3 if ef_cur < ef_target else None
+
+    def _sym(t: str) -> str:
+        t = (t or "").lower()
+        if "education" in t or "college" in t:
+            return " #"
+        if "travel" in t or "vacation" in t or "foreign" in t:
+            return " $"
+        if "house" in t or "property" in t:
+            return " @"
+        return ""
+
+    body = ""
+    for r in rows:
+        yr = r["year"]
+        wd = r.get("major_withdrawals", 0) or 0
+        lump = r.get("lumpsum_deposit_withdrawal", 0) or 0
+        goal = r.get("goal_remarks") or ""
+        add_cell, remark = "", ""
+        if wd != 0:
+            add_cell = _v2c(wd) + _sym(goal)
+            if not _sym(goal) and goal:
+                remark = goal
+        elif lump != 0:
+            add_cell = ("+" if lump > 0 else "") + _v2c(lump) + (" ^" if lump > 0 else "")
+            if r.get("remarks"):
+                remark = r["remarks"]
+        milestone = ""
+        if ef_year and yr == ef_year:
+            milestone = f"Emergency fund target ({_v2c(ef_target)}) reached"
+        elif loan_paid_year and yr == loan_paid_year:
+            milestone = "Home loan paid off — EMI frees up for retirement SIP"
+        elif yr == retire_year:
+            milestone = "Retirement — corpus deployed to fund living expenses"
+        remark = milestone or remark
+        hl = ' class="subtotal"' if (add_cell or remark) else ""
+        body += (f'<tr{hl}><td>{yr}</td><td class="num">{_v2c(r.get("total_income",0))}</td>'
+                 f'<td class="num">{_v2c(r.get("total_outflow",0))}</td>'
+                 f'<td class="num">{_v2c(r.get("fa_opening",0))}</td>'
+                 f'<td class="num">{add_cell}</td><td>{_h(remark)}</td></tr>')
+
+    final_fa = rows[-1].get("financial_assets_closing", 0)
+    corpus = ret.get("corpus_required", 0) or 0
+    return f"""<section class="page">
+  <h2>1.  Cash Flow</h2>
+  <p>Your money flow today, and how it compounds across the next {len(rows)-1} years to fund every goal you've set.</p>
+  {chart}
+  <h3>Year-by-year view</h3>
+  <p>This is your baseline trajectory — what unfolds at your current pace, with the goals you've stated taken in the years you've stated. Years that compound quietly through returns and ongoing SIPs are left blank; only material events are called out. The three paths in Section 4 show how this baseline changes.</p>
+  <table>
+    <thead><tr><th>Year</th><th class="num">Income</th><th class="num">Expense + EMI</th><th class="num">Opening financial assets</th><th class="num">Additions / Withdrawals</th><th>Remarks</th></tr></thead>
+    <tbody>{body}</tbody>
+  </table>
+  <p class="muted"><strong>Reading the symbols.</strong>&nbsp; # children's education withdrawal.&nbsp; $ vacation withdrawal.&nbsp; @ property withdrawal.&nbsp; ^ expected one-time inflow (bonus, RSU, inheritance) — none provided in your inputs; share with your advisor if any are expected. Returns on invested capital are implicit in the year-on-year growth of opening financial assets.</p>
+  <p class="muted"><strong>Reading this view.</strong>&nbsp; Blank rows are years where things compound quietly through returns and your ongoing SIPs. Highlighted rows mark material events — a goal spend, the loan ending, retirement. By {rows[-1]['year']} your financial assets land around {_v2c(final_fa)} — against the {_v2c(corpus)} retirement target. The three paths in Section 4 show how that gap closes.</p>
+</section>"""
+
+
+def _v2_s2_networth(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
+    yoy = cfp.yoy_cashflow or []
+    ret = cfp.retirement or {}
+    cur = datetime.now().year
+    retire_year = cur + round(ret.get("years_to_retire", 0) or 0)
+    rows = [r for r in yoy if r["year"] <= retire_year] or yoy
+    fa0 = rows[0].get("fa_opening", 0) or 0
+    nfa0 = rows[0].get("nfa_opening", 0) or 0
+    tot0 = (fa0 + nfa0) or 1
+    fa_pct = round(fa0 / tot0 * 100)
+    chart = _v2_stacked_chart(
+        [(r["year"], r.get("financial_assets_closing", 0), r.get("non_financial_assets_closing", 0)) for r in rows],
+        f"Net worth growth {rows[0]['year']}–{rows[-1]['year']} — financial vs hard assets",
+    )
+    return f"""<section class="page">
+  <h2>2.  Net Worth</h2>
+  <p>Your wealth today is anchored in real estate and gold ({100-fa_pct}% of total assets). Financial assets — the part that actually funds your goals — are {fa_pct}%. As your SIPs run over the years to retirement, that mix shifts steadily toward financial assets.</p>
+  {chart}
+  <p>The graph above projects how your asset mix evolves. Real estate appreciates around 7% post-tax; your equity and SIPs compound faster. By retirement, a growing share of your net worth sits in financial assets — the liquid kind you can spend from in retirement, without needing to sell the home you live in.</p>
+</section>"""
+
+
+def _v2_s3_risk(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -> str:
+    ins = cfp.insurance or {}
+    s = cfp.summary
+    health = ins.get("health") or {}
+    add_term = ins.get("additional_cover_required", 0) or 0
+    total_need = ins.get("total_need_including_loans", 0) or 0
+    term_today = ins.get("existing_cover", 0) or 0
+    # Emergency fund
+    bare = (s.get("monthly_expenses", 0) or 0) + (s.get("monthly_emi", 0) or 0)
+    ef_target = round(6 * bare)
+    ef = plan.emergency_fund
+    ef_cur = round(float((ef.total_emergency_corpus if ef else 0) or 0))
+    ef_gap = max(0, ef_target - ef_cur)
+    ef_sip = round(ef_gap / 36) if ef_gap > 0 else 0
+    ef_done_year = datetime.now().year + 3
+    months_now = (ef_cur / bare) if bare else 0
+    existing_sip = round(s.get("monthly_existing_sip", 0) or 0)
+    target_sip = round((scen or {}).get("total_sip_needed", 0) or s.get("total_required_sip_monthly", 0) or 0)
+
+    actions = []
+    if add_term > 0:
+        actions.append(f"<strong>1.&nbsp; Add {_v2c(add_term)} to your term insurance.</strong> As the earner, your family currently holds a fraction of the cover they'd need against the loan and future obligations.")
+    if ef_sip > 0:
+        actions.append(f"<strong>2.&nbsp; Build your emergency fund to {_v2c(ef_target)}.</strong> {_v2c(ef_sip)}/month into a liquid fund — fully cushioned in 36 months.")
+    if target_sip > existing_sip:
+        actions.append(f"<strong>3.&nbsp; Increase your monthly SIP from {_v2c(existing_sip)} to {_v2c(target_sip)}.</strong> The structural change that takes retirement from \"maybe\" to \"on track\" before you choose between the three paths.")
+    actions_html = "<br/><br/>".join(actions) or "Your protection foundations are in good shape."
+
+    # Insurance cover table
+    floater = plan.insurance_details.family_floater
+    indiv = plan.insurance_details.health_insurance
+    floater_cover = (floater.cover_amount if floater else 0) or 0
+    indiv_cover = (indiv.cover_amount if indiv else 0) or 0
+    cover_rows = (
+        f'<tr><td class="label-cell">Term life (earner)</td><td class="num">{_v2c(term_today)}</td><td class="num">{_v2c(total_need)}</td><td>{("Add " + _v2c(add_term) + " cover") if add_term>0 else "Adequate"}</td></tr>'
+        f'<tr><td class="label-cell">Health — family floater</td><td class="num">{_v2c(floater_cover)}</td><td class="num">₹25–30 L</td><td>{"Adequate; enhance at renewal" if floater_cover>=2_000_000 else "Raise to ₹25 L+"}</td></tr>'
+        f'<tr><td class="label-cell">Health — individual (earner)</td><td class="num">{_v2c(indiv_cover) if indiv_cover else "—"}</td><td class="num">₹25 L</td><td>Add super top-up</td></tr>'
+        f'<tr><td class="label-cell">Critical Illness</td><td class="num">—</td><td class="num">₹50 L</td><td>Add a standalone CI policy</td></tr>'
+        f'<tr><td class="label-cell">Personal Accident</td><td class="num">—</td><td class="num">₹1 Cr</td><td>Add a personal accident cover</td></tr>'
+    )
+    hlv = ins.get("human_life_value", 0) or 0
+    needs = ins.get("needs_based_corpus", 0) or 0
+    why = (f"If something happened to the earner tomorrow, the family needs to clear outstanding loans, fund the children's "
+           f"education, and replace years of household income. The income-replacement (Human Life Value) method puts that at "
+           f"{_v2c(hlv)} and the expense-needs method at {_v2c(needs)} — averaged and net of existing cover and disposable assets, "
+           f"the shortfall is {_v2c(add_term)}. Buying additional term cover now costs a small fraction of one EMI for a meaningful protection level.")
+
+    return f"""<section class="page">
+  <h2>3.  Risk Management</h2>
+  <p>Two things stand between your plan and a shock: an emergency fund, and the right insurance covers. Both are addressable this quarter.</p>
+  <div class="callout info"><strong>Three foundational actions — regardless of which path you pick later</strong><p>{actions_html}</p></div>
+
+  <h3>3.1&nbsp; Emergency Fund</h3>
+  <table>
+    <thead><tr><th></th><th class="num">Today</th><th class="num">Target</th></tr></thead>
+    <tbody>
+      <tr><td class="label-cell">Months of mandatory expense covered</td><td class="num">{months_now:.1f} months</td><td class="num">6 months</td></tr>
+      <tr><td class="label-cell">Corpus available</td><td class="num">{_v2c(ef_cur)}</td><td class="num">{_v2c(ef_target)}</td></tr>
+      <tr class="total"><td class="label-cell">Gap</td><td class="num">{_v2c(ef_gap)}</td><td class="num">{"Closed by "+str(ef_done_year) if ef_gap>0 else "Funded"}</td></tr>
+    </tbody>
+  </table>
+  <p class="muted"><strong>Plan.</strong>&nbsp; Move your current idle cash into a liquid mutual fund this month, then SIP {_v2c(ef_sip)}/month into the same fund. You'll be at six months' cover by {ef_done_year}, after which that amount redirects to your retirement SIP automatically.</p>
+
+  <h3>3.2&nbsp; Life Insurance — the largest current risk</h3>
+  <table>
+    <thead><tr><th>Cover</th><th class="num">Today</th><th class="num">Required</th><th>Action</th></tr></thead>
+    <tbody>{cover_rows}</tbody>
+  </table>
+  <div class="callout warn"><strong>Why {_v2c(total_need)}?</strong><p>{_h(why)}</p></div>
+</section>"""
+
+
+def _v2_s4_goals(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -> str:
+    ret = cfp.retirement or {}
+    cur = datetime.now().year
+    retire_year = cur + round(ret.get("years_to_retire", 0) or 0)
+    # Goals table
+    grows = ""
+    for g in cfp.goal_blocks:
+        gap = g.get("fv_gap", 0) or 0
+        req = g.get("required_sip_monthly", 0) or 0
+        short = (g.get("sip_shortfall_monthly", 0) or 0) > 0
+        alloc = g.get("allocated_today_total", 0) or 0
+        funded = _v2c(alloc) + " allocated" if alloc > 0 else "None allocated yet"
+        if gap <= 0:
+            status = "Funded by existing assets"
+        elif short:
+            status = "Shortfall — see three paths below"
+        else:
+            status = f"On track with {_v2c(req)}/mo SIP"
+        grows += (f'<tr><td class="label-cell">{_h(g.get("goal_name",""))}</td><td class="num">{g.get("target_year","")}</td>'
+                  f'<td class="num">{_v2c(g.get("today_cost",0))}</td><td class="num">{_v2c(g.get("future_value_needed",0))}</td>'
+                  f'<td>{_h(funded)}</td><td>{_h(status)}</td></tr>')
+    corpus = ret.get("corpus_required", 0) or 0
+    rsip = ret.get("stepup_required_start_sip_monthly", 0) or ret.get("gross_monthly_sip", 0) or 0
+    grows += (f'<tr><td class="label-cell">Retirement (age {int(cfp.summary.get("retirement_age",60) or 60)})</td><td class="num">{retire_year}</td>'
+              f'<td class="num">monthly income</td><td class="num">{_v2c(corpus)} corpus</td>'
+              f'<td>EPF, MF, PPF in trajectory</td><td>Step up from {_v2c(rsip)}/mo start</td></tr>')
+
+    gap = max(0, ((scen or {}).get("total_sip_needed", 0) or 0) - ((scen or {}).get("surplus", {}).get("investable_surplus", 0) or 0))
+    achievable = bool((scen or {}).get("achievable"))
+    if achievable:
+        gap_box = ("<strong>Your situation: on track</strong><p>Your stated goals are fundable on the structural plan. "
+                   "The single optimised plan below keeps every goal at its year and amount.</p>")
+    else:
+        gap_box = (f"<strong>Your situation: a gap of about {_v2c(gap)}/month</strong>"
+                   f"<p>Some goals are achievable on the structural plan from Page 1; the rest push the math beyond your current "
+                   f"surplus. The three paths below each fund 100% of your goals a different way — each internally consistent and "
+                   f"fully calculated. Pick the one that matches how you want to live the next {retire_year-cur} years.</p>")
+
+    # Three paths
+    paths_html = ""
+    paths = [sc for sc in (scen or {}).get("scenarios", []) if sc.get("key") in ("path1", "path2", "path3")]
+    for p in paths:
+        levers = "".join(
+            f'<li>{_h(l.get("text","") if isinstance(l,dict) else str(l))}</li>'
+            for l in p.get("levers", [])
+        )
+        funds = "".join(
+            f'<li>{_h(o.get("goal",""))}: {_h(o.get("status",""))}</li>'
+            for o in p.get("outcomes", [])
+        )
+        caution = (f'<div class="callout bad"><p>{_h(p["caution"])}</p></div>') if p.get("caution") else ""
+        advisor = (f'<div class="callout warn"><p>{_h(p["advisor_note"])}</p></div>') if p.get("advisor_note") else ""
+        paths_html += f"""
+  <h3>{_h(p.get('name',''))}</h3>
+  <p><strong>Headline.</strong>&nbsp; {_h(p.get('headline',''))}</p>
+  <h4>What you change</h4>
+  <ul>{levers}</ul>
+  {caution}
+  <h4>What this funds</h4>
+  <ul>{funds}</ul>
+  <div class="callout good"><strong>What this asks of you</strong><p>{_h(p.get('trade_off',''))}</p></div>
+  {advisor}"""
+
+    # Comparison
+    comp = (scen or {}).get("comparison") or []
+    comp_html = ""
+    if comp:
+        def _cell(v, kind):
+            if v is None:
+                return "—"
+            if kind == "money":
+                return _v2c(v)
+            if kind == "pct":
+                return f"{v}%"
+            if kind == "age":
+                return f"Age {v}"
+            return _h(str(v))
+        rows = "".join(
+            f'<tr><td class="label-cell">{_h(r["metric"])}</td><td>{_cell(r.get("path1"),r["kind"])}</td>'
+            f'<td>{_cell(r.get("path2"),r["kind"])}</td><td>{_cell(r.get("path3"),r["kind"])}</td></tr>'
+            for r in comp
+        )
+        comp_html = f"""
+  <h3>Comparing the three paths</h3>
+  <table>
+    <thead><tr><th>Metric</th><th>Path 1 · Reducing</th><th>Path 2 · Stretching</th><th>Path 3 · Balanced</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>"""
+
+    # Which path
+    wp = (scen or {}).get("which_path") or []
+    wp_html = ""
+    if wp:
+        wp_html = "<h4>How to choose between these paths</h4>" + "".join(
+            f'<p><strong>{_h(w["path"])}.</strong>&nbsp; {_h(w["suits"])}</p>' for w in wp)
+
+    return f"""<section class="page">
+  <h2>4.  Goal Planning</h2>
+  <p>Your stated goals, what they'll cost in the year you want them, and how much of each is already funded by your existing assets and SIPs.</p>
+  <table>
+    <thead><tr><th>Goal</th><th class="num">Year</th><th class="num">Today's cost</th><th class="num">Cost at goal year</th><th>Already funded</th><th>Status at current pace</th></tr></thead>
+    <tbody>{grows}</tbody>
+  </table>
+  <div class="callout info">{gap_box}</div>
+  {paths_html}
+  {comp_html}
+  {wp_html}
+  <div class="callout info"><strong>A note.</strong><p>These paths assume no one-time inflows beyond your current liquid savings. If you expect a bonus, RSU vesting, inheritance, or any lump sum over the next few years, share that with your advisor — it can meaningfully accelerate any of these paths.</p></div>
+</section>"""
+
+
+def _v2_s5_tax(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
+    regime = (cfp.summary.get("recommended_tax_regime") or "").strip()
+    regime_line = (f" Based on your inputs, the <strong>{_h(regime)}</strong> regime currently looks more efficient — confirm with your CA each March."
+                   if regime else "")
+    rows = [
+        ("Equity Mutual Funds, Direct Equity", "LTCG at 12.5% above ₹1.25 L/yr (held &gt;1 yr); STCG at 20% (≤1 yr)", "Long-term gains have an annual exemption — worth keeping in mind"),
+        ("Debt MF, Bank FD, Bonds", "Taxed at your slab rate", "At 30% slab, post-tax returns are roughly 70% of pre-tax"),
+        ("PPF, EPF, Sukanya", "Fully tax-free (returns and maturity)", "Your highest post-tax yields among debt options"),
+        ("NPS Tier-1", "₹50,000/yr extra 80CCD(1B) deduction; 60% of corpus tax-free at retirement", "Continue using this benefit"),
+        ("Home loan interest", "₹2 L/yr deduction under Section 24(b) (self-occupied)", "Confirm you're claiming this through your CA"),
+        ("Health insurance premiums", "80D deduction (₹25K self + ₹25K parents)", "A super top-up gives more deduction headroom"),
+    ]
+    body = "".join(f'<tr><td class="label-cell">{_h(a)}</td><td>{b}</td><td>{_h(c)}</td></tr>' for a, b, c in rows)
+    return f"""<section class="page">
+  <h2>5.  Tax — things worth knowing</h2>
+  <p>Educational notes on how the instruments you hold are taxed. Specific tax-filing decisions are between you and your tax advisor; this section just makes sure you have the lay of the land.</p>
+  <table>
+    <thead><tr><th>Instrument</th><th>How returns are taxed</th><th>Note</th></tr></thead>
+    <tbody>{body}</tbody>
+  </table>
+  <div class="callout info"><strong>Old vs New regime.</strong><p>If your total deductions (80C + 80D + home-loan interest + NPS + HRA) add up to less than about ₹3 L/year, the New regime usually works out better. Above that, the Old regime is typically more efficient.{regime_line}</p></div>
+</section>"""
+
+
+def _v2_appendix(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
+    s = cfp.summary
+    me = plan.monthly_expenses
+    income_m = s.get("monthly_income", 0) or 0
+    income_a = income_m * 12
+    emi_m = s.get("monthly_emi", 0) or 0
+    ins_prem = float(getattr(me, "insurance_premium", 0) or 0)
+    essential = sum(float(getattr(me, k) or 0) for k in ("household_expenses", "groceries", "utilities", "school_fees", "medical"))
+    lifestyle = float(getattr(me, "travel_or_lifestyle", 0) or 0)
+    invest_m = round(s.get("monthly_existing_sip", 0) or 0)
+    total_out = essential + emi_m + ins_prem + lifestyle + invest_m
+    surplus = income_m - total_out
+
+    def pct(x):
+        return f"{round(x / income_m * 100)}%" if income_m else "—"
+
+    def crow(label, m, cls=""):
+        return (f'<tr{(" class=\""+cls+"\"") if cls else ""}><td class="label-cell">{_h(label)}</td>'
+                f'<td class="num">{_v2c(m)}</td><td class="num">{_v2c(m*12)}</td><td class="num">{pct(m)}</td></tr>')
+    cashflow_rows = (
+        crow("Net salary (in-hand)", income_m)
+        + crow("Essential living (housing, food, utilities, kids, medical)", essential)
+        + crow("Home loan EMI", emi_m)
+        + crow("Insurance premiums (all policies)", ins_prem)
+        + crow("Lifestyle (entertainment, travel, shopping)", lifestyle)
+        + crow("Current investments (SIP, PPF, NPS, equity)", invest_m)
+        + crow("Total outflow today", total_out, "subtotal")
+        + crow("Investable surplus available", surplus, "total")
+    )
+
+    # Expense breakdown
+    exp_items = [
+        ("Home loan EMI", emi_m, "EMI"),
+        ("Household / living", float(getattr(me, "household_expenses", 0) or 0), "Essential / living"),
+        ("Groceries", float(getattr(me, "groceries", 0) or 0), "Essential / living"),
+        ("Utilities", float(getattr(me, "utilities", 0) or 0), "Essential / living"),
+        ("School fees", float(getattr(me, "school_fees", 0) or 0), "Essential / kids"),
+        ("Medical / healthcare", float(getattr(me, "medical", 0) or 0), "Essential / health"),
+        ("Travel & lifestyle", lifestyle, "Lifestyle"),
+        ("Insurance premiums", ins_prem, "Insurance"),
+        ("Investments (SIP / PPF / NPS / equity)", invest_m, "Investments"),
+        ("Other EMIs", float(getattr(me, "other_emis", 0) or 0), "EMI"),
+    ]
+    exp_rows = "".join(
+        f'<tr><td class="label-cell">{_h(lbl)}</td><td class="num">{_v2c(m)}</td><td>{_h(cat)}</td></tr>'
+        for lbl, m, cat in exp_items if m > 0
+    )
+
+    # MF portfolio
+    mf_rows = ""
+    for mf in (plan.mutual_funds or []):
+        v = mf.current_value or 0
+        if v <= 0:
+            continue
+        sip = getattr(mf, "sip_amount", None) or 0
+        mf_rows += (f'<tr><td class="label-cell">{_h(mf.fund_name or "Fund")}</td><td class="num">{_v2c(v)}</td>'
+                    f'<td class="num">{_v2c(sip)+"/mo" if sip else "—"}</td></tr>')
+    mf_block = ""
+    if mf_rows:
+        mf_block = f"""
+  <h3>C. Mutual Fund portfolio</h3>
+  <table><thead><tr><th>Fund</th><th class="num">Current value</th><th class="num">SIP</th></tr></thead><tbody>{mf_rows}</tbody></table>
+  <p class="muted"><strong>A note on Regular vs Direct.</strong>&nbsp; Direct plans of the same fund carry a lower expense ratio (typically 0.5–1% lower per year). Switching has tax implications — discuss the transition order with your advisor.</p>"""
+
+    # Insurance held
+    idet = plan.insurance_details
+    def _ins_row(label, b):
+        if not b or not (b.cover_amount or b.company):
+            return ""
+        return (f'<tr><td class="label-cell">{_h(label)}</td><td>{_h(b.company or "—")}</td>'
+                f'<td class="num">{_v2c(b.cover_amount or 0)}</td><td class="num">{_v2c(b.annual_premium or 0)+"/yr" if b.annual_premium else "(as input)"}</td></tr>')
+    ins_rows = (_ins_row("Term life — earner", idet.term_plan)
+                + _ins_row("Health — individual", idet.health_insurance)
+                + _ins_row("Health — family floater", idet.family_floater)
+                + _ins_row("ULIP / Endowment", idet.ulip_or_endowment))
+    ins_block = ""
+    if ins_rows:
+        ins_block = f"""
+  <h3>D. Insurance policies you currently hold</h3>
+  <table><thead><tr><th>Cover</th><th>Insurer</th><th class="num">Sum assured</th><th class="num">Premium /yr</th></tr></thead><tbody>{ins_rows}</tbody></table>"""
+
+    le = (plan.assumptions.persons[0].life_expectancy if plan.assumptions.persons else 85) or 85
+    assum_rows = [
+        ("General inflation", "7% p.a.", "Living expenses, retirement"),
+        ("Education inflation", "10% p.a.", "Child education costs"),
+        ("Real estate appreciation", "7% p.a.", "Property future value"),
+        ("Equity returns — hybrid (post-tax)", "10.5%", "Long-horizon goals"),
+        ("Equity returns — aggressive (post-tax)", "12.25%", "Path 2, long-horizon money"),
+        ("PPF / EPF (tax-free)", "7.1% / 8.1%", "Debt portfolio"),
+        ("Liquid Fund (post-tax)", "3.85%", "Emergency fund"),
+        ("Life expectancy", f"{le} years", "Retirement corpus sizing"),
+    ]
+    assum_html = "".join(f'<tr><td class="label-cell">{_h(a)}</td><td class="num">{_h(b)}</td><td>{_h(c)}</td></tr>' for a, b, c in assum_rows)
+
+    return f"""<section class="page">
+  <h2>Appendix — the supporting detail</h2>
+  <p>Everything below is the data and assumptions behind the plan above. You don't need to read it to act on the plan, but it's here for your reference and for the next conversation with your advisor.</p>
+
+  <h3>A. Monthly cash flow</h3>
+  <table><thead><tr><th></th><th class="num">Monthly</th><th class="num">Annual</th><th class="num">% of income</th></tr></thead><tbody>{cashflow_rows}</tbody></table>
+
+  <h3>B. Detailed expense breakdown</h3>
+  <table><thead><tr><th>Item</th><th class="num">Monthly</th><th>Category</th></tr></thead><tbody>{exp_rows}</tbody></table>
+  {mf_block}
+  {ins_block}
+
+  <h3>E. Standard assumptions used in this plan</h3>
+  <table><thead><tr><th>Item</th><th class="num">Value</th><th>Used for</th></tr></thead><tbody>{assum_html}</tbody></table>
+  <p class="muted" style="text-align:center;margin-top:6mm;">—&nbsp; End of report&nbsp; —</p>
+</section>"""
 
 
 def _confidence_class(conf: str) -> str:
