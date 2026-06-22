@@ -186,6 +186,21 @@ def _find_duplicate(path: str, list_: list[Any], row: Any) -> dict | None:
                     "hint": f"Use plan_set on financial_goals.{i}.<field> to update, or plan_remove first.",
                 }
 
+    if path == "assumptions.lumpsum_events":
+        yr = r.get("year")
+        amt = r.get("amount")
+        lbl = str(r.get("label") or "").strip().lower()
+        for i, e in enumerate(list_):
+            if not isinstance(e, dict):
+                continue
+            if e.get("year") == yr and e.get("amount") == amt and str(e.get("label") or "").strip().lower() == lbl:
+                return {
+                    "reason": f"A lumpsum event for {yr} ({lbl or 'unlabelled'}) already exists",
+                    "id": e.get("id") or "",
+                    "index": i,
+                    "hint": f"Use plan_set on assumptions.lumpsum_events.{i}.<field> to update, or plan_remove first.",
+                }
+
     # Asset / recurring lists — idempotency guard. Re-uploading the same file (or
     # re-running an import) must not append duplicate holdings. A row is a
     # duplicate when its identifying label AND its principal value match an

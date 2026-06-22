@@ -447,12 +447,109 @@ def _row_is_blank(row: tuple) -> bool:
     return True
 
 
+def _parse_yoy_manual_inputs(wb) -> dict[str, Any]:
+    """Deterministically read the firm 'YoY Cash Flow' tab's RM-MANUAL columns —
+    the judgement entries that aren't derivable from the input tabs and that the
+    LLM extracts unreliably:
+      • 'Lumpsum Further deposit / (Withdrawal)' column + 'Remarks' → lumpsum_events
+        (Bonus, Reverse Mortgage, Balance sale, Knee Surgery, ...). The adjacent
+        'Major Withdrawals' column (=-SUMIF on the goals list) is SKIPPED — those
+        are already modelled from 10_Financial_Goals.
+      • last year the 'Income from business' column is non-zero → business income
+        runs to that age (business_retirement_age), which can exceed the salaried
+        retirement age.
+    """
+    sheet = None
+    for sn in wb.sheetnames:
+        s = sn.lower()
+        if "yoy" in s or "cash flow" in s or "cashflow" in s:
+            sheet = wb[sn]
+            break
+    if sheet is None:
+        return {}
+    max_c = sheet.max_column
+    # Locate the header row + columns by header text.
+    hdr_row = None
+    col = {}
+    for r in range(1, min(12, sheet.max_row) + 1):
+        vals = [sheet.cell(row=r, column=c).value for c in range(1, max_c + 1)]
+        joined = " ".join(str(v).lower() for v in vals if v)
+        if "lumpsum" in joined and "business" in joined:
+            hdr_row = r
+            for c, v in enumerate(vals, start=1):
+                t = str(v or "").lower().strip()
+                if "lumpsum" in t and "further" in t:
+                    col["lumpsum"] = c
+                elif t == "remarks":
+                    col["remarks"] = c
+                elif "business" in t:
+                    col["business"] = c
+                elif "age" in t and "primary" in t:
+                    col["age"] = c
+                elif "loan" in t and "repay" in t:
+                    col["loan"] = c
+            break
+    if not hdr_row or "lumpsum" not in col:
+        return {}
+    # Year column = first column carrying 4-digit years in the data rows. The
+    # row directly under the header is often a sub-header (growth rates), so scan
+    # the first several rows.
+    year_col = None
+    for c in range(1, max_c + 1):
+        for rr in range(hdr_row + 1, min(hdr_row + 9, sheet.max_row) + 1):
+            v = sheet.cell(row=rr, column=c).value
+            if isinstance(v, (int, float)) and 2000 <= v <= 2100:
+                year_col = c
+                break
+        if year_col:
+            break
+    if not year_col:
+        return {}
+
+    events: list[dict] = []
+    last_biz_age = None
+    loan_years = 0
+    for r in range(hdr_row + 1, sheet.max_row + 1):
+        yr = sheet.cell(row=r, column=year_col).value
+        if not isinstance(yr, (int, float)) or not (2000 <= yr <= 2100):
+            continue
+        yr = int(yr)
+        lump = sheet.cell(row=r, column=col["lumpsum"]).value if col.get("lumpsum") else None
+        label = sheet.cell(row=r, column=col["remarks"]).value if col.get("remarks") else None
+        if isinstance(lump, (int, float)) and lump != 0:
+            events.append({"year": yr, "amount": float(lump), "label": str(label or "One-time event")})
+        biz = sheet.cell(row=r, column=col["business"]).value if col.get("business") else None
+        if isinstance(biz, (int, float)) and biz > 0:
+            a = sheet.cell(row=r, column=col["age"]).value if col.get("age") else None
+            if isinstance(a, (int, float)):
+                last_biz_age = int(round(a))
+        loan = sheet.cell(row=r, column=col["loan"]).value if col.get("loan") else None
+        if isinstance(loan, (int, float)) and loan > 0:
+            loan_years += 1
+
+    out: dict[str, Any] = {}
+    if events:
+        out["lumpsum_events"] = events
+    if last_biz_age is not None:
+        out["business_retirement_age"] = last_biz_age
+    if loan_years > 0:
+        out["loan_years"] = loan_years
+    return out
+
+
 async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
     expense_footer_total: float | None = None
     try:
         from openpyxl import load_workbook
 
         wb = load_workbook(io.BytesIO(buf), data_only=True)
+        # Deterministically capture the YoY tab's RM-manual columns (lumpsums +
+        # business-income cut-off) before the text chunking, so they survive
+        # regardless of what the LLM extracts.
+        try:
+            yoy_manual = _parse_yoy_manual_inputs(wb)
+        except Exception:
+            yoy_manual = {}
         chunks: list[str] = []
         for sn in wb.sheetnames:
             ws = wb[sn]
@@ -487,6 +584,30 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
     result = await _llm_extract(
         text=text, source_type="xlsx", filename=filename, parser_label="xlsx:llm"
     )
+
+    # Deterministic capture of the YoY tab's RM-manual columns — authoritative
+    # over the LLM (which extracts these unreliably). Reverse mortgages / asset
+    # sales / bonuses go to assumptions.lumpsum_events; the business-income
+    # cut-off age to personal_details.business_retirement_age.
+    if yoy_manual and result.get("partial_state") is not None:
+        ps = result["partial_state"]
+        if yoy_manual.get("lumpsum_events"):
+            asn = dict(ps.get("assumptions") or {})
+            asn["lumpsum_events"] = yoy_manual["lumpsum_events"]
+            ps["assumptions"] = asn
+        if yoy_manual.get("business_retirement_age"):
+            pdt = dict(ps.get("personal_details") or {})
+            pdt["business_retirement_age"] = yoy_manual["business_retirement_age"]
+            ps["personal_details"] = pdt
+        if yoy_manual.get("loan_years"):
+            # The YoY 'Loan Repayments' column is the firm's "Actual" EMI schedule
+            # — authoritative over the Loans tab's stated tenure. Set the home
+            # loan's remaining tenure to the number of years EMIs actually run.
+            ll = dict(ps.get("loans_liabilities") or {})
+            hl = dict(ll.get("home_loan") or {})
+            hl["tenure_left"] = yoy_manual["loan_years"]
+            ll["home_loan"] = hl
+            ps["loans_liabilities"] = ll
 
     # Deterministic safety net: if the workbook's "Total Expenditure" footer
     # is materially higher than the sum of LLM-extracted monthly_expenses,

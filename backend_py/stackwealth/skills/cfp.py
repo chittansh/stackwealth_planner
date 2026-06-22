@@ -872,6 +872,7 @@ def compute_yoy_cashflow(
     start_age: int,
     retirement_age: int,
     business_until_age: int | None = None,
+    loan_years: int | None = None,
     monthly_income_employment: float,
     monthly_income_business: float,
     monthly_income_rental: float,
@@ -934,7 +935,12 @@ def compute_yoy_cashflow(
         annual_emp = income_emp if earning else 0
         annual_biz = income_biz if (age <= (business_until_age if business_until_age else retirement_age)) else 0
         total_income = annual_emp + annual_biz + income_rent + income_oth
-        annual_loan = loan if earning else 0
+        # Loan EMI runs for its remaining TENURE (then the loan is closed), not
+        # until retirement. `loan_years` = whole years the EMI is still due.
+        if loan_years is not None:
+            annual_loan = loan if i < loan_years else 0
+        else:
+            annual_loan = loan if earning else 0
         total_outflow = expense + annual_loan
         surplus = total_income - total_outflow
 
@@ -1053,6 +1059,29 @@ _EXCEL_FA_ROI = {
     "equity": 0.105, "fd": 0.056, "bonds": 0.056, "epf": 0.056,
     "ppf": 0.049, "nps": 0.049, "post_office": 0.049, "nsc": 0.042, "liquid": 0.042,
 }
+
+
+def _loan_years_remaining(plan: PlanState) -> int | None:
+    """Whole years the loan EMIs are still due — the longest remaining tenure
+    across active loans. The YoY engine charges the EMI for this many years then
+    closes the loan (instead of running it to retirement). None when no tenure is
+    on file (engine falls back to charging until retirement)."""
+    import math
+    loans = plan.loans_liabilities
+    if not loans:
+        return None
+    best: float | None = None
+    for k in ("home_loan", "car_loan", "personal_loan"):
+        ln = getattr(loans, k, None)
+        if not ln:
+            continue
+        t = getattr(ln, "tenure_left", None)
+        if t is None or float(t) <= 0:
+            continue
+        if (ln.emi or 0) <= 0 and (ln.outstanding_amount or 0) <= 0:
+            continue
+        best = float(t) if best is None else max(best, float(t))
+    return int(math.ceil(best)) if best is not None else None
 
 
 def _holdings_weighted_post_tax_roi(plan: PlanState) -> tuple[float, dict[str, float]]:
@@ -1749,6 +1778,7 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         start_age=int(round(current_age)),
         retirement_age=retirement_age,
         business_until_age=plan.personal_details.business_retirement_age,
+        loan_years=_loan_years_remaining(plan),
         monthly_income_employment=income_emp_monthly,
         monthly_income_business=income_biz_monthly,
         monthly_income_rental=income_rent_monthly,
