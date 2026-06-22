@@ -1545,15 +1545,30 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     # Purchase" must not reduce the retirement ask (see _sip_by_purpose).
     ongoing_retirement_sip = sip_retirement
 
+    # RM-manual Retirement Plan tab inputs (when uploaded) override the personal-
+    # details life expectancies and add the one-time post-retirement spend (E26).
+    rpi = plan.retirement_plan_inputs
+    rt_life_exp = life_expectancy
+    rt_spouse_le = spouse_le
+    if rpi:
+        if rpi.self_life_expectancy:
+            rt_life_exp = float(rpi.self_life_expectancy)
+        if rpi.spouse_life_expectancy:
+            rt_spouse_le = float(rpi.spouse_life_expectancy)
+        if (rpi.one_time_spend or 0) > 0:
+            ot_today = float(rpi.one_time_spend)
+            ot_years = rpi.one_time_years if rpi.one_time_years is not None else (ot_years or 0)
+            ot_infl = plan.assumptions.inflation or 0.07
+
     retirement = compute_retirement_corpus(
         current_age=current_age,
         retirement_age=retirement_age,
-        life_expectancy=life_expectancy,
+        life_expectancy=rt_life_exp,
         retirement_annual_expenses_today=retire_annual_expense_today,
         inflation=plan.assumptions.inflation or 0.07,
         corpus_discount_return=POST_TAX_RETURN["equity_conservative"],  # 8.75% (Assumptions E23)
         spouse_current_age=spouse_age_frac,
-        spouse_life_expectancy=spouse_le,
+        spouse_life_expectancy=rt_spouse_le,
         one_time_spend_today=ot_today,
         one_time_spend_years=ot_years,
         one_time_spend_inflation=ot_infl,
@@ -1592,10 +1607,21 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         ongoing_retirement_sip * 12 if ongoing_retirement_sip > 0
         else retirement.get("gross_monthly_sip", 0) * 12
     )
+    stepup_corpus_allocated = retirement_earmarked_today
+    # RM-manual Retirement Plan §3 inputs win when uploaded: the chosen first-year
+    # annual contribution (E54), the step-up rate (F51), and the corpus already
+    # allocated to retirement (H53) — so the table reproduces the firm sheet.
+    if rpi:
+        if rpi.stepup_rate:
+            stepup_rate = float(rpi.stepup_rate)
+        if (rpi.stepup_start_annual or 0) > 0:
+            first_year_annual = float(rpi.stepup_start_annual)
+        if rpi.corpus_allocated is not None:
+            stepup_corpus_allocated = float(rpi.corpus_allocated)
     retirement["stepup_plan"] = compute_retirement_stepup(
         current_age=current_age,
         retirement_age=retirement_age,
-        current_corpus_today=retirement_earmarked_today,
+        current_corpus_today=stepup_corpus_allocated,
         first_year_annual_contribution=first_year_annual,
         step_up_pct=stepup_rate,
         rate=POST_TAX_RETURN["equity_hybrid"],  # 10.5% (Assumptions E22)

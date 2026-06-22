@@ -537,6 +537,58 @@ def _parse_yoy_manual_inputs(wb) -> dict[str, Any]:
     return out
 
 
+def _parse_retirement_inputs(wb) -> dict[str, Any]:
+    """Deterministically read the firm 'Retirement Plan' tab's RM-manual inputs,
+    which OVERRIDE the personal-details tab for the retirement corpus and step-up:
+      • self / spouse life expectancy (E12 / E13 — often more conservative than
+        the personal-details LE),
+      • one-time post-retirement spend + its horizon (E26 / E27),
+      • step-up starting annual contribution (E54) and step-up rate (F51),
+      • current corpus already allocated to retirement (H53).
+    """
+    ws = None
+    for sn in wb.sheetnames:
+        s = sn.lower()
+        if "retirement plan" in s and "case study" not in s:
+            ws = wb[sn]
+            break
+    if ws is None:
+        return {}
+
+    def col_val(r, c):
+        return ws.cell(row=r, column=c).value
+
+    out: dict[str, Any] = {}
+    les: list[float] = []
+    for r in range(1, min(ws.max_row, 80) + 1):
+        b = str(col_val(r, 2) or "").lower()
+        e = col_val(r, 5)  # column E (the value column)
+        if "life expectancy" in b and isinstance(e, (int, float)):
+            les.append(float(e))
+        elif "one time spend post" in b and isinstance(e, (int, float)):
+            out["one_time_spend"] = float(e)
+        elif "time for above spend" in b and isinstance(e, (int, float)):
+            out["one_time_years"] = int(round(float(e)))
+        elif "annual contribution to fv" in b:
+            if isinstance(e, (int, float)):
+                out["stepup_start_annual"] = float(e)
+            h = col_val(r - 1, 8)  # H of the "One Time corpus to FV" row above
+            if isinstance(h, (int, float)):
+                out["corpus_allocated"] = float(h)
+    # First LE = self, second = spouse (sheet lists Mr then Mrs).
+    if len(les) >= 1:
+        out["self_life_expectancy"] = int(round(les[0]))
+    if len(les) >= 2:
+        out["spouse_life_expectancy"] = int(round(les[1]))
+    # Step-up rate sits in F near the Section-3 header ("Increase p.a").
+    for r in range(45, min(ws.max_row, 55) + 1):
+        f = col_val(r, 6)
+        if isinstance(f, (int, float)) and 0 < f < 1:
+            out["stepup_rate"] = float(f)
+            break
+    return out
+
+
 def _parse_equity_stocks(wb) -> list[dict] | None:
     """Deterministically read the firm '4B_Equity_Stocks' tab. Its columns are
     mislabelled — the 'Current Price' column actually holds each holding's TOTAL
@@ -608,6 +660,10 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
             equity_rows = _parse_equity_stocks(wb)
         except Exception:
             equity_rows = None
+        try:
+            retirement_inputs = _parse_retirement_inputs(wb)
+        except Exception:
+            retirement_inputs = {}
         chunks: list[str] = []
         for sn in wb.sheetnames:
             # Skip COMPUTED / projection tabs — they hold derived figures
@@ -663,6 +719,11 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
     # Deterministic equity holdings override the LLM (mislabelled-column safety).
     if equity_rows and result.get("partial_state") is not None:
         result["partial_state"]["equity_stocks"] = equity_rows
+
+    # Retirement Plan tab's RM-manual inputs (life expectancies, one-time spend,
+    # step-up start/rate, allocated corpus) → authoritative for the corpus + table.
+    if retirement_inputs and result.get("partial_state") is not None:
+        result["partial_state"]["retirement_plan_inputs"] = retirement_inputs
 
     if yoy_manual and result.get("partial_state") is not None:
         ps = result["partial_state"]

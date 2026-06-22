@@ -290,6 +290,20 @@ class Taxes(StrictModel):
     capital_gains: float = 0.125
 
 
+class RetirementPlanInputs(StrictModel):
+    """RM-manual inputs from the firm 'Retirement Plan' tab that OVERRIDE the
+    personal-details / goal inputs for the retirement corpus + step-up table
+    (the firm often uses more conservative life expectancies here, plus a
+    one-time post-retirement spend and a chosen step-up starting contribution)."""
+    self_life_expectancy: Optional[int] = None
+    spouse_life_expectancy: Optional[int] = None
+    one_time_spend: Optional[float] = None         # E26 — one-time post-retirement spend (today's ₹)
+    one_time_years: Optional[int] = None           # E27 — years from now to that spend
+    stepup_start_annual: Optional[float] = None    # E54 — chosen first-year annual contribution
+    corpus_allocated: Optional[float] = None        # H53 — current corpus earmarked for retirement
+    stepup_rate: Optional[float] = None             # F51 — annual step-up % (e.g. 0.10)
+
+
 class LumpsumEvent(StrictModel):
     """One-off deposit or withdrawal in a specific calendar year.
 
@@ -673,6 +687,7 @@ class PlanState(StrictModel):
     financial_goals: list[Goal] = Field(default_factory=list)
     freedom_score_inputs: FreedomScoreInputs = Field(default_factory=FreedomScoreInputs)
     assumptions: Assumptions = Field(default_factory=Assumptions)
+    retirement_plan_inputs: Optional[RetirementPlanInputs] = None
     scenarios: list[Scenario] = Field(default_factory=list)
     active_scenario_ids: list[str] = Field(default_factory=list)
     computed: ComputedSnapshot = Field(default_factory=ComputedSnapshot)
