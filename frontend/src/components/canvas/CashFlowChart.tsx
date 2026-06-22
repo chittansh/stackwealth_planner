@@ -42,28 +42,40 @@ export function CashFlowChart({ plan }: { plan: PlanState | null }) {
 
   if (rows.length === 0) return null;
 
-  const data = rows.map((r) => ({
-    year: r.year,
-    salary: Math.round(r.income_employment ?? 0),
-    business: Math.round(r.income_business ?? 0),
-    rental: Math.round(r.income_rental ?? 0),
-    other: Math.round(r.income_other ?? 0),
-    // Outflows as negatives so they stack downward from the zero line.
-    // Goal spends are deliberately EXCLUDED — they are one-off draws on the
-    // accumulated financial-asset pool (Open FA), not annual income, so plotting
-    // them here would falsely sink the operating cash flow in goal years.
-    expenses: -Math.round(r.expenses ?? 0),
-    emi: -Math.round(r.loan_repayment ?? 0),
-    surplus: Math.round(r.surplus ?? 0),
-  }));
+  const data = rows.map((r) => {
+    const income = Math.round((r.income_employment ?? 0) + (r.income_business ?? 0) + (r.income_rental ?? 0) + (r.income_other ?? 0));
+    const out = Math.round((r.expenses ?? 0) + (r.loan_repayment ?? 0));
+    const operating = income - out;
+    // When earned income can't cover the year's living costs (chiefly after
+    // retirement, when salary/business stop), the gap is met by drawing on the
+    // accumulated financial assets (Open FA) — the corpus the plan built for
+    // exactly this. Surface that draw as an inflow so the picture is honest and
+    // the net line never dives below zero "for no reason".
+    const drawn = Math.max(0, -operating);
+    return {
+      year: r.year,
+      salary: Math.round(r.income_employment ?? 0),
+      business: Math.round(r.income_business ?? 0),
+      rental: Math.round(r.income_rental ?? 0),
+      other: Math.round(r.income_other ?? 0),
+      drawn,
+      // Outflows as negatives so they stack downward from the zero line. Goal
+      // spends are excluded — they're one-off Open FA draws, not annual income.
+      expenses: -Math.round(r.expenses ?? 0),
+      emi: -Math.round(r.loan_repayment ?? 0),
+      // Net line: surplus to invest while earning; 0 once the corpus covers costs.
+      net: Math.max(0, operating),
+    };
+  });
 
   return (
     <div className="rounded-xl border border-zinc-200 bg-white p-4">
       <div className="mb-1">
         <h3 className="text-sm font-medium text-zinc-800">Cash flow, year by year</h3>
         <p className="text-[11px] text-zinc-500 mt-0.5">
-          Operating cash flow: inflows above the line by source, living expenses and EMI below, net surplus as the line.
-          Goal spends are funded from accumulated assets (Open FA) — see the table and the net-worth-by-asset chart.
+          Inflows above the line by source; living expenses and EMI below. After retirement, earned income tapers and the
+          gap is drawn from accumulated assets (Open FA) — shown as its own band, so net cash stays covered. Goal spends are
+          asset-funded too (see the table and net-worth-by-asset chart).
         </p>
       </div>
       <div className="w-full h-[320px]">
@@ -94,14 +106,15 @@ export function CashFlowChart({ plan }: { plan: PlanState | null }) {
             <Bar dataKey="business" name="Business" stackId="cf" fill="#7e9aa1" />
             <Bar dataKey="rental" name="Rental" stackId="cf" fill="#9e8fb0" />
             <Bar dataKey="other" name="Other" stackId="cf" fill="#c4a878" />
+            <Bar dataKey="drawn" name="Drawn from assets" stackId="cf" fill="#8bb0a0" />
             {/* Outflows (stack down) — goal spends excluded (asset-funded) */}
             <Bar dataKey="expenses" name="Living expenses" stackId="cf" fill="#d98c8c" />
             <Bar dataKey="emi" name="EMI" stackId="cf" fill="#c97b7b" />
-            {/* Net surplus line */}
+            {/* Net cash line — surplus to invest while earning, 0 once corpus-funded */}
             <Line
               type="monotone"
-              dataKey="surplus"
-              name="Net surplus"
+              dataKey="net"
+              name="Net surplus to invest"
               stroke="#27272a"
               strokeWidth={1.75}
               dot={false}
