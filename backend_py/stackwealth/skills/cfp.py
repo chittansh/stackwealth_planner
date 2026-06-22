@@ -1805,12 +1805,28 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     # (the firm Excel's Lumpsum column R/T carries ONLY RM-entered events such as
     # a bonus, an asset disposal, or a reverse mortgage — never auto maturities).
 
+    # Business income runs until its OWNER stops working. When no explicit
+    # business_retirement_age is set, infer it from the latest-retiring household
+    # member: a salaried earner may retire before a spouse who runs the business
+    # (the firm Excel runs business income to the younger spouse's retirement).
+    biz_until = plan.personal_details.business_retirement_age
+    if biz_until is None and income_biz_monthly > 0 and (plan.assumptions.persons or []):
+        latest_ret_year = current_year + round(retirement_age - current_age)
+        for ps in plan.assumptions.persons:
+            ps_age = _age_from_dob(ps.date_of_birth, now)
+            ps_ret = ps.retirement_age
+            if ps_age is not None and ps_ret:
+                latest_ret_year = max(latest_ret_year, current_year + round(ps_ret - ps_age))
+        cand = int(round(current_age)) + (latest_ret_year - current_year)
+        if cand > retirement_age:
+            biz_until = cand
+
     yoy = compute_yoy_cashflow(
         horizon_years=int(min(40, max(life_expectancy - current_age, 10))),
         start_year=current_year,
         start_age=int(round(current_age)),
         retirement_age=retirement_age,
-        business_until_age=plan.personal_details.business_retirement_age,
+        business_until_age=biz_until,
         loan_years=_loan_years_remaining(plan),
         monthly_income_employment=income_emp_monthly,
         monthly_income_business=income_biz_monthly,
