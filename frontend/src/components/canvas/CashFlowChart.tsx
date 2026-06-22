@@ -1,10 +1,10 @@
 'use client';
 
 import {
+  Area,
   Bar,
   ComposedChart,
   Line,
-  ReferenceLine,
   ResponsiveContainer,
   XAxis,
   YAxis,
@@ -23,18 +23,21 @@ type YoyRow = {
   income_other?: number;
   expenses?: number;
   loan_repayment?: number;
-  surplus?: number;
+  fa_opening?: number;
+  financial_assets_closing?: number;
   major_withdrawals?: number;
   goal_withdrawal?: number;
   remarks?: string;
 };
 
 /**
- * Granular year-by-year cash flow. Income sources stack ABOVE the zero line
- * (salary / business / rental / other); outflows stack BELOW it (living
- * expenses, EMI, goal withdrawals). A line traces the net annual surplus so the
- * advisor sees, per year, exactly what comes in, what goes out, and what is left
- * to invest. Reads `plan.computed.cfp.yoy_cashflow`.
+ * Year-by-year cash flow, framed around the Open FA (financial-asset) pool.
+ * Everything is positive — there are no below-zero bars. Each year's living
+ * costs are funded by earned income (salary / business / rental / other) and,
+ * once that tapers after retirement, by a draw from the accumulated Open FA.
+ * The Open FA balance itself rides on a second axis as an always-positive area,
+ * so the chart only ever shows a deficit if the asset pool itself runs dry
+ * (it doesn't here). Reads `plan.computed.cfp.yoy_cashflow`.
  */
 export function CashFlowChart({ plan }: { plan: PlanState | null }) {
   const rows =
@@ -44,14 +47,9 @@ export function CashFlowChart({ plan }: { plan: PlanState | null }) {
 
   const data = rows.map((r) => {
     const income = Math.round((r.income_employment ?? 0) + (r.income_business ?? 0) + (r.income_rental ?? 0) + (r.income_other ?? 0));
-    const out = Math.round((r.expenses ?? 0) + (r.loan_repayment ?? 0));
-    const operating = income - out;
-    // When earned income can't cover the year's living costs (chiefly after
-    // retirement, when salary/business stop), the gap is met by drawing on the
-    // accumulated financial assets (Open FA) — the corpus the plan built for
-    // exactly this. Surface that draw as an inflow so the picture is honest and
-    // the net line never dives below zero "for no reason".
-    const drawn = Math.max(0, -operating);
+    const living = Math.round((r.expenses ?? 0) + (r.loan_repayment ?? 0));
+    // Gap funded by drawing on the accumulated Open FA (chiefly post-retirement).
+    const drawn = Math.max(0, living - income);
     return {
       year: r.year,
       salary: Math.round(r.income_employment ?? 0),
@@ -59,12 +57,9 @@ export function CashFlowChart({ plan }: { plan: PlanState | null }) {
       rental: Math.round(r.income_rental ?? 0),
       other: Math.round(r.income_other ?? 0),
       drawn,
-      // Outflows as negatives so they stack downward from the zero line. Goal
-      // spends are excluded — they're one-off Open FA draws, not annual income.
-      expenses: -Math.round(r.expenses ?? 0),
-      emi: -Math.round(r.loan_repayment ?? 0),
-      // Net line: surplus to invest while earning; 0 once the corpus covers costs.
-      net: Math.max(0, operating),
+      living,
+      // Open FA pool (financial assets) — always positive, on the right axis.
+      openFa: Math.round(r.fa_opening ?? r.financial_assets_closing ?? 0),
     };
   });
 
@@ -73,14 +68,20 @@ export function CashFlowChart({ plan }: { plan: PlanState | null }) {
       <div className="mb-1">
         <h3 className="text-sm font-medium text-zinc-800">Cash flow, year by year</h3>
         <p className="text-[11px] text-zinc-500 mt-0.5">
-          Inflows above the line by source; living expenses and EMI below. After retirement, earned income tapers and the
-          gap is drawn from accumulated assets (Open FA) — shown as its own band, so net cash stays covered. Goal spends are
-          asset-funded too (see the table and net-worth-by-asset chart).
+          Bars (left axis) show how each year&apos;s living costs are funded — earned income, then a draw from the Open FA
+          once income tapers after retirement. The shaded area (right axis) is the Open FA pool itself. Nothing goes
+          negative unless the asset pool runs dry.
         </p>
       </div>
-      <div className="w-full h-[320px]">
+      <div className="w-full h-[340px]">
         <ResponsiveContainer>
-          <ComposedChart data={data} stackOffset="sign" margin={{ top: 10, right: 24, bottom: 8, left: 0 }}>
+          <ComposedChart data={data} margin={{ top: 10, right: 8, bottom: 8, left: 0 }}>
+            <defs>
+              <linearGradient id="cf-openfa" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#5f7d56" stopOpacity={0.22} />
+                <stop offset="100%" stopColor="#5f7d56" stopOpacity={0.02} />
+              </linearGradient>
+            </defs>
             <XAxis
               dataKey="year"
               tickLine={false}
@@ -89,36 +90,46 @@ export function CashFlowChart({ plan }: { plan: PlanState | null }) {
               tick={{ fontSize: 11, fill: '#a1a1aa' }}
             />
             <YAxis
+              yAxisId="flows"
               tickFormatter={(v: number) => formatINR(v, { compact: true }).replace('₹', '')}
               tickLine={false}
               axisLine={false}
               tick={{ fontSize: 11, fill: '#a1a1aa' }}
-              width={64}
+              width={56}
+            />
+            <YAxis
+              yAxisId="fa"
+              orientation="right"
+              tickFormatter={(v: number) => formatINR(v, { compact: true }).replace('₹', '')}
+              tickLine={false}
+              axisLine={false}
+              tick={{ fontSize: 11, fill: '#9cae8f' }}
+              width={56}
             />
             <Tooltip
-              formatter={(v: number, name: string) => [formatINR(Math.abs(v), { compact: true }), name]}
+              formatter={(v: number, name: string) => [formatINR(v, { compact: true }), name]}
               contentStyle={{ borderRadius: 8, border: '1px solid #e4e4e7', fontSize: 12 }}
             />
             <Legend wrapperStyle={{ fontSize: 11 }} iconType="square" />
-            <ReferenceLine y={0} stroke="#d4d4d8" />
-            {/* Inflows (stack up) */}
-            <Bar dataKey="salary" name="Salary" stackId="cf" fill="#5f7d56" />
-            <Bar dataKey="business" name="Business" stackId="cf" fill="#7e9aa1" />
-            <Bar dataKey="rental" name="Rental" stackId="cf" fill="#9e8fb0" />
-            <Bar dataKey="other" name="Other" stackId="cf" fill="#c4a878" />
-            <Bar dataKey="drawn" name="Drawn from assets" stackId="cf" fill="#8bb0a0" />
-            {/* Outflows (stack down) — goal spends excluded (asset-funded) */}
-            <Bar dataKey="expenses" name="Living expenses" stackId="cf" fill="#d98c8c" />
-            <Bar dataKey="emi" name="EMI" stackId="cf" fill="#c97b7b" />
-            {/* Net cash line — surplus to invest while earning, 0 once corpus-funded */}
-            <Line
+            {/* Open FA pool — right axis, behind the bars */}
+            <Area
+              yAxisId="fa"
               type="monotone"
-              dataKey="net"
-              name="Net surplus to invest"
-              stroke="#27272a"
-              strokeWidth={1.75}
+              dataKey="openFa"
+              name="Open FA (financial assets)"
+              stroke="#5f7d56"
+              strokeWidth={1.25}
+              fill="url(#cf-openfa)"
               dot={false}
             />
+            {/* Annual funding sources (all positive) */}
+            <Bar yAxisId="flows" dataKey="salary" name="Salary" stackId="cf" fill="#5f7d56" />
+            <Bar yAxisId="flows" dataKey="business" name="Business" stackId="cf" fill="#7e9aa1" />
+            <Bar yAxisId="flows" dataKey="rental" name="Rental" stackId="cf" fill="#9e8fb0" />
+            <Bar yAxisId="flows" dataKey="other" name="Other" stackId="cf" fill="#c4a878" />
+            <Bar yAxisId="flows" dataKey="drawn" name="Drawn from Open FA" stackId="cf" fill="#8bb0a0" />
+            {/* Living costs the funding must cover (positive line) */}
+            <Line yAxisId="flows" type="monotone" dataKey="living" name="Living costs (expenses + EMI)" stroke="#b06a6a" strokeWidth={1.75} dot={false} />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
