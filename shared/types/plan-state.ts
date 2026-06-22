@@ -457,11 +457,16 @@ export type ComputedSnapshot = {
   scenarios_v2?: ScenariosSnapshot | null;
 };
 
+export type ScenarioLever = { text: string; lever8?: boolean };
+
 export type ScenarioPath = {
-  key: 'baseline' | 'easy' | 'aggressive';
+  key: 'baseline' | 'path1' | 'path2' | 'path3';
   name: string;
   headline: string;
-  levers: string[];
+  // baseline = []; paths = lever objects (lever8 flags the higher-risk-equity bullet)
+  levers: ScenarioLever[];
+  caution?: string | null;       // lever-8 mismatch caution (Conservative profile)
+  advisor_note?: string | null;  // "book a session" when a path can't fully close
   monthly_sip: number;
   total_sip_needed?: number;
   retirement_age: number;
@@ -491,10 +496,11 @@ export type ScenariosSnapshot = {
   verdict: { confidence: string; achievable: boolean; text: string };
   top_actions: string[];
   achievable: boolean;
+  risk_profile?: string | null;
   single_plan?: { headline: string; monthly_sip: number; cushion_monthly: number; step_up_pct: number };
   baseline: ScenarioPath;
   scenarios: ScenarioPath[];
-  comparison?: { metric: string; kind: string; baseline: unknown; easy: unknown; aggressive: unknown }[];
+  comparison?: { metric: string; kind: string; baseline: unknown; path1: unknown; path2: unknown; path3: unknown }[];
   which_path?: { path: string; suits: string }[];
 };
 

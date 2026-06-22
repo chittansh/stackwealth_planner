@@ -1429,14 +1429,33 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
             )
             n_back = max(0, (retire_goal.target_year or current_year + 10) - current_year)
             retire_annual_expense_today = planned_annual / ((1 + infl_g) ** n_back)
-        trace.append(_trace(
-            "Planned retirement annual expense (from retirement goal)",
-            "kind=retirement goal's target_amount, discounted to today's rupees if needed",
-            {"goal_name": retire_goal.goal_name, "raw_target": planned_annual,
-             "is_today_money": retire_goal.is_target_in_today_money},
-            round(retire_annual_expense_today),
-            unit="INR/yr",
-        ))
+        # Sanity guard — a retirement *annual expense* is normally ≤ current
+        # living expenses; it is never a large multiple of them. When an input
+        # sheet lists retirement in 10_Financial_Goals with a "today's cost"
+        # that is actually the CORPUS target (e.g. ₹5 Cr), reading it as an
+        # annual spend explodes the corpus (₹5 Cr/yr → ₹480 Cr). If the figure
+        # exceeds 3× current annual living expenses, treat it as a corpus entry
+        # and fall back to the living-expense-based estimate instead.
+        current_annual_living = max(0.0, monthly_expenses * 12)
+        if current_annual_living > 0 and retire_annual_expense_today > 3 * current_annual_living:
+            school_fees_monthly = float(plan.monthly_expenses.school_fees or 0)
+            retire_annual_expense_today = max(0.0, monthly_expenses - school_fees_monthly) * 12
+            trace.append(_trace(
+                "Retirement annual expense — corpus-as-annual guard tripped",
+                "retirement goal target (₹%s) read as a CORPUS, not annual spend (>3× current living expense); using (monthly_expenses − school_fees) × 12 instead" % round(planned_annual),
+                {"raw_target": round(planned_annual), "current_annual_living": round(current_annual_living)},
+                round(retire_annual_expense_today),
+                unit="INR/yr",
+            ))
+        else:
+            trace.append(_trace(
+                "Planned retirement annual expense (from retirement goal)",
+                "kind=retirement goal's target_amount, discounted to today's rupees if needed",
+                {"goal_name": retire_goal.goal_name, "raw_target": planned_annual,
+                 "is_today_money": retire_goal.is_target_in_today_money},
+                round(retire_annual_expense_today),
+                unit="INR/yr",
+            ))
     else:
         # Excel E18 = (current monthly living expense − children's education) × 12.
         school_fees_monthly = float(plan.monthly_expenses.school_fees or 0)

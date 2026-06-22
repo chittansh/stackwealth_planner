@@ -1409,25 +1409,35 @@ def _sandeep_page1(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None)
 </section>"""
 
 
+def _scenario_spark(series: list, w: int = 200, h: int = 34) -> str:
+    """Tiny inline-SVG wealth trajectory for a scenario card (print-safe)."""
+    pts = [(p.get("year"), float(p.get("value", 0) or 0)) for p in (series or [])]
+    if len(pts) < 2:
+        return ""
+    ys = [v for _, v in pts]
+    lo, hi = min(ys), max(ys)
+    rng = (hi - lo) or 1.0
+    n = len(pts)
+    coords = [f"{i/(n-1)*w:.1f},{h - (v-lo)/rng*(h-3) - 1.5:.1f}" for i, (_, v) in enumerate(pts)]
+    return (f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" style="display:block;margin-top:1mm;">'
+            f'<polyline points="{" ".join(coords)}" fill="none" stroke="var(--brand,#5f7d56)" stroke-width="1.4"/></svg>')
+
+
 def _sandeep_s8_scenarios(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -> str:
-    """Section 8 — Scenario Analysis (brief §8). Baseline + Easy + Aggressive
-    + side-by-side comparison + which-path."""
+    """Section 8 — Scenario Analysis (brief §6/§8). Either a single optimised
+    plan (on track) or three constructive paths — Path 1 Reducing Expectations,
+    Path 2 Stretching Ourselves, Path 3 Balanced — each sized to fund 100% of
+    goals, with the 5-block output spec (headline, levers, what-this-funds, what-
+    it-asks, trajectory), the side-by-side comparison, and which-path."""
     if not scen:
         return ""
     scenarios = scen.get("scenarios") or []
     baseline = next((s for s in scenarios if s.get("key") == "baseline"), None)
 
-    def _corpus_line(s: dict) -> str:
-        corpus = s.get("retirement_corpus", 0)
-        need = s.get("corpus_required", 0)
-        pct = round(corpus / need * 100) if need else 100
-        return f'Retirement corpus (age {s.get("retirement_age")}): <strong>{_fmt_lakhs(corpus)}</strong> · corpus needed {_fmt_lakhs(need)} ({pct}%)'
-
-    # 8.1 baseline
+    # 8.1 — the baseline picture (constructive; not restated in detail).
     parts = [f"""
-  <h3>8.1  The baseline — what happens if nothing changes</h3>
-  <p>{_h((baseline or {}).get('headline', ''))}</p>
-  <p class="muted">{_corpus_line(baseline) if baseline else ''}</p>"""]
+  <h3>8.1  The starting point — today's trajectory</h3>
+  <p>{_h((baseline or {}).get('headline', ''))}</p>"""]
 
     if scen.get("achievable"):
         sp = scen.get("single_plan") or {}
@@ -1435,25 +1445,42 @@ def _sandeep_s8_scenarios(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict 
   <h3>8.2  Your single optimised plan</h3>
   <p>{_h(sp.get('headline',''))}</p>""")
     else:
-        for idx, key in enumerate(("easy", "aggressive"), start=2):
+        for idx, key in enumerate(("path1", "path2", "path3"), start=2):
             s = next((x for x in scenarios if x.get("key") == key), None)
             if not s:
                 continue
-            levers = "".join(f"<li>{_h(l)}</li>" for l in s.get("levers", []))
+            # Block 2 — levers pulled (lever-8 / caution bullets get a callout box).
+            lever_items = []
+            for l in s.get("levers", []):
+                txt = l.get("text", "") if isinstance(l, dict) else str(l)
+                if isinstance(l, dict) and l.get("lever8"):
+                    lever_items.append(f'<li><div style="border:0.3mm solid var(--warn,#b45309);background:#fffbeb;border-radius:1mm;padding:2mm 2.5mm;color:#7c2d12;">{_h(txt)}</div></li>')
+                else:
+                    lever_items.append(f"<li>{_h(txt)}</li>")
+            levers = "".join(lever_items)
+            # Block 3 — what this funds (the structural anchor).
             outcomes = "".join(
-                f'<tr><td>{_h(o["goal"])}</td><td class="num">{o.get("target_year","")}</td><td>{_h(o["status"])}</td></tr>'
+                f'<tr><td>{_h(o["goal"])}</td><td>{_h(o["status"])}</td></tr>'
                 for o in s.get("outcomes", [])
             )
+            corpus = s.get("retirement_corpus", 0)
+            need = s.get("corpus_required", 0)
+            cpct = round(corpus / need * 100) if need else 100
+            advisor = (f'<p style="border:0.3mm solid var(--warn,#b45309);background:#fffbeb;border-radius:1mm;'
+                       f'padding:2mm 2.5mm;color:#7c2d12;">{_h(s["advisor_note"])}</p>') if s.get("advisor_note") else ""
             parts.append(f"""
   <h3>8.{idx}  {_h(s['name'])}</h3>
   <p><strong>{_h(s.get('headline',''))}</strong></p>
-  <p class="muted" style="margin-bottom:1mm;">Levers pulled:</p>
+  <p class="muted" style="margin:1mm 0 0.5mm;">Levers pulled</p>
   <ul style="margin-left:5mm;">{levers}</ul>
-  <p class="muted">{_corpus_line(s)} · about {s.get('goals_met_pct')}% of goals funded.</p>
-  {('<table><thead><tr><th>Goal</th><th class="num">Year</th><th>Outcome</th></tr></thead><tbody>'+outcomes+'</tbody></table>') if outcomes else ''}
-  <p>{_h(s.get('trade_off',''))}</p>""")
+  <p class="muted" style="margin:1mm 0 0.5mm;">What this funds — every stated goal at 100% (adjustments noted); retirement corpus {_fmt_lakhs(corpus)} vs {_fmt_lakhs(need)} target ({cpct}%).</p>
+  <table><thead><tr><th>Goal</th><th>Outcome</th></tr></thead><tbody>{outcomes}</tbody></table>
+  <p class="muted" style="margin:1mm 0 0.5mm;">What it asks of you</p>
+  <p>{_h(s.get('trade_off',''))}</p>
+  {advisor}
+  {_scenario_spark(s.get('net_worth_series') or [])}""")
 
-        # 8.4 comparison
+        # 8.5 comparison
         comp = scen.get("comparison") or []
         if comp:
             def _cell(v, kind):
@@ -1468,27 +1495,29 @@ def _sandeep_s8_scenarios(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict 
                 return _h(str(v))
             comp_rows = "".join(
                 f'<tr><td>{_h(r["metric"])}</td><td>{_cell(r["baseline"], r["kind"])}</td>'
-                f'<td>{_cell(r["easy"], r["kind"])}</td><td>{_cell(r["aggressive"], r["kind"])}</td></tr>'
+                f'<td>{_cell(r["path1"], r["kind"])}</td><td>{_cell(r["path2"], r["kind"])}</td>'
+                f'<td>{_cell(r["path3"], r["kind"])}</td></tr>'
                 for r in comp
             )
             parts.append(f"""
-  <h3>8.4  Side-by-side comparison</h3>
+  <h3>8.5  Side-by-side comparison</h3>
   <table>
-    <thead><tr><th>Metric</th><th>Baseline</th><th>Easy Path</th><th>Aggressive Path</th></tr></thead>
+    <thead><tr><th>Metric</th><th>Baseline</th><th>Path 1 · Reducing</th><th>Path 2 · Stretching</th><th>Path 3 · Balanced</th></tr></thead>
     <tbody>{comp_rows}</tbody>
   </table>""")
 
-        # 8.5 which path
+        # 8.6 which path
         wp = scen.get("which_path") or []
         if wp:
             wp_html = "".join(f"<p><strong>{_h(w['path'])}.</strong> {_h(w['suits'])}</p>" for w in wp)
             parts.append(f"""
-  <h3>8.5  Which path is right for you?</h3>
-  {wp_html}""")
+  <h3>8.6  Which path suits you?</h3>
+  {wp_html}
+  <p class="muted">The naming is fixed (Path 1 / 2 / 3) so you can refer to a path in a follow-up advisor conversation. We present all three and let you choose — none is "best".</p>""")
 
     return f"""<section class="page">
   <h2>SECTION 8 — SCENARIO ANALYSIS</h2>
-  <p class="muted">The paths below all start from where you are today. They use the same six levers — how much you invest, how long you give a goal, its size, a one-time inflow, an idle asset, or income growth — within sensible limits (we never delay your children's education or push retirement past 65).</p>
+  <p class="muted">If goals can't all be met on today's surplus, we present three constructive paths — each sized to fund 100% of your stated goals a different way, within sensible limits (we never delay your children's education or push retirement past 65, and we never cut a goal below 30%).</p>
   {''.join(parts)}
 </section>"""
 

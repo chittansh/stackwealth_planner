@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis } from 'recharts';
 
 import type { PlanState, ScenariosSnapshot, ScenarioPath } from '@/types/plan-state';
 import { fetchScenariosV2 } from '@/lib/api';
@@ -129,7 +130,7 @@ export function ScenariosView({ plan }: { plan: PlanState | null }) {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
             {paths.map((p) => (
               <PathCard key={p.key} path={p} />
             ))}
@@ -281,44 +282,59 @@ function Field({ label, placeholder, value, onChange }: { label: string; placeho
 }
 
 function PathCard({ path }: { path: ScenarioPath }) {
-  const fundedPct = Math.max(0, Math.min(100, path.corpus_required > 0 ? (path.retirement_corpus / path.corpus_required) * 100 : 100));
-  const isAggressive = path.key === 'aggressive';
+  // Path 2 is the "stretch" path — give it the accent treatment.
+  const accent = path.key === 'path2';
+  const corpusPct = path.corpus_required > 0 ? Math.round((path.retirement_corpus / path.corpus_required) * 100) : 100;
   return (
     <div
-      className={`rounded-xl border p-5 ${
-        isAggressive ? 'border-[color:var(--color-accent,#5f7d56)]/40 bg-[color:var(--color-accent,#5f7d56)]/[0.04]' : 'border-zinc-200 bg-white'
+      className={`rounded-xl border p-5 flex flex-col gap-3 ${
+        accent ? 'border-[color:var(--color-accent,#5f7d56)]/40 bg-[color:var(--color-accent,#5f7d56)]/[0.04]' : 'border-zinc-200 bg-white'
       }`}
     >
-      <h3 className="text-sm font-semibold text-zinc-800">{path.name}</h3>
-      <p className="text-xs text-zinc-600 mt-1 mb-3">{path.headline}</p>
+      {/* Block 1 — headline */}
+      <div>
+        <h3 className="text-sm font-semibold text-zinc-800">{path.name}</h3>
+        <p className="text-xs text-zinc-600 mt-1">{path.headline}</p>
+      </div>
 
-      <div className="grid grid-cols-2 gap-2 text-xs mb-3">
-        <Mini label="Monthly SIP" value={`${formatINR(path.monthly_sip)}/mo`} />
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <Mini label="Monthly SIP (start)" value={`${formatINR(path.monthly_sip)}/mo`} />
         <Mini label="Retire at" value={`${path.retirement_age}`} />
         <Mini label="Retirement corpus" value={formatINR(path.retirement_corpus, { compact: true })} />
         <Mini label="Goals funded" value={`${path.goals_met_pct}%`} />
       </div>
 
-      <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Levers pulled</div>
-      <ul className="text-xs text-zinc-700 flex flex-col gap-1 mb-3">
-        {path.levers.map((l, i) => (
-          <li key={i} className="flex gap-1.5">
-            <span className="text-[color:var(--color-accent,#5f7d56)]">•</span>
-            <span>{l}</span>
-          </li>
-        ))}
-      </ul>
+      {/* Block 2 — levers pulled with magnitudes */}
+      <div>
+        <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Levers pulled</div>
+        <ul className="text-xs text-zinc-700 flex flex-col gap-1.5">
+          {path.levers.map((l, i) => (
+            <li key={i} className={`flex gap-1.5 ${l.lever8 ? 'flex-col' : ''}`}>
+              {l.lever8 ? (
+                <div className="rounded-md border border-amber-300 bg-amber-50 px-2.5 py-2 text-amber-900">
+                  {l.text}
+                </div>
+              ) : (
+                <>
+                  <span className="text-[color:var(--color-accent,#5f7d56)]">•</span>
+                  <span>{l.text}</span>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
 
+      {/* Block 3 — what this funds (structural anchor) */}
       {path.outcomes && path.outcomes.length > 0 && (
-        <div className="mb-3">
-          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Per-goal outcome</div>
+        <div>
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">What this funds</div>
           <table className="w-full text-[11px]">
             <tbody>
               {path.outcomes.map((o) => (
-                <tr key={o.goal} className="border-b border-zinc-100 last:border-0">
-                  <td className="py-1 text-zinc-700">{o.goal}</td>
-                  <td className="py-1 text-zinc-500 tabular-nums">{o.target_year}</td>
-                  <td className="py-1 text-right text-zinc-700">{o.status}</td>
+                <tr key={o.goal} className="border-b border-zinc-100 last:border-0 align-top">
+                  <td className="py-1 text-zinc-700 whitespace-nowrap pr-2">{o.goal}</td>
+                  <td className="py-1 text-zinc-700">{o.status}</td>
                 </tr>
               ))}
             </tbody>
@@ -326,10 +342,45 @@ function PathCard({ path }: { path: ScenarioPath }) {
         </div>
       )}
 
-      <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden mb-1">
-        <div className="h-full bg-[color:var(--color-accent,#5f7d56)]" style={{ width: `${fundedPct}%` }} />
+      {/* Block 4 — what it asks of you */}
+      <div>
+        <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">What it asks of you</div>
+        <p className="text-[11px] text-zinc-600 leading-snug">{path.trade_off}</p>
       </div>
-      <p className="text-[11px] text-zinc-500 italic">{path.trade_off}</p>
+
+      {path.advisor_note && (
+        <div className="rounded-md border border-amber-300 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-900">
+          {path.advisor_note}
+        </div>
+      )}
+
+      {/* Block 5 — small wealth-trajectory chart */}
+      {path.net_worth_series && path.net_worth_series.length > 1 && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
+            Wealth trajectory · corpus {corpusPct}% of target
+          </div>
+          <div className="h-[90px] w-full">
+            <ResponsiveContainer>
+              <AreaChart data={path.net_worth_series} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+                <defs>
+                  <linearGradient id={`sg-${path.key}`} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#5f7d56" stopOpacity={0.35} />
+                    <stop offset="100%" stopColor="#5f7d56" stopOpacity={0.03} />
+                  </linearGradient>
+                </defs>
+                <XAxis dataKey="year" hide />
+                <Tooltip
+                  formatter={(v: number) => formatINR(v, { compact: true })}
+                  labelFormatter={(l) => `Year ${l}`}
+                  contentStyle={{ borderRadius: 8, border: '1px solid #e4e4e7', fontSize: 11 }}
+                />
+                <Area type="monotone" dataKey="value" stroke="#5f7d56" strokeWidth={1.5} fill={`url(#sg-${path.key})`} dot={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -350,17 +401,19 @@ function ComparisonTable({ s }: { s: ScenariosSnapshot }) {
           <tr className="text-left text-zinc-500 border-b border-zinc-100">
             <th className="py-1.5 font-medium">Metric</th>
             <th className="py-1.5 font-medium">Baseline</th>
-            <th className="py-1.5 font-medium">Easy Path</th>
-            <th className="py-1.5 font-medium">Aggressive Path</th>
+            <th className="py-1.5 font-medium">Path 1 · Reducing</th>
+            <th className="py-1.5 font-medium">Path 2 · Stretching</th>
+            <th className="py-1.5 font-medium">Path 3 · Balanced</th>
           </tr>
         </thead>
         <tbody>
           {(s.comparison ?? []).map((r) => (
             <tr key={r.metric} className="border-b border-zinc-100 last:border-0 align-top">
               <td className="py-1.5 text-zinc-700">{r.metric}</td>
-              <td className="py-1.5 text-zinc-700">{fmt(r.baseline, r.kind)}</td>
-              <td className="py-1.5 text-zinc-700">{fmt(r.easy, r.kind)}</td>
-              <td className="py-1.5 text-zinc-700">{fmt(r.aggressive, r.kind)}</td>
+              <td className="py-1.5 text-zinc-500">{fmt(r.baseline, r.kind)}</td>
+              <td className="py-1.5 text-zinc-700">{fmt(r.path1, r.kind)}</td>
+              <td className="py-1.5 text-zinc-700">{fmt(r.path2, r.kind)}</td>
+              <td className="py-1.5 text-zinc-700">{fmt(r.path3, r.kind)}</td>
             </tr>
           ))}
         </tbody>
