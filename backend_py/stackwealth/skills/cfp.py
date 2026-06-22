@@ -716,42 +716,56 @@ def compute_health_cover_required(
     annual_income: float,
     family_kind: str,  # "single" | "couple" | "with_children" | "with_dependents"
     is_metro: bool,
+    n_senior_parents: int = 0,
 ) -> dict:
     """Excel `Insurance Computation!G51-G65` — health cover required is the
     HIGHER of:
       (a) 50% of gross annual income, OR
-      (b) a profile-based table by family composition + metro top-up.
+      (b) a profile-based table: family base cover (base + super top-up, metro
+          values) PLUS a SEPARATE policy per senior-citizen dependent parent.
 
-    Profile table (lakhs):
-       single                       → 5L
-       couple                       → 10L
-       with_children                → 15L
-       with_dependents (extended)   → 20L
-    Metro households add +5L.
+    Profile table — metro "applicable profile" (base + super top-up), matching
+    the firm Excel's family-profile mapping (lakhs):
+       single                       → 15L  (5-15 base + 5 top-up)
+       couple                       → 25L  (10-20 base + 10 top-up)
+       with_children (family 3-4)   → 30L  (15-25 base + 15 top-up)  [Excel G58]
+       with_dependents (HNI/extend) → 40L  (20-30 base + 20 top-up)
+    Non-metro households take 70% of the metro figure. Each senior dependent
+    parent adds a separate ~20L policy (Excel G60).
     """
     table = {
-        "single": 500_000,
-        "couple": 1_000_000,
-        "with_children": 1_500_000,
-        "with_dependents": 2_000_000,
+        "single": 1_500_000,
+        "couple": 2_500_000,
+        "with_children": 3_000_000,
+        "with_dependents": 4_000_000,
     }
-    profile_floor = table.get(family_kind, 1_000_000)
-    if is_metro:
-        profile_floor += 500_000
+    family_base = table.get(family_kind, 2_500_000)
+    if not is_metro:
+        family_base = round(family_base * 0.70)
+    senior_cover = n_senior_parents * 2_000_000   # separate policy per senior parent (Excel G60)
+    profile_floor = family_base + senior_cover
     income_rule = 0.50 * (annual_income or 0)
     required = max(profile_floor, income_rule)
     return {
         "required": round(required),
         "profile_floor": profile_floor,
+        "family_base": family_base,
+        "senior_parent_cover": senior_cover,
         "income_rule_50pct": round(income_rule),
         "family_kind": family_kind,
         "metro_topup_applied": is_metro,
         "computation_trace": [
             _trace(
-                "Health cover — profile floor",
-                "table[family_kind] + (5L if metro else 0)",
+                "Health cover — family base (base + super top-up)",
+                "table[family_kind] × (1 if metro else 0.7)",
                 {"family_kind": family_kind, "metro": is_metro},
-                profile_floor,
+                family_base,
+            ),
+            _trace(
+                "Health cover — separate senior-parent policies",
+                "n_senior_parents × 20L",
+                {"n_senior_parents": n_senior_parents},
+                senior_cover,
             ),
             _trace(
                 "Health cover — 50% of income rule",
@@ -761,7 +775,7 @@ def compute_health_cover_required(
             ),
             _trace(
                 "Health cover required",
-                "MAX(profile_floor, income_rule_50pct)",
+                "MAX(family_base + senior_parent_cover, income_rule_50pct)",
                 {"profile_floor": profile_floor, "income_rule": round(income_rule)},
                 round(required),
             ),
@@ -1589,53 +1603,77 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     # Computation!F174` (MF + equity + FD + bonds + EPF/NPS/PPF + gold +
     # liquid). Previously cfp.py used only `portfolio + liquid` which
     # overstated the additional cover needed.
+    # "Value of Assets Available for disposal" — Excel `Insurance Computation!F37`
+    # equals the FINANCIAL-asset pool only (= YoY opening FA: MF + equity +
+    # fixed income + liquid). Gold / ESOP / real estate are NOT counted here.
     mf_total = sum((h.current_value or 0) for h in (plan.mutual_funds or []))
     eq_total = sum((h.current_value or 0) for h in (plan.equity_stocks or []))
     fi_total = sum((h.current_value or 0) for h in (plan.fixed_income or []))
-    gold_total = sum((h.current_value or 0) for h in (plan.gold or []) if h.held_for_investment)
     lc = plan.liquid_capital
     liquid_total = sum((getattr(lc, k) or 0) for k in
                        ("savings_account_balance", "idle_cash_for_investment",
                         "fd_breakable_for_investment", "bonus_expected_for_investment"))
-    investable_assets = mf_total + eq_total + fi_total + gold_total + liquid_total
+    investable_assets = mf_total + eq_total + fi_total + liquid_total
     # Fallback to FSI when holdings lists are empty.
     if investable_assets <= 0:
         investable_assets = (fsi.portfolio_current_value or 0) + (fsi.liquid_assets_current_value or 0)
 
-    spouse_age, spouse_le = _spouse_age_and_life_expectancy(
-        plan, current_year, fallback_age=current_age - 2, fallback_le=life_expectancy
-    )
+    # Excel insurance inputs (Insurance Computation tab):
+    #  • F7  income  = total annual income
+    #  • F20 expense = total annual OUTFLOW (regular expense + loan repayments)
+    #  • F10 Nper    = whole years to retirement (56 − 36 = 20)
+    #  • needs method "years to provide for" (F23) = the insured's own life
+    #    expectancy − current age (the corpus must replace income/expenses for
+    #    the family across the earner's expected lifetime); the tab labels the
+    #    age/LE cells "spouse" but enters the primary's 36 / 80.
+    #  • F11/F24 return 10%, F12/F25 inflation 6% — fixed firm insurance
+    #    assumptions, independent of the YoY expense-inflation (7%).
+    insured_age = int(round(current_age))
+    insured_le = (plan.assumptions.persons[0].life_expectancy
+                  if plan.assumptions.persons and plan.assumptions.persons[0].life_expectancy
+                  else life_expectancy)
     insurance = compute_insurance_need(
         current_annual_income=annual_income,
-        current_annual_expenses=annual_expenses,
-        current_age=current_age,
+        current_annual_expenses=annual_expenses + monthly_emi * 12,
+        current_age=insured_age,
         retirement_age=retirement_age,
-        spouse_age=spouse_age,
-        spouse_life_expectancy=spouse_le,
+        spouse_age=insured_age,
+        spouse_life_expectancy=insured_le,
         loans_outstanding=loans_outstanding,
         existing_cover=existing_cover,
         investable_assets=investable_assets,
         return_rate=0.10,
-        inflation=plan.assumptions.inflation or 0.06,
+        inflation=0.06,
     )
-    # Finding 8 — Excel health-cover rule (was missing entirely).
+    # Excel health-cover rule. Children are inferred from the goal list
+    # (child_education / child_marriage) since the persons array usually carries
+    # only the two adults; senior dependent parents come from a parent-medical
+    # goal or a person flagged as a senior dependent.
     persons = plan.assumptions.persons or []
     n_persons = len(persons)
     has_children = any(
+        (g.kind or "") in ("child_education", "child_marriage") for g in plan.financial_goals
+    ) or (n_persons > 2 and any(
         p.date_of_birth and (current_year - int((p.date_of_birth or "0000")[-4:] or 0)) < 25
         for p in persons[2:]
-    ) if n_persons > 2 else False
-    if n_persons <= 1:
+    ))
+    n_senior_parents = sum(
+        1 for g in plan.financial_goals
+        if "parent" in (g.goal_name or "").lower()
+        and any(k in (g.goal_name or "").lower() for k in ("medical", "surgery", "health"))
+    )
+    if n_persons <= 1 and not has_children:
         family_kind = "single"
-    elif n_persons == 2:
-        family_kind = "couple"
     elif has_children:
         family_kind = "with_children"
+    elif n_persons >= 2:
+        family_kind = "couple"
     else:
         family_kind = "with_dependents"
     is_metro = (plan.personal_details.city_type or "Non-metro") == "Metro"
     health = compute_health_cover_required(
         annual_income=annual_income, family_kind=family_kind, is_metro=is_metro,
+        n_senior_parents=n_senior_parents,
     )
     existing_health = (
         plan.insurance_details.health_insurance.cover_amount
