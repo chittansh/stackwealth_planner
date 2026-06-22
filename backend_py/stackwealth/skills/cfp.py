@@ -1782,9 +1782,16 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     ig = plan.assumptions.income_growth
 
     # Bucket lumpsum events by year so the yoy engine can fold them in.
+    # Reverse-mortgage events (and the home-sale that closes them out) are
+    # EXCLUDED from the baseline cash flow — a reverse mortgage is a financing
+    # decision against the home, not organic cash flow. They stay in
+    # plan.assumptions.lumpsum_events so scenarios and the report can still use
+    # them as a funding lever; they just don't inflate the baseline FA trajectory.
     lumpsum_by_year: dict[int, list[tuple[float, str]]] = {}
     for ev in (plan.assumptions.lumpsum_events or []):
         if ev.amount == 0:
+            continue
+        if "reverse mortgage" in (ev.label or "").lower():
             continue
         lumpsum_by_year.setdefault(int(ev.year), []).append(
             (float(ev.amount), ev.label or "")
