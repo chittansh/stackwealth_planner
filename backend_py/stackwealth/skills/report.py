@@ -1524,10 +1524,67 @@ def _v2_s2_networth(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     nfa_ret = rows[-1].get("non_financial_assets_closing", 0) or 0
     tot_ret = (fa_ret + nfa_ret) or 1
     fa_pct_ret = round(fa_ret / tot_ret * 100)
+
+    # ── Where your wealth sits today — asset inventory ─────────────────────
+    mf = sum((h.current_value or 0) for h in (plan.mutual_funds or []))
+    eq = sum((h.current_value or 0) for h in (plan.equity_stocks or []))
+    fi_rows = plan.fixed_income or []
+    retire_kinds = ("ppf", "epf", "nps", "sukanya")
+    fi_retire = sum((h.current_value or 0) for h in fi_rows if any(k in (h.instrument or "").lower() for k in retire_kinds))
+    fi_debt = sum((h.current_value or 0) for h in fi_rows) - fi_retire
+    lc = plan.liquid_capital
+    liquid = sum((getattr(lc, k) or 0) for k in ("savings_account_balance", "idle_cash_for_investment", "fd_breakable_for_investment", "bonus_expected_for_investment"))
+    re_total = sum((h.current_value or 0) for h in (plan.real_estate or []))
+    gold_total = sum((h.current_value or 0) for h in (plan.gold or []))
+    inv = [
+        ("Mutual funds", mf, "Financial"),
+        ("Direct equity", eq, "Financial"),
+        ("Fixed deposits, bonds, NSC", fi_debt, "Financial"),
+        ("PPF / EPF / NPS (retirement)", fi_retire, "Financial"),
+        ("Cash & liquid", liquid, "Financial"),
+        ("Real estate", re_total, "Non-financial"),
+        ("Gold & other assets", gold_total, "Non-financial"),
+    ]
+    grand = sum(v for _, v, _ in inv) or 1
+    inv_rows = "".join(
+        f'<tr><td class="label-cell">{_h(lbl)}</td><td>{kind}</td><td class="num">{_v2c(v)}</td><td class="num">{round(v/grand*100)}%</td></tr>'
+        for lbl, v, kind in inv if v > 0
+    )
+    fa_now = mf + eq + fi_debt + fi_retire + liquid
+    inv_rows += (f'<tr class="subtotal"><td class="label-cell">Financial assets</td><td></td><td class="num">{_v2c(fa_now)}</td><td class="num">{round(fa_now/grand*100)}%</td></tr>'
+                 f'<tr class="subtotal"><td class="label-cell">Non-financial assets</td><td></td><td class="num">{_v2c(re_total+gold_total)}</td><td class="num">{round((re_total+gold_total)/grand*100)}%</td></tr>'
+                 f'<tr class="total"><td class="label-cell">Total assets</td><td></td><td class="num">{_v2c(grand)}</td><td class="num">100%</td></tr>')
+
+    # ── Net worth at milestones (3-year steps) ─────────────────────────────
+    start_age = int(rows[0].get("age", 0) or 0)
+    start_yr = rows[0]["year"]
+    ms = [r for i, r in enumerate(rows) if i == 0 or r["year"] == retire_year or (r["year"] - start_yr) % 3 == 0]
+    ms_rows = "".join(
+        f'<tr{" class=\"subtotal\"" if r["year"]==retire_year else ""}><td>{r["year"]}{" · retires" if r["year"]==retire_year else ""}</td>'
+        f'<td class="num">{int(r.get("age",0))}</td>'
+        f'<td class="num">{_v2c(r.get("financial_assets_closing",0))}</td>'
+        f'<td class="num">{_v2c(r.get("non_financial_assets_closing",0))}</td>'
+        f'<td class="num">{_v2c(r.get("net_worth",0))}</td></tr>'
+        for r in ms
+    )
+
     return f"""<section class="page">
   <h2>2.  Net Worth</h2>
   <p>Your wealth today is anchored in real estate and gold ({100-fa_pct}% of total assets). Financial assets — the part that actually funds your goals — are {fa_pct}%. As your SIPs run over the years to retirement, that mix shifts steadily toward financial assets.</p>
-  <p>Real estate appreciates around 7% post-tax; your equity and SIPs compound faster. By retirement ({rows[-1]['year']}) about {fa_pct_ret}% of your net worth sits in financial assets — the liquid kind you can spend from in retirement, without needing to sell the home you live in. The year-by-year split is in the cash-flow table (Open FA) and the Net Worth view on the platform.</p>
+
+  <h3>Where your wealth sits today</h3>
+  <table>
+    <thead><tr><th>Asset</th><th>Type</th><th class="num">Value</th><th class="num">% of total</th></tr></thead>
+    <tbody>{inv_rows}</tbody>
+  </table>
+
+  <h3>How it grows — net worth at milestones</h3>
+  <p>Real estate appreciates around 7% post-tax; your equity and SIPs compound faster. By retirement ({rows[-1]['year']}) about {fa_pct_ret}% of your net worth sits in financial assets — the liquid kind you can spend from in retirement, without needing to sell the home you live in.</p>
+  <table>
+    <thead><tr><th>Year</th><th class="num">Age</th><th class="num">Financial assets</th><th class="num">Hard assets</th><th class="num">Net worth</th></tr></thead>
+    <tbody>{ms_rows}</tbody>
+  </table>
+  <p class="muted">Financial assets are the liquid pool that funds goals and retirement; hard assets (real estate, gold) anchor net worth but aren't drawn on day-to-day.</p>
 </section>"""
 
 
@@ -1699,6 +1756,35 @@ def _v2_s4_goals(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -
         wp_html = "<h4>How to choose between these paths</h4>" + "".join(
             f'<p><strong>{_h(w["path"])}.</strong>&nbsp; {_h(w["suits"])}</p>' for w in wp)
 
+    # ── Retirement readiness detail ────────────────────────────────────────
+    recurring = ret.get("corpus_recurring", 0) or 0
+    one_time = max(0, corpus - recurring)
+    existing_fv = ret.get("existing_retirement_assets_fv", 0) or 0
+    sp = ret.get("stepup_plan") or {}
+    sp_start = sp.get("first_year_monthly_contribution", 0) or 0
+    sp_rate = sp.get("step_up_pct", 0.10) or 0.10
+    sp_proj = sp.get("projected_corpus_at_retirement", 0) or 0
+    sp_funded = sp.get("funded_pct", 0) or 0
+    sp_excess = sp.get("excess_or_gap", 0) or 0
+    reaches = sp.get("reaches_goal")
+    verdict = (f"On this step-up plan your projected corpus is {_v2c(sp_proj)} — "
+               + ("ahead of" if (sp_excess or 0) >= 0 else "short of")
+               + f" the {_v2c(corpus)} target by {_v2c(abs(sp_excess))} ({sp_funded:.0f}% funded).")
+    retire_block = f"""
+  <h3>Retirement readiness</h3>
+  <p>Your retirement corpus has to sustain living expenses across your (and your spouse's) lifetime, plus any one-time post-retirement spend. The firm sizes it on an inflation-adjusted annuity and funds it with a SIP that steps up each year with your income.</p>
+  <table>
+    <tbody>
+      <tr><td class="label-cell">Corpus needed at retirement ({retire_year})</td><td class="num">{_v2c(corpus)}</td></tr>
+      <tr><td class="label-cell">&nbsp;&nbsp;— for ongoing living expenses</td><td class="num">{_v2c(recurring)}</td></tr>
+      <tr><td class="label-cell">&nbsp;&nbsp;— for one-time post-retirement spend</td><td class="num">{_v2c(one_time)}</td></tr>
+      <tr><td class="label-cell">Funded by existing retirement assets (grown to {retire_year})</td><td class="num">{_v2c(existing_fv)}</td></tr>
+      <tr><td class="label-cell">Step-up SIP — start {_v2c(sp_start)}/mo, +{round(sp_rate*100)}%/yr</td><td class="num">projected {_v2c(sp_proj)}</td></tr>
+      <tr class="total"><td class="label-cell">{"Cushion over target" if (sp_excess or 0)>=0 else "Gap vs target"}</td><td class="num">{_v2c(abs(sp_excess))} ({sp_funded:.0f}% funded)</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">{_h(verdict)} Starting the SIP lower and stepping it up {round(sp_rate*100)}%/yr with your annual increment reaches the same corpus while keeping early-year cash-flow comfortable.</p>"""
+
     return f"""<section class="page">
   <h2>4.  Goal Planning</h2>
   <p>Your stated goals, what they'll cost in the year you want them, and how much of each is already funded by your existing assets and SIPs.</p>
@@ -1706,6 +1792,7 @@ def _v2_s4_goals(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -
     <thead><tr><th>Goal</th><th class="num">Year</th><th class="num">Today's cost</th><th class="num">Cost at goal year</th><th>Already funded</th><th>Status at current pace</th></tr></thead>
     <tbody>{grows}</tbody>
   </table>
+  {retire_block}
   <div class="callout info">{gap_box}</div>
   {paths_html}
   {comp_html}
