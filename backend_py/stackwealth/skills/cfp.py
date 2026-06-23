@@ -1598,9 +1598,14 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     }
 
     # ── Retirement Plan §3 — step-up investments table (rows 50-78) ─────
-    # Models the client's CURRENT retirement contributions stepped up each
-    # year (Excel's F51 default = 10%) and future-valued to retirement. If
-    # they have no ongoing retirement SIP, fall back to the level gross SIP
+    # Models the client's ACTUAL CURRENT retirement contribution (the ongoing
+    # retirement SIP, incl. EPF) stepped up each year (Excel's F51 default =
+    # 10%) and future-valued to retirement. This is the honest "current plan"
+    # trajectory: the funded-% verdict reflects what the client is really
+    # investing today, NOT a higher planned figure. The required start SIP that
+    # closes the gap (solved inside compute_retirement_stepup, independent of
+    # the seed) is surfaced separately as the "to fully fund" recommendation.
+    # If they have no ongoing retirement SIP, fall back to the level gross SIP
     # so the table still illustrates a reach-the-goal trajectory.
     stepup_rate = plan.assumptions.sip_annual_step_up_pct or 0.10
     first_year_annual = (
@@ -1608,14 +1613,14 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         else retirement.get("gross_monthly_sip", 0) * 12
     )
     stepup_corpus_allocated = retirement_earmarked_today
-    # RM-manual Retirement Plan §3 inputs win when uploaded: the chosen first-year
-    # annual contribution (E54), the step-up rate (F51), and the corpus already
-    # allocated to retirement (H53) — so the table reproduces the firm sheet.
+    # RM-manual Retirement Plan §3 inputs win when uploaded: the step-up rate
+    # (F51) and the corpus already allocated to retirement (H53). The first-year
+    # contribution (E54) is intentionally NOT used as the seed — the client's
+    # actual ongoing SIP drives the current-plan verdict — but it remains
+    # available on the plan for the "firm-planned" reference if needed.
     if rpi:
         if rpi.stepup_rate:
             stepup_rate = float(rpi.stepup_rate)
-        if (rpi.stepup_start_annual or 0) > 0:
-            first_year_annual = float(rpi.stepup_start_annual)
         if rpi.corpus_allocated is not None:
             stepup_corpus_allocated = float(rpi.corpus_allocated)
     retirement["stepup_plan"] = compute_retirement_stepup(
