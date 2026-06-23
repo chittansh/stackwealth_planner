@@ -701,6 +701,37 @@ def _parse_recurring_investments(wb) -> list[dict] | None:
             purpose = "general"
         out.append({"investment_type": name.strip(), "monthly_amount": float(amt),
                     "purpose": purpose, "remarks": rem or None})
+
+    # Provident Fund / EPF contribution often sits in the INCOME tab as a
+    # mandatory salary deduction (it reduces net pay) — but it's a monthly
+    # contribution to a retirement instrument, so it must count toward the
+    # retirement SIP. Capture it from the income sheet's deductions section.
+    # Only skip if the MANDATORY EPF / Provident Fund is already a row — VPF
+    # (voluntary PF) is a separate contribution and must not suppress it.
+    have_pf = any("provident" in (r["investment_type"] or "").lower()
+                  or (r["investment_type"] or "").lower().strip() == "epf"
+                  for r in out)
+    if not have_pf:
+        for sn in wb.sheetnames:
+            s = sn.lower()
+            if not ("income" in s or s.strip().startswith("2_")):
+                continue
+            iws = wb[sn]
+            for r in range(1, iws.max_row + 1):
+                for c in range(1, iws.max_column + 1):
+                    cell = iws.cell(row=r, column=c).value
+                    if isinstance(cell, str) and ("provident fund" in cell.lower()
+                                                  or cell.strip().lower() in ("epf", "vpf")):
+                        nums = [iws.cell(row=r, column=cc).value for cc in range(c + 1, iws.max_column + 1)]
+                        amt = max((n for n in nums if isinstance(n, (int, float)) and n > 0), default=0)
+                        if amt > 0:
+                            out.append({"investment_type": "EPF / Provident Fund", "monthly_amount": float(amt),
+                                        "purpose": "retirement", "remarks": "Provident Fund contribution (salary deduction)"})
+                        break
+                else:
+                    continue
+                break
+            break
     return out or None
 
 
