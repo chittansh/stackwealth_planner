@@ -20,7 +20,6 @@ import { RetirementGlideView } from './RetirementGlideView';
 import { ScenariosView } from './ScenariosView';
 import { RiskAssessmentView } from './RiskAssessmentView';
 import { PlanBlocks } from './PlanBlocks';
-import { Scenarios } from './Scenarios';
 import { RiskBanner } from './RiskBanner';
 import { CalculationsChip } from './CalculationsChip';
 
@@ -158,14 +157,6 @@ export function CanvasRouter({
         </div>
       )}
 
-      {/* Scenario tooling lives on its own Scenarios tab now — keep it off the
-          net-worth page (and out of the dedicated Scenarios view, which renders
-          the full engine itself). */}
-      {view !== 'net-worth' && view !== 'scenarios' && (
-        <div className="mt-10">
-          <Scenarios householdId={householdId} plan={plan} />
-        </div>
-      )}
       <div className="mt-8">
         <PlanBlocks plan={plan} />
       </div>
