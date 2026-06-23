@@ -23,7 +23,8 @@ export default async function PlanPage({
     | 'debt'
     | 'retirement'
     | 'scenarios'
-    | 'risk';
+    | 'risk'
+    | 'computed-excel';
   const horizon = Number(sp.horizon ?? 45);
 
   return (

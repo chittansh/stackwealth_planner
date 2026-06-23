@@ -10,6 +10,7 @@ from . import config
 from .api import (
     advisor,
     chat,
+    excel,
     feedback,
     household,
     knowledge,
@@ -72,3 +73,4 @@ app.include_router(knowledge.router, prefix="/api/knowledge")
 app.include_router(news.router, prefix="/api/news")
 app.include_router(report.router, prefix="/api/report")
 app.include_router(feedback.router, prefix="/api/feedback")
+app.include_router(excel.router, prefix="/api/excel")

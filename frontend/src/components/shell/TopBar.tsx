@@ -22,6 +22,7 @@ const VIEWS = [
   { value: 'debt', label: 'Debt Paydown' },
   { value: 'retirement', label: 'Retirement Glide' },
   { value: 'scenarios', label: 'Scenarios' },
+  { value: 'computed-excel', label: 'Computed Excel' },
 ] as const;
 
 const HORIZONS = [
