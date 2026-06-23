@@ -78,10 +78,14 @@ LEVER8_DEFAULT = "Your long-horizon money working harder — comes with sharper 
 
 def _compact(n: float) -> str:
     n = round(n)
-    if abs(n) >= 1_00_00_000:
-        return f"₹{n / 1_00_00_000:.2f} Cr"
-    if abs(n) >= 1_00_000:
-        return f"₹{n / 1_00_000:.1f} L"
+    sign = "-" if n < 0 else ""
+    a = abs(n)
+    def _t(x: float) -> str:
+        return f"{x:.2f}".rstrip("0").rstrip(".")
+    if a >= 1_00_00_000:
+        return f"{sign}₹{_t(a / 1_00_00_000)} Cr"
+    if a >= 1_00_000:
+        return f"{sign}₹{_t(a / 1_00_000)} L"
     return _rupees(n)
 
 

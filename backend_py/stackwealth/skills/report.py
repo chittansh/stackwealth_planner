@@ -1266,17 +1266,19 @@ def _build_sandeep_html(plan: PlanState) -> str:
 # ════════════════════════════════════════════════════════════════════════════
 
 def _v2c(n: float | int | None) -> str:
-    """Compact ₹ — Cr (2dp) / L (1dp) / K, with a real minus sign."""
+    """Compact ₹ — Cr / L to up to 2 decimals (₹2,98,000 → ₹2.98 L, never ₹3.0 L;
+    ₹20,00,000 → ₹20 L), exact rupees below ₹1 L. Trailing zeros stripped so we
+    never round a precise figure up. With a real minus sign."""
     n = round(n or 0)
     a = abs(n)
     sign = "−" if n < 0 else ""
+    def _t(x: float) -> str:
+        return f"{x:.2f}".rstrip("0").rstrip(".")
     if a >= 1_00_00_000:
-        return f"{sign}₹{a / 1e7:.2f} Cr"
+        return f"{sign}₹{_t(a / 1e7)} Cr"
     if a >= 1_00_000:
-        return f"{sign}₹{a / 1e5:.1f} L"
-    if a >= 1000:
-        return f"{sign}₹{a / 1000:.0f}K"
-    return f"{sign}₹{a:,.0f}"
+        return f"{sign}₹{_t(a / 1e5)} L"
+    return sign + _fmt_inr(a)
 
 
 def _v2_line_chart(series: list[tuple[int, float]], caption: str) -> str:
@@ -1363,8 +1365,8 @@ def _v2_page1(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -> s
     when = datetime.now().strftime("%B %Y")
 
     tiles = [
-        ("Monthly Income", _v2c(income), "Salary, in-hand"),
-        ("Investable Surplus", _v2c(investable) + " /mo", "After essentials & EMI"),
+        ("Monthly Income", _fmt_inr(income), "Salary, in-hand"),
+        ("Investable Surplus", _fmt_inr(investable) + " /mo", "After essentials & EMI"),
         ("Net Worth", _v2c(nw), "Assets less liabilities"),
         ("Retirement", f"Age {retire_age} ({retire_year})", f"{yrs_to_ret} years from today"),
     ]
