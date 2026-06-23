@@ -7,6 +7,7 @@ import type { PlanState } from '@/types/plan-state';
 import { Headline } from './Headline';
 import { NetWorthChart } from './NetWorthChart';
 import { NetWorthCompositionChart } from './NetWorthCompositionChart';
+import { CashSummaryCard } from './CashSummaryCard';
 import { CashFlowTable } from './CashFlowTable';
 import { CashFlowChart } from './CashFlowChart';
 import { RMInputsCard } from './RMInputsCard';
@@ -101,6 +102,7 @@ export function CanvasRouter({
       {view === 'net-worth' && (
         <div className="mt-6 flex flex-col gap-6">
           <NetWorthChart householdId={householdId} plan={plan} />
+          {plan && <CashSummaryCard plan={plan} />}
           <NetWorthCompositionChart plan={plan} />
         </div>
       )}
