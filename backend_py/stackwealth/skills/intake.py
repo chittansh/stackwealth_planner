@@ -643,6 +643,67 @@ def _parse_equity_stocks(wb) -> list[dict] | None:
     return out or None
 
 
+def _parse_recurring_investments(wb) -> list[dict] | None:
+    """Deterministically read the firm '5_Recurring_Investments' tab so no
+    monthly contribution is dropped (the LLM intermittently misses rows like
+    EPF/VPF). Tags purpose so retirement instruments (NPS, VPF, EPF, PPF,
+    provident/pension) feed the retirement SIP; MF/RD/direct-equity feed goals.
+    The 'For Retirement' / 'For <goal>' remark wins when present."""
+    ws = None
+    for sn in wb.sheetnames:
+        if "recurring" in sn.lower() or sn.strip().startswith("5_"):
+            ws = wb[sn]
+            break
+    if ws is None:
+        return None
+    # Header row: find columns for type / amount / remarks.
+    hdr = type_c = amt_c = rem_c = None
+    for r in range(1, min(8, ws.max_row) + 1):
+        vals = [str(ws.cell(row=r, column=c).value or "").lower() for c in range(1, ws.max_column + 1)]
+        joined = " ".join(vals)
+        if ("investment" in joined or "type" in joined) and ("amount" in joined or "monthly" in joined):
+            hdr = r
+            for c, v in enumerate(vals, start=1):
+                if "type" in v or "investment" in v:
+                    type_c = type_c or c
+                elif "amount" in v or "monthly" in v:
+                    amt_c = c
+                elif "remark" in v or "comment" in v:
+                    rem_c = c
+            break
+    if not hdr or not type_c or not amt_c:
+        return None
+
+    retire_kw = ("nps", "vpf", "epf", "ppf", "provident", "pension", "sukanya", "superannuation")
+    goal_kw = ("house", "education", "college", "car", "travel", "vacation", "marriage", "wedding", "child", "goal")
+    out: list[dict] = []
+    for r in range(hdr + 1, ws.max_row + 1):
+        name = ws.cell(row=r, column=type_c).value
+        amt = ws.cell(row=r, column=amt_c).value
+        if not isinstance(name, str) or not name.strip():
+            continue
+        nlow = name.strip().lower()
+        if "total" in nlow or "insurance" in nlow:
+            continue
+        if not isinstance(amt, (int, float)) or amt <= 0:
+            continue
+        rem = str((ws.cell(row=r, column=rem_c).value if rem_c else "") or "")
+        rl = rem.lower()
+        if "retire" in rl:
+            purpose = "retirement"
+        elif any(k in rl for k in goal_kw):
+            purpose = "goal"
+        elif any(k in nlow for k in retire_kw):
+            purpose = "retirement"
+        elif any(k in nlow for k in ("mutual", "mf", "sip", "equity", "rd", "stock")):
+            purpose = "goal"
+        else:
+            purpose = "general"
+        out.append({"investment_type": name.strip(), "monthly_amount": float(amt),
+                    "purpose": purpose, "remarks": rem or None})
+    return out or None
+
+
 async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
     expense_footer_total: float | None = None
     try:
@@ -664,6 +725,10 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
             retirement_inputs = _parse_retirement_inputs(wb)
         except Exception:
             retirement_inputs = {}
+        try:
+            recurring_rows = _parse_recurring_investments(wb)
+        except Exception:
+            recurring_rows = None
         chunks: list[str] = []
         for sn in wb.sheetnames:
             # Skip COMPUTED / projection tabs — they hold derived figures
@@ -719,6 +784,11 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
     # Deterministic equity holdings override the LLM (mislabelled-column safety).
     if equity_rows and result.get("partial_state") is not None:
         result["partial_state"]["equity_stocks"] = equity_rows
+
+    # Deterministic recurring investments — no monthly contribution dropped, and
+    # NPS/VPF/EPF/PPF correctly tagged retirement so they feed the retirement SIP.
+    if recurring_rows and result.get("partial_state") is not None:
+        result["partial_state"]["recurring_investments"] = recurring_rows
 
     # Retirement Plan tab's RM-manual inputs (life expectancies, one-time spend,
     # step-up start/rate, allocated corpus) → authoritative for the corpus + table.
