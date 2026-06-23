@@ -2,7 +2,6 @@
 
 import type { PlanState, Goal } from '@/types/plan-state';
 import { formatINR } from '@/lib/utils';
-import { SuggestedSection } from './SuggestedSection';
 
 /**
  * Mirrors the firm's `10_Financial_Goals` sheet in `Format for inputs for
@@ -95,8 +94,6 @@ export function GoalsView({ plan }: { plan: PlanState | null }) {
       </div>
 
       {blocksWithRetire.length > 0 && <GoalBlocksDetail goals={goals} blocks={blocksWithRetire} />}
-
-      <SuggestedSection plan={plan} domain="goals" />
     </div>
   );
 }
