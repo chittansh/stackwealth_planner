@@ -21,12 +21,29 @@ from ..db import (
     save_computed_workbook,
     save_plan,
 )
-from ..excel_engine.engine import compute_from_upload
+import io
+
+import openpyxl
+
+from ..excel_engine.engine import compute_from_plan, compute_from_upload
 from ..types import CashFlowRow, NetWorthSeriesPoint
 
 
 class NoWorkbookError(RuntimeError):
     """Raised when a household has no stored firm-template upload to compute."""
+
+
+def _is_firm_template(source: bytes) -> bool:
+    """Detect the firm's native input template by its signature tab names.
+    Alternate formats (e.g. 'Financial Planning_Client …' with '2_Income_Details'
+    / '5_Monthly_Investments') don't have these and go through the model-writer."""
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(source), read_only=True)
+        names = set(wb.sheetnames)
+        wb.close()
+        return "2_Income" in names and "5_Recurring_Investments" in names
+    except Exception:
+        return False
 
 
 def _f(v: Any) -> float:
@@ -146,13 +163,21 @@ async def run_excel_plan(household_id: str) -> dict[str, Any]:
             "Upload the CFP input .xlsx first."
         )
 
+    plan = await get_plan(household_id)
+
+    # Route by format. The firm's native template injects cell-for-cell (exact).
+    # Any other layout goes through the LLM-normalised PlanState → master writer,
+    # which makes the engine format-agnostic. Fall back to direct injection only
+    # if we somehow have no plan to write from.
     # LibreOffice recalc is blocking + CPU/IO heavy → offload to a thread.
-    populated, outputs = await asyncio.to_thread(compute_from_upload, source)
+    if _is_firm_template(source) or plan is None:
+        populated, outputs = await asyncio.to_thread(compute_from_upload, source)
+    else:
+        populated, outputs = await asyncio.to_thread(compute_from_plan, plan)
 
     await save_computed_workbook(household_id, populated, outputs)
 
     # Mirror onto the plan's computed snapshot so the rest of the app sees it.
-    plan = await get_plan(household_id)
     if plan is not None:
         plan.computed.excel_outputs = outputs
         _apply_excel_to_computed(plan, outputs)

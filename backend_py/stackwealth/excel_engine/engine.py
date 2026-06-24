@@ -248,6 +248,32 @@ def compute_from_upload(
     master_wb = openpyxl.load_workbook(master_path, data_only=False)
     inject_inputs(master_wb, upload_values, upload_formulas)
 
+    return _recalc_and_extract(master_wb, timeout)
+
+
+def compute_from_plan(
+    plan, *, master_path: str | None = None, timeout: int = 180
+) -> tuple[bytes, dict[str, Any]]:
+    """Format-agnostic path: write a (LLM-extracted) PlanState into the master's
+    input cells, recalculate, and read the results back. Used for uploads that
+    aren't the firm's native template — the firm's formulas still do all the
+    math, only the inputs are sourced from the normalised model.
+
+    Returns (populated_recalculated_xlsx_bytes, structured_outputs).
+    """
+    from .model_writer import write_plan_to_master
+
+    master_path = master_path or MASTER_PATH
+    if not os.path.exists(master_path):
+        raise FileNotFoundError(
+            f"CFP master template missing at {master_path}. Run build_master.py."
+        )
+    master_wb = openpyxl.load_workbook(master_path, data_only=False)
+    write_plan_to_master(master_wb, plan)
+    return _recalc_and_extract(master_wb, timeout)
+
+
+def _recalc_and_extract(master_wb, timeout: int) -> tuple[bytes, dict[str, Any]]:
     work = tempfile.mkdtemp(prefix="cfp_engine_")
     try:
         injected = os.path.join(work, "injected.xlsx")
