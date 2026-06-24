@@ -99,6 +99,37 @@ def _apply_excel_to_computed(plan, outputs: dict[str, Any]) -> None:
         cfp = dict(plan.computed.cfp or {})
         cfp["summary"] = {**(cfp.get("summary") or {}), **summary}
         cfp["source"] = "excel_engine"
+        # Feed the canvas's "Excel" year-by-year table directly from the firm
+        # workbook so it shows the same numbers as the Computed Excel tab
+        # (field names match the frontend's YoyRow shape).
+        cfp["yoy_cashflow"] = [
+            {
+                "year": int(_f(r.get("year"))),
+                "age": _f(r.get("age")),
+                "income_employment": _f(r.get("income_employment")),
+                "income_business": _f(r.get("income_business")),
+                "income_rental": _f(r.get("income_rental")),
+                "income_other": _f(r.get("income_other")),
+                "total_income": _f(r.get("income_total")),
+                "expenses": _f(r.get("expenses")),
+                "loan_repayment": _f(r.get("loan_repayment")),
+                "total_outflow": _f(r.get("total_outflow")),
+                "surplus": _f(r.get("surplus")),
+                "fa_opening": _f(r.get("fa_opening")),
+                "net_annual_cash_savings": _f(r.get("net_annual_cash_savings")),
+                "major_withdrawals": _f(r.get("major_withdrawals")),
+                "investment_returns": _f(r.get("investment_returns")),
+                "lumpsum_deposit_withdrawal": _f(r.get("lumpsum")),
+                "financial_assets_closing": _f(r.get("financial_assets_close")),
+                "nfa_opening": _f(r.get("nfa_opening")),
+                "nfa_appreciation": _f(r.get("nfa_appreciation")),
+                "non_financial_assets_closing": _f(r.get("non_financial_close")),
+                "net_worth": _f(r.get("net_worth")),
+                "net_worth_crore": _f(r.get("net_worth_crore")),
+            }
+            for r in yoy
+            if int(_f(r.get("year"))) > 0
+        ]
         plan.computed.cfp = cfp
 
 

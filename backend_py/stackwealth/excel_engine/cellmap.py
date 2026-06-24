@@ -157,11 +157,17 @@ TABLE_OUTPUTS: dict[str, dict] = {
             "loan_repayment": "K",
             "total_outflow": "L",         # J + K
             "surplus": "M",               # I - L
+            "fa_opening": "P",            # Opening Balance of Financial Assets
+            "net_annual_cash_savings": "Q",
             "major_withdrawals": "R",     # goal outflows funded from assets
+            "investment_returns": "S",    # Income from investments
             "lumpsum": "T",
             "financial_assets_close": "V",   # Closing Balance of Financial Assets
+            "nfa_opening": "X",              # Opening Balance of Non-Financial Assets
+            "nfa_appreciation": "Z",         # Appreciation / (Depreciation)
             "non_financial_close": "AA",     # Closing Balance of Non-Financial Assets
             "net_worth": "AC",               # Total Networth
+            "net_worth_crore": "AD",         # Total Networth (INR Crore)
         },
     },
 }
