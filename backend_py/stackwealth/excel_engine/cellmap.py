@@ -19,10 +19,12 @@ never overwritten. Inputs only ever land in the master's non-formula cells.
 
 from __future__ import annotations
 
-# Tabs whose non-formula cells are CLIENT inputs. The engine mirrors these from
-# the upload into the master (writing blanks too, so a sparse upload clears the
-# master's sample data — no leakage).
-INJECT_TABS: list[str] = [
+# Pure INPUT tabs — their non-formula cells are CLIENT inputs. The clean master
+# clears these (removing the firm's sample client) and the engine mirrors them
+# from the upload, writing blanks too so a sparse upload can't leak sample data.
+# Real uploads always carry these tabs (with their labels), so mirroring never
+# wipes a header.
+INPUT_TABS: list[str] = [
     "1_Personal_Details",
     "2_Income",
     "3_Expenses ",          # trailing space is intentional — matches the tab name
@@ -38,12 +40,21 @@ INJECT_TABS: list[str] = [
     "9_Insurance_Details",
     "10_Financial_Goals",
     "Risk Questannaire",     # firm's spelling
-    # Compute tabs that also carry RM-manual judgment cells (lumpsum events,
-    # life-expectancy overrides, step-up rate). Their ONLY literals are those
-    # manual inputs — every other cell is a formula and is preserved.
+]
+
+# Compute tabs that ALSO carry RM-manual judgment cells (the YoY year anchor +
+# lumpsum events, retirement life-expectancy / one-time spend / step-up). These
+# are NEVER cleared in the master — their labels, formulas, anchors and the
+# firm's manual values are kept. Uploads of the standard input template don't
+# contain these tabs, so they're injected ONLY when an upload actually carries
+# them, and then only non-empty cells are written (never wiping the master).
+MANUAL_TABS: list[str] = [
     "YoY Cash Flow",
     "Retirement Plan",
 ]
+
+# Every tab the engine may write into (used for validation / iteration).
+INJECT_TABS: list[str] = INPUT_TABS + MANUAL_TABS
 
 # Tabs the engine must NEVER inject into — the master's values win. Listed for
 # documentation / validation; anything not in INJECT_TABS is left untouched.

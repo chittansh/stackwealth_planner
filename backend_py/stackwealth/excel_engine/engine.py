@@ -21,6 +21,7 @@ from typing import Any
 
 import openpyxl
 from openpyxl.utils import column_index_from_string
+from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
 
 from . import cellmap
 from .recalc import recalc_file
@@ -30,20 +31,40 @@ MASTER_PATH = os.path.join(_HERE, "master", "cfp_master.xlsx")
 
 
 def _is_formula(v: Any) -> bool:
+    """True for an ordinary '='-prefixed formula string — these are preserved
+    and recalculated.
+
+    Array / data-table formulas (openpyxl objects) are deliberately NOT treated
+    as formulas: openpyxl can't round-trip them cleanly and LibreOffice then
+    recalcs them to #NAME? errors. They're cleared in the master and filled from
+    the upload's cached value instead (correct for the standard input template,
+    where e.g. 'years to go' is already evaluated)."""
     return isinstance(v, str) and v.startswith("=")
 
 
+def _is_array_formula(v: Any) -> bool:
+    return isinstance(v, (ArrayFormula, DataTableFormula))
+
+
 def inject_inputs(master_wb, upload_wb_values, upload_wb_formulas) -> int:
-    """Mirror the upload's input cells into ``master_wb`` (mutated in place).
+    """Inject the upload's input cells into ``master_wb`` (mutated in place).
 
-    For every INJECT tab, walk the MASTER's cell range and, for each cell that is
-    NOT a formula in the master, set it to the upload's value at that coordinate
-    (None if absent — which clears the master's sample data). Formula cells are
-    left untouched so the firm's calculations always win. Iterating the master's
-    range (not the upload's) guarantees sample data can't leak through cells the
-    upload happens to omit.
+    Two policies, by tab type:
 
-    Returns the number of cells written.
+    • INPUT_TABS (1_Personal … 10_Goals, Risk) — MIRROR. Walk the master's range
+      and set every non-formula cell to the upload's value at that coordinate,
+      INCLUDING blanks, so a sparse upload clears the cleaned master's input
+      slots and can never leak sample data. Real uploads always carry these tabs
+      with their labels, so mirroring never wipes a header.
+
+    • MANUAL_TABS (YoY Cash Flow, Retirement Plan) — OVERLAY, non-destructive.
+      These hold the firm's structure, year anchor and RM-manual judgment cells
+      and are NOT cleared in the master. A standard input upload doesn't contain
+      them, so they're only touched when the upload actually carries the tab, and
+      then only NON-EMPTY upload cells are written — the master's values are
+      never wiped.
+
+    Formula cells in the master are never overwritten. Returns cells written.
     """
     written = 0
     for tab in cellmap.INJECT_TABS:
@@ -51,9 +72,10 @@ def inject_inputs(master_wb, upload_wb_values, upload_wb_formulas) -> int:
             continue
         ms = master_wb[tab]
         uv = upload_wb_values[tab] if tab in upload_wb_values.sheetnames else None
-        uf = upload_wb_formulas[tab] if tab in upload_wb_formulas.sheetnames else None
-        # Bound the sweep to the larger of the two used ranges so extra client
-        # rows (more stocks / goals) are picked up too.
+        is_manual = tab in cellmap.MANUAL_TABS
+        # Manual/compute tab absent from the upload → leave the master untouched.
+        if is_manual and uv is None:
+            continue
         max_row = ms.max_row
         max_col = ms.max_column
         if uv is not None:
@@ -65,13 +87,10 @@ def inject_inputs(master_wb, upload_wb_values, upload_wb_formulas) -> int:
                 if _is_formula(mcell.value):
                     continue  # never overwrite a firm formula
                 up_val = uv.cell(row=r, column=c).value if uv is not None else None
-                # If the upload cell is itself a formula, take its cached value.
-                up_is_formula = (
-                    uf is not None and _is_formula(uf.cell(row=r, column=c).value)
-                )
-                new_val = up_val if not up_is_formula else up_val  # data_only -> cached
-                if mcell.value != new_val:
-                    mcell.value = new_val
+                if is_manual and up_val is None:
+                    continue  # overlay: never wipe a master cell with a blank
+                if mcell.value != up_val:
+                    mcell.value = up_val
                     written += 1
     return written
 

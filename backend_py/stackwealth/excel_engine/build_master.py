@@ -17,6 +17,7 @@ import sys
 import openpyxl
 
 from . import cellmap
+from .engine import _is_formula
 
 _HERE = os.path.dirname(__file__)
 OUT_PATH = os.path.join(_HERE, "master", "cfp_master.xlsx")
@@ -36,7 +37,12 @@ def _looks_like_label(coord_row: int, coord_col: int, value) -> bool:
 def build(source: str) -> str:
     wb = openpyxl.load_workbook(source, data_only=False)
     cleared = 0
-    for tab in cellmap.INJECT_TABS:
+    # Only clear the PURE input tabs. The compute/manual tabs (YoY, Retirement)
+    # keep all their structure, anchors (e.g. the YoY year seed) and the firm's
+    # RM-manual values, because the standard input upload doesn't re-supply them
+    # — clearing them would compute the plan off zeros (broken year column,
+    # missing one-time retirement spend, etc.).
+    for tab in cellmap.INPUT_TABS:
         if tab not in wb.sheetnames:
             continue
         ws = wb[tab]
@@ -45,15 +51,15 @@ def build(source: str) -> str:
                 v = c.value
                 if v is None:
                     continue
-                if isinstance(v, str) and v.startswith("="):
-                    continue  # keep formulas
+                if _is_formula(v):
+                    continue  # keep formulas (incl. array / data-table formulas)
                 if _looks_like_label(c.row, c.column, v):
                     continue  # keep header / label text
                 c.value = None
                 cleared += 1
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
     wb.save(OUT_PATH)
-    print(f"Cleared {cleared} sample-data cells across {len(cellmap.INJECT_TABS)} input tabs")
+    print(f"Cleared {cleared} sample-data cells across {len(cellmap.INPUT_TABS)} input tabs")
     print(f"Master written -> {OUT_PATH}")
     return OUT_PATH
 

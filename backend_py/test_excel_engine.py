@@ -163,6 +163,31 @@ def test_master_isolation():
           f"after injection (master is read-only)")
 
 
+def test_cashflow_matches_format():
+    """Regression guard for the year-anchor / compute-tab clearing bug. The YoY
+    Cash Flow that the engine computes from the Test-profil INPUT upload must
+    tally cell-for-cell with the firm's fully-worked Format reference (same
+    client). Catches any reintroduction of clearing the YoY year seed or other
+    compute-tab structure."""
+    print("\n== 4. CASHFLOW FIDELITY: engine(Test-profil) YoY == Format YoY ==")
+    populated, _ = compute_from_upload(open(str(EXAMPLES / "Test profil_ng_180626.xlsx"), "rb").read())
+    eng = openpyxl.load_workbook(io.BytesIO(populated), data_only=True)["YoY Cash Flow"]
+    ref = openpyxl.load_workbook(str(EXAMPLES / FIRM_SOURCE), data_only=True)["YoY Cash Flow"]
+    total, mism = 0, []
+    for r in range(1, max(eng.max_row, ref.max_row) + 1):
+        for c in range(1, max(eng.max_column, ref.max_column) + 1):
+            a, b = eng.cell(r, c).value, ref.cell(r, c).value
+            if _num(a) or _num(b):
+                total += 1
+                if not _close(a if _num(a) else 0, b if _num(b) else 0, abs_=0.5):
+                    mism.append((eng.cell(r, c).coordinate, a, b))
+    print(f"  YoY numeric cells={total} mismatches={len(mism)}")
+    for m in mism[:8]:
+        print(f"     {m}")
+    assert not mism, "YoY cashflow does not tally with the Format reference"
+    print("  [OK ] cashflow tallies exactly with the Excel format file")
+
+
 def test_two_clients_differ():
     print("\n== 3. DISTINCTNESS: different clients -> different net worth ==")
     nws = {}
@@ -184,6 +209,7 @@ if __name__ == "__main__":
         sys.exit(2)
     test_roundtrip_fidelity()
     test_master_isolation()
+    test_cashflow_matches_format()
     test_two_clients_differ()
     test_persona_sanity()
     print("\nALL EXCEL-ENGINE GOLDEN TESTS PASSED")
