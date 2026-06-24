@@ -20,7 +20,7 @@ import tempfile
 from typing import Any
 
 import openpyxl
-from openpyxl.utils import column_index_from_string
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
 
 from . import cellmap
@@ -168,37 +168,62 @@ def _fmt_cell(value: Any, number_format: str | None) -> str:
     return str(value)
 
 
+def _formula_text(v: Any) -> str | None:
+    """Human-readable formula for a cell, or None for a plain value/label."""
+    if isinstance(v, ArrayFormula):
+        t = getattr(v, "text", None)
+        return ("{%s}" % t) if t else None
+    if isinstance(v, DataTableFormula):
+        return "{table}"
+    if isinstance(v, str) and v.startswith("="):
+        return v
+    return None
+
+
 def render_sheets(recalc_bytes: bytes, sheets: list[str] | None = None) -> list[dict[str, Any]]:
-    """Build a grid representation of the recalculated workbook for the in-app
-    viewer. Returns a list of {name, rows: [[str, ...], ...]} — one entry per
-    sheet, trimmed to its used range. No LibreOffice or desktop app involved:
-    the frontend renders these as an HTML grid."""
-    wb = openpyxl.load_workbook(io.BytesIO(recalc_bytes), data_only=True)
+    """Build an Excel-like grid representation of the recalculated workbook for
+    the in-app viewer. Each cell carries its displayed VALUE and, when it's a
+    formula, the FORMULA text — so the UI can show the calculation behind any
+    cell (like Excel's formula bar). No desktop spreadsheet involved.
+
+    Returns a list of:
+        {name, cols: ["A","B",...], rows: [{"n": <row#>, "cells": [{v, f, num}]}]}
+    """
+    wb_v = openpyxl.load_workbook(io.BytesIO(recalc_bytes), data_only=True)
+    wb_f = openpyxl.load_workbook(io.BytesIO(recalc_bytes), data_only=False)
     want = sheets or VIEW_SHEETS
     out: list[dict[str, Any]] = []
     for name in want:
-        if name not in wb.sheetnames:
+        if name not in wb_v.sheetnames:
             continue
-        ws = wb[name]
-        # Trim trailing empty rows/cols.
-        max_r, max_c = ws.max_row, ws.max_column
-        last_row = 0
-        last_col = 0
-        for r in range(1, max_r + 1):
-            for c in range(1, max_c + 1):
-                if ws.cell(r, c).value not in (None, ""):
+        wsv = wb_v[name]
+        wsf = wb_f[name]
+        # Trim to the used range (ignore trailing empties).
+        last_row = last_col = 0
+        for r in range(1, wsv.max_row + 1):
+            for c in range(1, wsv.max_column + 1):
+                if wsv.cell(r, c).value not in (None, ""):
                     last_row = max(last_row, r)
                     last_col = max(last_col, c)
         if last_row == 0:
             continue
+        cols = [get_column_letter(c) for c in range(1, last_col + 1)]
         rows = []
         for r in range(1, last_row + 1):
-            row = []
+            cells = []
             for c in range(1, last_col + 1):
-                cell = ws.cell(r, c)
-                row.append(_fmt_cell(cell.value, cell.number_format))
-            rows.append(row)
-        out.append({"name": name.strip(), "rows": rows})
+                vcell = wsv.cell(r, c)
+                disp = _fmt_cell(vcell.value, vcell.number_format)
+                cells.append(
+                    {
+                        "v": disp,
+                        "f": _formula_text(wsf.cell(r, c).value),
+                        "num": isinstance(vcell.value, (int, float))
+                        and not isinstance(vcell.value, bool),
+                    }
+                )
+            rows.append({"n": r, "cells": cells})
+        out.append({"name": name.strip(), "cols": cols, "rows": rows})
     return out
 
 

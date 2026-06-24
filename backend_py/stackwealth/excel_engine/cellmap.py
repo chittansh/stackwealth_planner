@@ -114,6 +114,7 @@ SCALAR_OUTPUTS: dict[str, tuple[str, str]] = {
     "total_assets": ("11. Inc Exp,Networth,Rec Invest", "I49"),
     "total_loans": ("11. Inc Exp,Networth,Rec Invest", "I51"),
     "net_worth": ("11. Inc Exp,Networth,Rec Invest", "I53"),
+    "monthly_investments_ongoing": ("11. Inc Exp,Networth,Rec Invest", "F13"),
 }
 
 # Output TABLES — variable-length result regions. Each entry describes a sheet,
@@ -151,11 +152,16 @@ TABLE_OUTPUTS: dict[str, dict] = {
             "income_business": "F",
             "income_rental": "G",
             "income_other": "H",
-            "expenses": "J",
+            "income_total": "I",          # Total Income
+            "expenses": "J",              # Regular Expenses (excl. loans/goals)
             "loan_repayment": "K",
+            "total_outflow": "L",         # J + K
+            "surplus": "M",               # I - L
+            "major_withdrawals": "R",     # goal outflows funded from assets
             "lumpsum": "T",
-            "financial_assets_close": "S",
-            "non_financial_close": "Z",
+            "financial_assets_close": "V",   # Closing Balance of Financial Assets
+            "non_financial_close": "AA",     # Closing Balance of Non-Financial Assets
+            "net_worth": "AC",               # Total Networth
         },
     },
 }
