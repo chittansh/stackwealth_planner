@@ -102,6 +102,43 @@ def _read_cell(ws, coord: str):
         return None
 
 
+def set_salary_horizon(master_wb, base_age: float | None, retire_age: float | None) -> None:
+    """Re-shape the YoY salary column (E) to stop at the client's actual
+    retirement age. The firm template hardcodes salary to grow for exactly 20
+    rows (Y0–Y20, the sample client's working life) and is blank after — so
+    without this every client's salary stops at ~age 56 regardless of their
+    retirement age. Salary grows through the retirement year, then blanks;
+    business / rental / other income columns are untouched."""
+    if base_age is None or retire_age is None:
+        return
+    ws = master_wb["YoY Cash Flow"]
+    FIRST, LAST = 6, 60
+    retire_row = FIRST + max(0, round(retire_age - base_age))
+    for r in range(FIRST + 1, LAST + 1):
+        if r <= retire_row:
+            cur = ws[f"E{r}"].value
+            if not (isinstance(cur, str) and cur.startswith("=")):
+                ws[f"E{r}"] = f"=E{r - 1}*(1+E$5)"
+        else:
+            ws[f"E{r}"] = None
+
+
+def _age_retire_from_master(master_wb) -> tuple[float | None, float | None]:
+    """Read base age (from DOB C5 + current-date D3) and retirement age (H5)
+    out of an injected master's 1_Personal_Details tab."""
+    from datetime import datetime
+
+    ws = master_wb["1_Personal_Details"]
+    dob = ws["C5"].value
+    today = ws["D3"].value
+    h5 = ws["H5"].value
+    base_age = None
+    if isinstance(dob, datetime) and isinstance(today, datetime):
+        base_age = (today - dob).days / 365.25
+    retire = float(h5) if isinstance(h5, (int, float)) and not isinstance(h5, bool) else None
+    return base_age, retire
+
+
 def extract_outputs(recalc_wb) -> dict[str, Any]:
     """Pull the headline scalars and result tables out of a recalculated book."""
     out: dict[str, Any] = {"scalars": {}, "tables": {}}
@@ -247,6 +284,11 @@ def compute_from_upload(
     # Fresh master copy (formulas intact).
     master_wb = openpyxl.load_workbook(master_path, data_only=False)
     inject_inputs(master_wb, upload_values, upload_formulas)
+
+    # Make salary respect the client's actual retirement age (a no-op when it
+    # equals the template's frozen ~20-year horizon, e.g. retire-at-56).
+    base_age, retire = _age_retire_from_master(master_wb)
+    set_salary_horizon(master_wb, base_age, retire)
 
     return _recalc_and_extract(master_wb, timeout)
 
