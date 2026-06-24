@@ -222,16 +222,34 @@ def write_plan_to_master(master_wb, plan) -> int:
             setc(ws, "E5", _num(getattr(health, "cover_amount", None)))
             setc(ws, "F5", _num(getattr(health, "annual_premium", None)))
 
-    # ── 10_Financial_Goals (A name, C target year, E today cost, F nature) ─
+    # ── 10_Financial_Goals (A name, C target year, E today's cost, F nature) ─
+    # The master's E column is "Today's Cost" and the workbook inflates it to a
+    # future value. So when the model only carries a FUTURE target (e.g. a file
+    # whose goal column is "Future Value Needed"), discount it back to today's
+    # money first — otherwise the workbook double-counts inflation.
     ws = master_wb["10_Financial_Goals"]
     NATURE = {"one_time": "One Time", "annual": "Annual", "recurring": "Annual"}
     for i, g in enumerate(plan.financial_goals or []):
         r = 3 + i
         if r > 17:
             break
+        year = _num(getattr(g, "target_year", None))
+        today = _num(getattr(g, "today_cost", None))
+        target = _num(getattr(g, "target_amount", None))
+        if today is None and target is not None:
+            in_today = getattr(g, "is_target_in_today_money", True)
+            if in_today is False and year and year > BASE_YEAR:
+                infl = _num(getattr(g, "inflation_assumed", None)) or 0.07
+                today = target / ((1 + infl) ** (int(year) - BASE_YEAR))
+            else:
+                today = target
         setc(ws, f"A{r}", getattr(g, "goal_name", None))
-        setc(ws, f"C{r}", _num(getattr(g, "target_year", None)))
-        setc(ws, f"E{r}", _num(getattr(g, "today_cost", None)) or _num(getattr(g, "target_amount", None)))
+        setc(ws, f"C{r}", year)
+        # Years-to-go (D) is an array formula in the firm template that we clear;
+        # write it explicitly so the workbook inflates today's cost → future value.
+        if year and year >= BASE_YEAR:
+            setc(ws, f"D{r}", int(year) - BASE_YEAR)
+        setc(ws, f"E{r}", round(today) if today is not None else None)
         freq = (getattr(g, "contribution_frequency", None) or "").lower()
         setc(ws, f"F{r}", NATURE.get(freq, "One Time"))
 

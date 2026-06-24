@@ -93,15 +93,18 @@ def _apply_excel_to_computed(plan, outputs: dict[str, Any]) -> None:
     if rows:
         plan.computed.cash_flow_table = rows
         plan.computed.net_worth_series = series
-        plan.computed.horizon_years = rows[-1].year - rows[0].year
-        # Headline = PEAK projected net worth (the accumulation high-water mark,
-        # typically around retirement). The firm's YoY model intentionally draws
-        # the corpus down through life expectancy, so the final year can be
-        # negative when there's a shortfall — the peak is the meaningful "you'll
-        # have" figure, and the net-worth chart still shows the full trajectory.
-        peak = max(rows, key=lambda r: r.total_net_worth)
-        plan.computed.headline_amount_at_horizon = peak.total_net_worth
-        plan.computed.horizon_years = max(1, peak.year - rows[0].year)
+        # Headline = projected net worth AT RETIREMENT — the milestone the plan
+        # is built around, well-defined for every client. (The peak can land in
+        # year 1 for a plan wrecked by unaffordable near-term goals, which made a
+        # misleading "in 1 year" headline.) The net-worth chart still shows the
+        # full trajectory including any post-retirement drawdown / shortfall.
+        retire_age = _f((outputs.get("scalars") or {}).get("retire_age"))
+        retire_row = None
+        if retire_age:
+            retire_row = next((r for r in rows if r.age >= retire_age), None)
+        target = retire_row or max(rows, key=lambda r: r.total_net_worth)
+        plan.computed.headline_amount_at_horizon = target.total_net_worth
+        plan.computed.horizon_years = max(1, target.year - rows[0].year)
 
     # Monthly cash-flow summary card reads computed.cfp.summary — feed it the
     # firm workbook's year-0 monthly figures so it tallies with the Excel.
