@@ -165,27 +165,55 @@ def test_master_isolation():
 
 def test_cashflow_matches_format():
     """Regression guard for the year-anchor / compute-tab clearing bug. The YoY
-    Cash Flow that the engine computes from the Test-profil INPUT upload must
-    tally cell-for-cell with the firm's fully-worked Format reference (same
-    client). Catches any reintroduction of clearing the YoY year seed or other
-    compute-tab structure."""
-    print("\n== 4. CASHFLOW FIDELITY: engine(Test-profil) YoY == Format YoY ==")
+    INCOME / EXPENSE / FINANCIAL-ASSET columns (A..V) must still tally cell-for
+    -cell with the firm's Format reference. The NON-FINANCIAL-asset + net-worth
+    columns (X..AC) now intentionally DIVERGE because house/property goals are
+    converted FA->NFA (the firm treats them as consumption) — those are covered
+    by test_house_to_nfa instead."""
+    print("\n== 4. CASHFLOW FIDELITY: engine(Test-profil) YoY cols A..V == Format ==")
     populated, _ = compute_from_upload(open(str(EXAMPLES / "Test profil_ng_180626.xlsx"), "rb").read())
     eng = openpyxl.load_workbook(io.BytesIO(populated), data_only=True)["YoY Cash Flow"]
     ref = openpyxl.load_workbook(str(EXAMPLES / FIRM_SOURCE), data_only=True)["YoY Cash Flow"]
+    LAST_CASHFLOW_COL = 22  # column V (Closing FA); NFA section starts at X (24)
     total, mism = 0, []
     for r in range(1, max(eng.max_row, ref.max_row) + 1):
-        for c in range(1, max(eng.max_column, ref.max_column) + 1):
+        for c in range(1, LAST_CASHFLOW_COL + 1):
             a, b = eng.cell(r, c).value, ref.cell(r, c).value
             if _num(a) or _num(b):
                 total += 1
                 if not _close(a if _num(a) else 0, b if _num(b) else 0, abs_=0.5):
                     mism.append((eng.cell(r, c).coordinate, a, b))
-    print(f"  YoY numeric cells={total} mismatches={len(mism)}")
+    print(f"  YoY cashflow cells (A..V)={total} mismatches={len(mism)}")
     for m in mism[:8]:
         print(f"     {m}")
-    assert not mism, "YoY cashflow does not tally with the Format reference"
-    print("  [OK ] cashflow tallies exactly with the Excel format file")
+    assert not mism, "YoY cashflow (income/expense/FA) does not tally with the Format reference"
+    print("  [OK ] cashflow (income/expense/FA) tallies exactly with the Excel format file")
+
+
+def test_house_to_nfa():
+    """House/property purchase goals must convert FA -> NFA, preserving net worth
+    (vs the firm's model, which consumes them). Test-profil has a House Purchase
+    in 2037; the engine's net worth that year must exceed the firm reference's by
+    ~the house value, and the NFA closing balance must jump."""
+    print("\n== 5. HOUSE -> NFA: house purchase preserves net worth ==")
+    populated, _ = compute_from_upload(open(str(EXAMPLES / "Test profil_ng_180626.xlsx"), "rb").read())
+    eng = openpyxl.load_workbook(io.BytesIO(populated), data_only=True)["YoY Cash Flow"]
+    ref = openpyxl.load_workbook(str(EXAMPLES / FIRM_SOURCE), data_only=True)["YoY Cash Flow"]
+    # find the 2037 row (House Purchase year), col Y=25 addition, AC=29 net worth
+    def row_for_year(ws, year):
+        for r in range(6, 60):
+            if ws.cell(r, 3).value == year:
+                return r
+        return None
+    r = row_for_year(eng, 2037)
+    assert r, "2037 row not found"
+    y_add = eng.cell(r, 25).value or 0
+    nw_eng = eng.cell(r, 29).value or 0
+    nw_ref = ref.cell(r, 29).value or 0
+    print(f"  2037: NFA addition(Y)={y_add:,.0f} | net worth engine={nw_eng:,.0f} ref={nw_ref:,.0f} (Δ={nw_eng - nw_ref:,.0f})")
+    assert y_add > 1_000_000, "house not added to NFA in 2037"
+    assert nw_eng > nw_ref + 1_000_000, "house→NFA did not lift net worth vs firm reference"
+    print("  [OK ] house purchase converted FA→NFA; net worth preserved")
 
 
 def test_two_clients_differ():
@@ -210,6 +238,7 @@ if __name__ == "__main__":
     test_roundtrip_fidelity()
     test_master_isolation()
     test_cashflow_matches_format()
+    test_house_to_nfa()
     test_two_clients_differ()
     test_persona_sanity()
     print("\nALL EXCEL-ENGINE GOLDEN TESTS PASSED")

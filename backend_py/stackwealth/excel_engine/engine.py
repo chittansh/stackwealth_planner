@@ -123,6 +123,47 @@ def set_salary_horizon(master_wb, base_age: float | None, retire_age: float | No
             ws[f"E{r}"] = None
 
 
+_ASSET_GOAL_WORDS = ("house", "property", "flat", "real estate", "plot", "apartment", "villa")
+
+
+def apply_house_to_nfa(master_wb) -> None:
+    """Treat house / property purchase goals as ASSET ACQUISITIONS: convert the
+    financial-asset outflow into a non-financial asset instead of consuming it.
+
+    The firm template (and its own output) drains FA via the goal withdrawal and
+    adds nothing to NFA, so a house purchase destroys net worth. Here we write
+    the goal's future value into the YoY 'Addition of Fixed Assets' column (Y) in
+    the purchase year — equal to what the same year withdraws from FA — so the
+    purchase becomes NFA and net worth is preserved, then appreciates.
+
+    Reads goal names from 10_Financial_Goals (populated by either injection or
+    the model-writer), so it works for both paths. Only rows 3-9 are considered
+    (the firm's SUMIF withdrawal range), keeping FA-out and NFA-in balanced."""
+    g = master_wb["10_Financial_Goals"]
+    yoy = master_wb["YoY Cash Flow"]
+    base = yoy["C6"].value
+    if not isinstance(base, (int, float)) or isinstance(base, bool):
+        return
+    base = int(base)
+    additions: dict[int, list[str]] = {}
+    for gr in range(3, 10):
+        name = g[f"A{gr}"].value
+        year = g[f"C{gr}"].value
+        if not (isinstance(name, str) and isinstance(year, (int, float))):
+            continue
+        if not any(w in name.lower() for w in _ASSET_GOAL_WORDS):
+            continue
+        yrow = 6 + (int(year) - base)
+        if 6 <= yrow <= 60:
+            additions.setdefault(yrow, []).append(f"'10_Financial_Goals'!H{gr}")
+    for yrow, refs in additions.items():
+        existing = yoy[f"Y{yrow}"].value
+        parts = list(refs)
+        if isinstance(existing, (int, float)) and not isinstance(existing, bool) and existing:
+            parts.insert(0, repr(existing))  # preserve a manual disposal/addition
+        yoy[f"Y{yrow}"] = "=" + "+".join(parts)
+
+
 def _age_retire_from_master(master_wb) -> tuple[float | None, float | None]:
     """Read base age (from DOB C5 + current-date D3) and retirement age (H5)
     out of an injected master's 1_Personal_Details tab."""
@@ -289,6 +330,8 @@ def compute_from_upload(
     # equals the template's frozen ~20-year horizon, e.g. retire-at-56).
     base_age, retire = _age_retire_from_master(master_wb)
     set_salary_horizon(master_wb, base_age, retire)
+    # House / property purchases become non-financial assets (FA -> NFA).
+    apply_house_to_nfa(master_wb)
 
     return _recalc_and_extract(master_wb, timeout)
 
@@ -312,6 +355,7 @@ def compute_from_plan(
         )
     master_wb = openpyxl.load_workbook(master_path, data_only=False)
     write_plan_to_master(master_wb, plan)
+    apply_house_to_nfa(master_wb)
     return _recalc_and_extract(master_wb, timeout)
 
 

@@ -236,12 +236,6 @@ def write_plan_to_master(master_wb, plan) -> int:
     # money first — otherwise the workbook double-counts inflation.
     ws = master_wb["10_Financial_Goals"]
     NATURE = {"one_time": "One Time", "annual": "Annual", "recurring": "Annual"}
-    # Goal kinds (or names) that ACQUIRE a non-financial asset rather than consume
-    # cash — buying these converts financial assets into NFA, so net worth is
-    # preserved instead of destroyed.
-    ASSET_KINDS = {"house_purchase"}
-    ASSET_WORDS = ("house", "property", "flat", "real estate", "plot", "apartment")
-    nfa_additions: dict[int, list[str]] = {}
     for i, g in enumerate(plan.financial_goals or []):
         r = 3 + i
         if r > 17:
@@ -266,22 +260,7 @@ def write_plan_to_master(master_wb, plan) -> int:
         freq = (getattr(g, "contribution_frequency", None) or "").lower()
         setc(ws, f"F{r}", NATURE.get(freq, "One Time"))
 
-        kind = (getattr(g, "kind", "") or "")
-        name = (getattr(g, "goal_name", "") or "").lower()
-        is_asset = kind in ASSET_KINDS or any(w in name for w in ASSET_WORDS)
-        # Only goals the YoY actually withdraws (rows 3-9, the firm's SUMIF range)
-        # should be offset into NFA, so FA-out and NFA-in stay balanced.
-        if is_asset and r <= 9 and year and year >= BASE_YEAR:
-            yrow = 6 + (int(year) - BASE_YEAR)
-            if 6 <= yrow <= 60:
-                nfa_additions.setdefault(yrow, []).append(f"'10_Financial_Goals'!H{r}")
-
-    # Add asset-purchase goals to the YoY NFA "Addition of Fixed Assets" column
-    # (Y) in their purchase year — value = the goal's future value (= the amount
-    # the same year withdraws from financial assets), so net worth is preserved.
-    if nfa_additions:
-        yoy = master_wb["YoY Cash Flow"]
-        for yrow, refs in nfa_additions.items():
-            yoy[f"Y{yrow}"] = "=" + "+".join(refs)
-
+    # House/property purchases → NFA is applied centrally by
+    # engine.apply_house_to_nfa after this writer runs (shared with the
+    # firm-template path), reading the goal names just written above.
     return written
