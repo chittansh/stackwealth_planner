@@ -49,6 +49,29 @@ def _set(ws, coord: str, value: Any) -> None:
     ws[coord] = value
 
 
+def _set_salary_horizon(ws_yoy, base_age: float | None, retire_age: float | None) -> None:
+    """Make the YoY salary column (E) stop at the client's actual retirement age.
+
+    The firm template hardcodes salary to grow for exactly 20 rows (Y0–Y20, the
+    sample client's working life) and is blank after — so every client's salary
+    otherwise stops at ~age 56 regardless of their retirement age. We re-shape
+    column E to the real horizon: a growth formula through the retirement year,
+    blank afterwards (business income / other columns are untouched)."""
+    if base_age is None or retire_age is None:
+        return
+    FIRST, LAST = 6, 60  # YoY data rows
+    retire_row = FIRST + max(0, round(retire_age - base_age))
+    for r in range(FIRST + 1, LAST + 1):
+        if r <= retire_row:
+            # working year → ensure the salary growth formula is present
+            cur = ws_yoy[f"E{r}"].value
+            if not (isinstance(cur, str) and cur.startswith("=")):
+                ws_yoy[f"E{r}"] = f"=E{r - 1}*(1+E$5)"
+        else:
+            # retired → no salary
+            ws_yoy[f"E{r}"] = None
+
+
 def write_plan_to_master(master_wb, plan) -> int:
     """Populate ``master_wb`` (a fresh master copy) from ``plan``. Returns the
     number of cells written. Formula cells are left untouched."""
@@ -111,6 +134,11 @@ def write_plan_to_master(master_wb, plan) -> int:
         setc(ws, "G8", _num(inc.spouse_rental_income))
         setc(ws, "F9", _num(inc.client_other_income))
         setc(ws, "G9", _num(inc.spouse_other_income))
+
+    # Salary in the YoY must stop at the client's actual retirement age, not the
+    # template's frozen 20-year horizon.
+    base_age = (BASE_DATE - dob).days / 365.25 if dob else None
+    _set_salary_horizon(master_wb["YoY Cash Flow"], base_age, retire)
 
     # ── 3_Expenses (value in col H, total I; map model fields to firm rows) ──
     exp = plan.monthly_expenses
