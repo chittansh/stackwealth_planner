@@ -189,6 +189,37 @@ async def run_excel_plan(household_id: str) -> dict[str, Any]:
     return outputs
 
 
+async def recompute_excel(household_id: str) -> Optional[dict[str, Any]]:
+    """Recompute the plan through the Excel engine from the CURRENT PlanState.
+
+    Used after an RM edits the plan in chat (add a loan, move a goal, change the
+    retirement age, …). Unlike run_excel_plan, this always goes through
+    compute_from_plan — the edited plan is the source of truth, the original
+    uploaded workbook is stale. Non-fatal: a recalc hiccup leaves the existing
+    computed numbers in place rather than failing the chat turn.
+    """
+    plan = await get_plan(household_id)
+    if plan is None:
+        return None
+    # Nothing to compute from an empty plan (e.g. a household with no income).
+    if not (plan.income_details or plan.financial_goals or plan.assumptions.persons):
+        return None
+    try:
+        populated, outputs = await asyncio.to_thread(compute_from_plan, plan)
+    except Exception as e:
+        print(f"[excel] chat recompute failed for {household_id}: {e}")
+        return None
+
+    await save_computed_workbook(household_id, populated, outputs)
+    # Reload in case the plan changed between get_plan and now, then mirror.
+    plan = await get_plan(household_id)
+    if plan is not None:
+        plan.computed.excel_outputs = outputs
+        _apply_excel_to_computed(plan, outputs)
+        await save_plan(plan)
+    return outputs
+
+
 async def get_or_compute_outputs(household_id: str) -> Optional[dict[str, Any]]:
     """Return cached engine outputs, computing them if a source workbook exists
     but no computed result is cached yet. Returns None if nothing to compute."""

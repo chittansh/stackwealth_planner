@@ -22,9 +22,15 @@ from ..db import (
     load_chat_history,
     save_chat_message,
 )
+from ..skills.excel_plan import recompute_excel
 from ..validator import collect_numbers, validate_assistant_text
 
 router = APIRouter()
+
+# Tools that edit the plan — after a turn that calls any of these, we recompute
+# the plan through the firm's Excel engine so the canvas reflects the RM's change
+# with the firm's own calculations (not the in-platform Python approximation).
+_MUTATION_TOOLS = {"plan_set", "plan_add", "plan_remove", "plan_assumption"}
 
 
 # The frontend appends an agent-only annotation to the user's chat text when
@@ -208,13 +214,17 @@ async def chat(request: Request) -> EventSourceResponse:
         try:
             final_text = ""
             added_paths: set[str] = set()  # plan_add target paths seen this turn
+            plan_mutated = False  # any plan-editing tool called this turn
             async for ev in run_planner_turn(
                 household_id=household_id, chat_id=chat_id, message=message
             ):
                 kind = ev["event"]
                 if kind == "tool_call":
                     collect_numbers(ev["data"].get("args"), seen_numbers)
-                    if ev["data"].get("name") == "plan_add":
+                    name = ev["data"].get("name")
+                    if name in _MUTATION_TOOLS:
+                        plan_mutated = True
+                    if name == "plan_add":
                         path = (ev["data"].get("args") or {}).get("path")
                         if isinstance(path, str):
                             added_paths.add(path)
@@ -265,6 +275,23 @@ async def chat(request: Request) -> EventSourceResponse:
                     role="assistant",
                     text=validated,
                 )
+
+            # If the RM edited the plan this turn, recompute through the firm's
+            # Excel engine so the canvas shows the change with the firm's own
+            # calculations. Emit a final tool_result so the frontend refreshes
+            # the canvas off the recomputed (Excel) numbers.
+            if plan_mutated:
+                yield {"event": "status", "data": "recomputing"}
+                try:
+                    await recompute_excel(household_id)
+                except Exception as e:
+                    print(f"[chat] excel recompute failed: {e}")
+                yield {
+                    "event": "tool_result",
+                    "data": json.dumps(
+                        {"id": "excel_recompute", "name": "excel_recompute", "result": {"ok": True}}
+                    ),
+                }
             yield {"event": "done", "data": "ok"}
         except Exception as err:
             yield {"event": "error", "data": json.dumps({"message": str(err)})}

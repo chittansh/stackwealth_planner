@@ -131,7 +131,8 @@ def write_plan_to_master(master_wb, plan) -> int:
         setc(ws, "H10", _num(exp.utilities))
         setc(ws, "H12", _num(exp.travel_or_lifestyle))
         setc(ws, "H13", (_num(exp.medical) or 0) + (_num(exp.insurance_premium) or 0) or None)
-        setc(ws, "H11", _num(exp.other_emis))
+        # NB: EMIs are NOT regular expenses — they go to the "Loan Repayments"
+        # rows (23-25) below so they flow into the YoY loan-repayment column.
 
     # ── 5_Recurring_Investments (col C monthly amount, rows 2-7) ────────────
     mi = plan.monthly_investments
@@ -205,6 +206,8 @@ def write_plan_to_master(master_wb, plan) -> int:
 
     # ── 8_Loans_Liabilities (C outstanding, D EMI, E rate) ─────────────────
     li = plan.loans_liabilities
+    home_emi = 0.0
+    other_structured_emi = 0.0
     if li:
         ws = master_wb["8_Loans_Liabilities"]
         rows = {"home_loan": 2, "car_loan": 3, "personal_loan": 4, "credit_card_dues": 5}
@@ -215,6 +218,28 @@ def write_plan_to_master(master_wb, plan) -> int:
             setc(ws, f"C{r}", _num(getattr(blk, "outstanding_amount", None)))
             setc(ws, f"D{r}", _num(getattr(blk, "emi", None)))
             setc(ws, f"E{r}", _num(getattr(blk, "interest_rate", None)))
+            emi = _num(getattr(blk, "emi", None)) or 0.0
+            if name == "home_loan":
+                home_emi += emi
+            else:
+                other_structured_emi += emi
+
+    # Loan EMIs feed the YoY 'Loan Repayments' column via 3_Expenses rows 23-25
+    # (K = SUM(3_Expenses!I23:I25)*12). 8_Loans only drives the debt/insurance
+    # views — it does NOT reach the cashflow — so EMIs must land here too.
+    # Structured loans (loans_liabilities) are the source of truth; the generic
+    # monthly_expenses.other_emis bucket is only used when there are no
+    # structured loans, otherwise a chat that adds a loan AND bumps other_emis
+    # would double-count.
+    structured = home_emi + other_structured_emi
+    other_emi = other_structured_emi
+    if structured <= 0 and plan.monthly_expenses:
+        other_emi = _num(getattr(plan.monthly_expenses, "other_emis", None)) or 0.0
+    exp_ws = master_wb["3_Expenses "]
+    if home_emi:
+        setc(exp_ws, "H23", round(home_emi))     # EMI - Home Loan
+    if other_emi:
+        setc(exp_ws, "H24", round(other_emi))    # EMI - Other Loans
 
     # ── 9_Insurance_Details (E cover, F premium) ───────────────────────────
     ins = plan.insurance_details
