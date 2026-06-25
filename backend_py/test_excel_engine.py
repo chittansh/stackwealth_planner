@@ -216,6 +216,37 @@ def test_house_to_nfa():
     print("  [OK ] house purchase converted FA→NFA; net worth preserved")
 
 
+def test_house_financing():
+    """A house funded by a home loan: the loan disburses as cash in the purchase
+    year (column T) so only the down-payment leaves FA, and the outstanding loan
+    balance is subtracted from net worth (column AF; AC formula adjusted)."""
+    print("\n== 6. HOUSE FINANCING: loan disbursement + net-worth net of debt ==")
+    from types import SimpleNamespace
+    from stackwealth.excel_engine.model_writer import apply_loan_financing
+    from stackwealth.excel_engine.engine import MASTER_PATH
+
+    plan = SimpleNamespace(
+        financial_goals=[SimpleNamespace(goal_name="House Purchase", kind="house_purchase", target_year=2030)],
+        loans_liabilities=SimpleNamespace(
+            home_loan=SimpleNamespace(outstanding_amount=8_000_000, emi=70_000, interest_rate=8.5),
+            car_loan=None, personal_loan=None, credit_card_dues=None,
+        ),
+        monthly_expenses=None,
+    )
+    wb = openpyxl.load_workbook(MASTER_PATH, data_only=False)
+    yoy = wb["YoY Cash Flow"]
+    yrow = 6 + (2030 - 2026)  # row 10
+    apply_loan_financing(wb, plan)
+    t = yoy[f"T{yrow}"].value
+    af = yoy[f"AF{yrow}"].value
+    ac = yoy[f"AC{yrow}"].value
+    print(f"  purchase row {yrow}: T(disbursement)={t} | AF(loan bal)={af} | AC(net worth)={ac}")
+    assert isinstance(t, str) and "8000000" in t, "loan not disbursed into T in purchase year"
+    assert isinstance(af, (int, float)) and af > 7_000_000, "loan balance not booked"
+    assert isinstance(ac, str) and "AF" in ac, "net worth not adjusted for the loan"
+    print("  [OK ] house financed by loan: down-payment-only FA hit, loan netted off net worth")
+
+
 def test_two_clients_differ():
     print("\n== 3. DISTINCTNESS: different clients -> different net worth ==")
     nws = {}
@@ -239,6 +270,7 @@ if __name__ == "__main__":
     test_master_isolation()
     test_cashflow_matches_format()
     test_house_to_nfa()
+    test_house_financing()
     test_two_clients_differ()
     test_persona_sanity()
     print("\nALL EXCEL-ENGINE GOLDEN TESTS PASSED")

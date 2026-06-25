@@ -289,3 +289,101 @@ def write_plan_to_master(master_wb, plan) -> int:
     # engine.apply_house_to_nfa after this writer runs (shared with the
     # firm-template path), reading the goal names just written above.
     return written
+
+
+_HOUSE_WORDS = ("house", "property", "flat", "real estate", "plot", "apartment", "villa")
+_LOAN_FIELDS = ("home_loan", "car_loan", "personal_loan", "credit_card_dues")
+
+
+def _loan_balance_series(specs, base_year, first_row, last_row):
+    """Total outstanding loan balance per YoY row, amortised annually.
+    specs: list of (outstanding, rate_pct, emi_monthly, start_year)."""
+    out: dict[int, float] = {}
+    for yi in range(0, last_row - first_row + 1):
+        row, year = first_row + yi, base_year + yi
+        total = 0.0
+        for outstanding, rate, emi, start in specs:
+            if year < start:
+                continue
+            bal = outstanding
+            for _ in range(start, year):           # amortise from disbursement to this year
+                interest = bal * (rate / 100.0)
+                bal = max(0.0, bal - max(0.0, emi * 12 - interest))
+                if bal <= 0:
+                    break
+            total += bal
+        if total > 0:
+            out[row] = round(total)
+    return out
+
+
+def apply_loan_financing(master_wb, plan) -> None:
+    """Model loans as liabilities and (optionally) FINANCE a house purchase.
+
+    1. Net worth net of debt: subtract each year's outstanding loan balance from
+       the YoY net worth (the firm template never subtracts liabilities). Loan
+       balances amortise toward zero as EMIs are paid.
+    2. House funded by a loan: when there's a home loan AND a future house goal,
+       treat the loan as financing that purchase — the loan disburses as cash in
+       the purchase year (column T), so only the DOWN PAYMENT leaves financial
+       assets; the house is still booked as NFA (apply_house_to_nfa) and the EMI
+       services the debt. Net worth at purchase is therefore unchanged (cash →
+       home equity), then grows as the loan amortises and the house appreciates.
+    """
+    li = plan.loans_liabilities
+    if li is None:
+        return
+    yoy = master_wb["YoY Cash Flow"]
+    c6 = yoy["C6"].value
+    if not isinstance(c6, (int, float)):
+        return
+    base_year = int(c6)
+    FIRST, LAST = 6, 56
+
+    # Find the financed house goal (a future house/property purchase).
+    house_goal = None
+    for g in plan.financial_goals or []:
+        nm = (getattr(g, "goal_name", "") or "").lower()
+        yr = _num(getattr(g, "target_year", None))
+        is_house = getattr(g, "kind", "") == "house_purchase" or any(w in nm for w in _HOUSE_WORDS)
+        if is_house and yr and yr > base_year:
+            house_goal = g
+            break
+
+    home = getattr(li, "home_loan", None)
+    home_out = _num(getattr(home, "outstanding_amount", None)) if home else None
+    fin_year = int(house_goal.target_year) if (house_goal and home_out) else None
+
+    # Build amortisation specs (home loan starts at the purchase year when it
+    # finances the house; all other loans are existing → start now).
+    specs = []
+    for name in _LOAN_FIELDS:
+        blk = getattr(li, name, None)
+        out = _num(getattr(blk, "outstanding_amount", None)) if blk else None
+        if not out:
+            continue
+        rate = _num(getattr(blk, "interest_rate", None)) or 9.0
+        emi = _num(getattr(blk, "emi", None)) or 0.0
+        start = fin_year if (name == "home_loan" and fin_year) else base_year
+        specs.append((out, rate, emi, start))
+    if not specs:
+        return
+
+    # 2. Disbursement: add the financing loan as cash-in (T) in the purchase year.
+    if fin_year and home_out:
+        yrow = FIRST + (fin_year - base_year)
+        if FIRST <= yrow <= LAST:
+            cur = yoy[f"T{yrow}"].value
+            expr = f"={round(home_out)}"
+            if isinstance(cur, (int, float)) and not isinstance(cur, bool) and cur:
+                expr += f"+{round(cur)}"
+            yoy[f"T{yrow}"] = expr
+
+    # 1. Net worth net of debt — write the loan balance (col AF) and subtract it.
+    yoy["AF4"] = "Outstanding Loans"
+    balances = _loan_balance_series(specs, base_year, FIRST, LAST)
+    for row, bal in balances.items():
+        yoy[f"AF{row}"] = bal
+        ac = yoy[f"AC{row}"].value
+        if isinstance(ac, str) and ac.startswith("="):
+            yoy[f"AC{row}"] = f"=SUM(V{row},AA{row})-AF{row}"
