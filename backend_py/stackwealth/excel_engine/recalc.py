@@ -44,6 +44,41 @@ class RecalcError(RuntimeError):
     pass
 
 
+# LibreOffice keeps a workbook's *cached* formula results when it opens an xlsx,
+# unless its "recalc on load" mode is set to Always. The default is Prompt (2),
+# which in headless mode means NO recalc — so openpyxl-written inputs never
+# propagate and every formula cell reads back as its stale cached value (blank /
+# 0 in our cleared master). We force Always-recalc by pre-seeding the isolated
+# user profile with this registry override before launching soffice.
+#   OOXMLRecalcMode → .xlsx,  ODFRecalcMode → .ods.  0 = Always, 1 = Never, 2 = Prompt.
+_RECALC_ALWAYS_XCU = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<oor:items xmlns:oor="http://openoffice.org/2001/registry" '
+    'xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+    'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n'
+    ' <item oor:path="/org.openoffice.Office.Calc/Formula/Load">'
+    '<prop oor:name="OOXMLRecalcMode" oor:op="fuse"><value>0</value></prop></item>\n'
+    ' <item oor:path="/org.openoffice.Office.Calc/Formula/Load">'
+    '<prop oor:name="ODFRecalcMode" oor:op="fuse"><value>0</value></prop></item>\n'
+    '</oor:items>\n'
+)
+
+
+def _seed_recalc_profile(profile_root: str) -> str:
+    """Seed an isolated LibreOffice user-installation at ``profile_root`` with the
+    Always-recalc override and return a ``file://`` URL for -env:UserInstallation.
+
+    Using an explicit UserInstallation (rather than relying on $HOME) makes the
+    profile path deterministic across OSes — the Linux default lives under
+    ~/.config/libreoffice/4 but macOS uses ~/Library/Application Support, and we
+    need the override to land wherever soffice will actually read it."""
+    user_dir = os.path.join(profile_root, "user")
+    os.makedirs(user_dir, exist_ok=True)
+    with open(os.path.join(user_dir, "registrymodifications.xcu"), "w", encoding="utf-8") as fh:
+        fh.write(_RECALC_ALWAYS_XCU)
+    return f"file://{profile_root}"
+
+
 def recalc_file(in_path: str, timeout: int = 180) -> str:
     """Recalculate ``in_path`` in place-ish and return the path to a recalculated
     .xlsx (written into a fresh temp dir; caller owns cleanup of the dir).
@@ -56,8 +91,10 @@ def recalc_file(in_path: str, timeout: int = 180) -> str:
     staged = os.path.join(work, "book.xlsx")
     shutil.copy(in_path, staged)
     env = dict(os.environ, HOME=work)
+    profile_url = _seed_recalc_profile(os.path.join(work, "lo_profile"))
     cmd = [
         soffice,
+        f"-env:UserInstallation={profile_url}",
         "--headless",
         "--calc",
         "--convert-to",
