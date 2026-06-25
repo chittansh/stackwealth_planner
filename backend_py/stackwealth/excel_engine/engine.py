@@ -389,10 +389,23 @@ def compute_from_plan(
     return _recalc_and_extract(master_wb, timeout)
 
 
+def _mark_for_recalc(wb) -> None:
+    """Force LibreOffice to recalculate every formula when it opens the workbook.
+
+    openpyxl stamps `calcId="124519"` (a known calc-engine version) which makes
+    LibreOffice/Excel trust the cached results and skip recalc. Since openpyxl
+    can't compute formula caches, those cached values are stale/blank — so without
+    this the recalc no-ops and every computed cell reads back as 0. calcId=0 +
+    fullCalcOnLoad forces a full recalc on load. (Verified on LibreOffice 25.2.)"""
+    wb.calculation.calcId = 0
+    wb.calculation.fullCalcOnLoad = True
+
+
 def _recalc_and_extract(master_wb, timeout: int) -> tuple[bytes, dict[str, Any]]:
     work = tempfile.mkdtemp(prefix="cfp_engine_")
     try:
         injected = os.path.join(work, "injected.xlsx")
+        _mark_for_recalc(master_wb)
         master_wb.save(injected)
 
         recalced_path = recalc_file(injected, timeout=timeout)

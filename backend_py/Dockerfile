@@ -23,11 +23,15 @@ RUN uv pip install --system .
 # atk, cups, drm, dbus, gbm, pango, cairo, alsa, etc.) on debian-slim.
 RUN playwright install --with-deps chromium
 
-# LibreOffice (Calc only) — the CFP Excel engine recalculates the firm's
-# workbook headlessly via `soffice`. `--no-install-recommends` keeps the layer
-# lean (no fonts/UI extras); libreoffice-calc pulls the core + Calc.
+# LibreOffice (Calc only) + Python-UNO bridge — the CFP Excel engine drives a
+# headless LibreOffice via UNO to recalculate the firm's formulas. NOTE: plain
+# `soffice --convert-to xlsx` does NOT recalc on Linux LibreOffice 25.2 (it
+# trusts cached values), so we MUST use UNO (officehelper.bootstrap +
+# calculateAll). python3-uno provides uno.py/unohelper.py; officehelper.py ships
+# under /usr/lib/libreoffice/program. Both dirs are added to PYTHONPATH by the
+# recalc module at runtime.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libreoffice-calc \
+    && apt-get install -y --no-install-recommends libreoffice-calc python3-uno \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy source (includes stackwealth/excel_engine/master/cfp_master.xlsx).
