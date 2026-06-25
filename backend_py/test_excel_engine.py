@@ -261,7 +261,7 @@ def test_dynamic_allocation():
         equity_stocks=[SimpleNamespace(current_value=1_000_000)],
         mutual_funds=[SimpleNamespace(current_value=500_000)],
         fixed_income=[SimpleNamespace(current_value=300_000, instrument="FD")],
-        gold=[], liquid_capital=None, monthly_investments=None, assumptions=None,
+        gold=[], real_estate=[], liquid_capital=None, monthly_investments=None, assumptions=None,
         financial_goals=[
             SimpleNamespace(goal_name="Car", kind="other", target_year=2032,
                             today_cost=2_000_000, priority="essential",
@@ -273,13 +273,19 @@ def test_dynamic_allocation():
     g = wb["10_Financial_Goals"]
     assert g["M3"].value == "=839368", "expected the sample hardcode in the master"
     apply_dynamic_allocation(wb, plan)
-    k3 = g["K3"].value
-    m3 = g["M3"].value
-    print(f"  K3(allocated)={k3} | M3(sample hardcode)={m3!r}")
-    # 1.0M equity + 0.5M MF + 0.3M FD = 1.8M investable, all waterfalled to the goal
-    assert k3 == 1_800_000, f"expected 1.8M client assets allocated, got {k3}"
-    assert m3 is None, "sample hardcode =839368 not cleared"
-    print("  [OK ] goal funded from the client's real 1.8M assets; sample hardcode cleared")
+    # value cells: K,M,O,Q,S,U,W (cols 11,13,15,17,19,21,23)
+    vals = {}
+    for col in (11, 13, 15, 17, 19, 21, 23):
+        v = g.cell(row=3, column=col).value
+        if isinstance(v, (int, float)):
+            vals[g.cell(row=3, column=col - 1).value] = v
+    total = sum(vals.values())
+    print(f"  allocation breakdown: {vals} (total={total})")
+    # 0.3M FD + 1.0M equity + 0.5M MF = 1.8M of the client's REAL assets
+    assert total == 1_800_000, f"expected 1.8M client assets allocated, got {total}"
+    assert "Fixed Deposits" in vals and "Equity Stocks" in vals, "firm liquidation order not applied"
+    assert g["M3"].value != "=839368", "sample hardcode =839368 not cleared"
+    print("  [OK ] goal funded from the client's real assets in firm priority order; hardcode gone")
 
 
 def test_two_clients_differ():

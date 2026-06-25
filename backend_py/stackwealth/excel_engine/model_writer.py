@@ -119,6 +119,27 @@ def write_plan_to_master(master_wb, plan) -> int:
     base_age = (BASE_DATE - dob).days / 365.25 if dob else None
     set_salary_horizon(master_wb, base_age, retire)
 
+    # Clear the SAMPLE client's manual cashflow events leaking from the master's
+    # YoY — lumpsum deposits / property sales (col T) and fixed-asset additions /
+    # disposals (col Y) — then write the CLIENT's own lumpsum events into T.
+    # (house->NFA writes Y, and the loan disbursement adds to T, after this.)
+    yws = master_wb["YoY Cash Flow"]
+    for r in range(6, 57):
+        for col in (20, 25):  # T (lumpsum), Y (fixed-asset addition/disposal)
+            cell = yws.cell(row=r, column=col)
+            if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
+                cell.value = None
+    events = (plan.assumptions.lumpsum_events if plan.assumptions else None) or []
+    for ev in events:
+        yr = _num(getattr(ev, "year", None))
+        amt = _num(getattr(ev, "amount", None))
+        if yr and amt and yr >= BASE_YEAR:
+            row = 6 + (int(yr) - BASE_YEAR)
+            if 6 <= row <= 56:
+                cur = yws.cell(row=row, column=20).value
+                base_amt = cur if isinstance(cur, (int, float)) and not isinstance(cur, bool) else 0
+                yws.cell(row=row, column=20).value = round(base_amt + amt)
+
     # ── 3_Expenses (value in col H, total I; map model fields to firm rows) ──
     exp = plan.monthly_expenses
     if exp:
@@ -302,50 +323,81 @@ def _holdings_value(rows) -> float:
     return sum((_num(getattr(r, "current_value", None)) or 0.0) for r in (rows or []))
 
 
-def apply_dynamic_allocation(master_wb, plan) -> None:
-    """Categorise the client's ACTUAL assets and allocate them to goals, instead
-    of inheriting the firm template's hardcoded sample allocation.
+def _asset_buckets(plan) -> list[list]:
+    """Client's assets categorised in the firm's liquidation-priority order
+    (mutable [label, amount] entries). Weak/Neutral stock tags aren't in the
+    model, so trading stocks ≈ 'weak' (sold first) and long-term ≈ 'neutral'."""
+    fi = plan.fixed_income or []
+    fi_by: dict[str, float] = {}
+    for r in fi:
+        fi_by[getattr(r, "instrument", None) or "Other"] = fi_by.get(
+            getattr(r, "instrument", None) or "Other", 0.0
+        ) + (_num(getattr(r, "current_value", None)) or 0.0)
+    stocks = plan.equity_stocks or []
+    trading = sum(
+        _num(getattr(s, "current_value", None)) or 0.0
+        for s in stocks
+        if (getattr(s, "long_term_or_trading", None) or "") == "trading"
+    )
+    longterm = sum(
+        _num(getattr(s, "current_value", None)) or 0.0
+        for s in stocks
+        if (getattr(s, "long_term_or_trading", None) or "") != "trading"
+    )
+    liquid = 0.0
+    lc = plan.liquid_capital
+    if lc:
+        liquid = (_num(getattr(lc, "idle_cash_for_investment", None)) or 0.0) + (
+            _num(getattr(lc, "fd_breakable_for_investment", None)) or 0.0
+        )
+    re_sale = sum(
+        _num(getattr(r, "current_value", None)) or 0.0
+        for r in (plan.real_estate or [])
+        if getattr(r, "earmarked_for_sale", False)
+    )
+    ordered = [
+        ["Weak / Trading Stocks", trading],
+        ["Liquid (idle / breakable)", liquid],
+        ["Fixed Deposits", fi_by.get("FD", 0.0) + fi_by.get("RD", 0.0)],
+        ["Bonds", fi_by.get("Bonds", 0.0)],
+        ["Equity Stocks", longterm],
+        ["Mutual Funds", _holdings_value(plan.mutual_funds)],
+        ["NSC", fi_by.get("NSC", 0.0) + fi_by.get("PostOffice", 0.0)],
+        ["PPF", fi_by.get("PPF", 0.0)],
+        ["Real Estate (for sale)", re_sale],
+        ["Gold", _holdings_value(plan.gold)],
+        ["EPF", fi_by.get("EPF", 0.0)],
+        ["NPS / Pension", fi_by.get("NPS", 0.0)],
+    ]
+    return [b for b in ordered if b[1] > 0]
 
-    The master's goal rows reference specific sample asset cells (e.g. Car ←
-    '4B_Equity_Stocks'!E26 + =839368) — the sample RM's manual asset→goal
-    assignment. Those are cleared, and each goal is funded from a real,
-    priority-ordered waterfall of the client's investable assets:
-      • growth pool  = equity + mutual funds          (long-horizon goals first)
-      • stable pool  = non-retirement FD/bonds + liquid + gold  (near-term first)
-      • retirement-earmarked FD (PPF/EPF/NPS) is reserved, not spent on goals
-      • real estate is illiquid → excluded
-    Near-term goals (≤5y) draw from the stable pool first; long-term goals draw
-    from growth first. The workbook then computes each goal's gap and SIP off the
-    real allocation.
+
+def apply_dynamic_allocation(master_wb, plan) -> None:
+    """Categorise the client's ACTUAL assets and allocate them to goals per the
+    firm's documented rule, instead of inheriting the template's hardcoded sample
+    allocation (e.g. Car ← '4B'!E26 + =839368).
+
+    Firm rule (from the planning sheet):
+      1. Sort financial needs chronologically (nearest goal first).
+      2. Fund each goal by liquidating assets in this priority order: weak stocks,
+         liquid, FDs, bonds, neutral stocks, MFs, NSC, PPF, real estate for sale,
+         gold, EPF, pension — keeping the asset's exit just before the need.
+      3. Never allocate more than the goal's need; the gap is covered by SIP
+         (the workbook's PMT). Retirement is funded on its own tab → excluded.
     """
     g = master_wb["10_Financial_Goals"]
-    base = _num(getattr(plan, "_base_year", None))
     yoy = master_wb["YoY Cash Flow"]
     c6 = yoy["C6"].value
     base_year = int(c6) if isinstance(c6, (int, float)) else BASE_YEAR
 
-    # 1. Clear the sample's asset→goal assignment (columns J..W) on every goal row.
-    #    Keep X.. (the goal math: total/gap/FV/SIP formulas).
+    # Clear the sample's asset→goal assignment (cols J..W); keep the goal math (X..).
     for r in range(3, 18):
         for col in range(10, 24):  # J(10) .. W(23)
             g.cell(row=r, column=col).value = None
 
-    # 2. Build the client's investable pools from real holdings.
-    growth = _holdings_value(plan.equity_stocks) + _holdings_value(plan.mutual_funds)
-    fi = plan.fixed_income or []
-    stable = sum(
-        (_num(getattr(r, "current_value", None)) or 0.0)
-        for r in fi
-        if (getattr(r, "instrument", None) or "") not in _RETIREMENT_INSTRUMENTS
-    )
-    stable += _holdings_value(plan.gold)
-    lc = plan.liquid_capital
-    if lc:
-        stable += (_num(getattr(lc, "idle_cash_for_investment", None)) or 0.0)
-        stable += (_num(getattr(lc, "fd_breakable_for_investment", None)) or 0.0)
+    buckets = _asset_buckets(plan)
 
-    # 3. Order goals: priority, then nearest target year. Retirement is funded
-    #    separately (its own tab), so exclude it from the goal waterfall.
+    # Goals chronological (nearest first); essential before desirable as a tiebreak.
     indexed = []
     for i, goal in enumerate(plan.financial_goals or []):
         row = 3 + i
@@ -355,7 +407,6 @@ def apply_dynamic_allocation(master_wb, plan) -> None:
             continue
         yr = _num(getattr(goal, "target_year", None)) or (base_year + 99)
         pr = _PRIORITY_RANK.get((getattr(goal, "priority", None) or "important"), 1)
-        # today's cost is the funding need in today's money
         need = _num(getattr(goal, "today_cost", None))
         if need is None:
             tgt = _num(getattr(goal, "target_amount", None)) or 0.0
@@ -364,31 +415,26 @@ def apply_dynamic_allocation(master_wb, plan) -> None:
                 need = tgt / ((1 + infl) ** (int(yr) - base_year))
             else:
                 need = tgt
-        indexed.append((pr, int(yr), row, need or 0.0))
+        indexed.append((int(yr), pr, row, need or 0.0))
     indexed.sort(key=lambda x: (x[0], x[1]))
 
-    # 4. Waterfall the pools into each goal's "Current Value" (col K).
-    for pr, yr, row, need in indexed:
-        if need <= 0:
-            continue
-        near_term = (yr - base_year) <= 5
-        first, second = ("stable", "growth") if near_term else ("growth", "stable")
-        alloc = 0.0
-        for which in (first, second):
-            if alloc >= need:
+    # Liquidate assets into each goal up to its need; record the per-asset
+    # breakdown into the goal's asset slots (J/K, L/M, … up to 7 pairs).
+    for _yr, _pr, row, need in indexed:
+        remaining = need
+        slot = 0
+        for bucket in buckets:
+            if remaining <= 0 or slot >= 7:
                 break
-            avail = stable if which == "stable" else growth
-            take = min(avail, need - alloc)
-            if take <= 0:
+            if bucket[1] <= 0:
                 continue
-            alloc += take
-            if which == "stable":
-                stable -= take
-            else:
-                growth -= take
-        if alloc > 0:
-            g[f"J{row}"] = "Allocated investable assets"
-            g[f"K{row}"] = round(alloc)
+            take = min(bucket[1], remaining)
+            bucket[1] -= take
+            remaining -= take
+            name_col = 10 + slot * 2  # J, L, N, P, R, T, V
+            g.cell(row=row, column=name_col).value = bucket[0]
+            g.cell(row=row, column=name_col + 1).value = round(take)
+            slot += 1
 
     # 5. Retirement step-up: the firm template hardcodes the starting annual
     #    contribution (E54 = 1,200,000) and rate (F51 = 10%). Drive them from the
