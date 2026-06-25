@@ -293,6 +293,121 @@ def write_plan_to_master(master_wb, plan) -> int:
 
 _HOUSE_WORDS = ("house", "property", "flat", "real estate", "plot", "apartment", "villa")
 _LOAN_FIELDS = ("home_loan", "car_loan", "personal_loan", "credit_card_dues")
+_PRIORITY_RANK = {"essential": 0, "important": 1, "aspirational": 2}
+# Fixed-income instruments earmarked for retirement — reserved from goal funding.
+_RETIREMENT_INSTRUMENTS = {"PPF", "EPF", "NPS", "SukanyaSamriddhi"}
+
+
+def _holdings_value(rows) -> float:
+    return sum((_num(getattr(r, "current_value", None)) or 0.0) for r in (rows or []))
+
+
+def apply_dynamic_allocation(master_wb, plan) -> None:
+    """Categorise the client's ACTUAL assets and allocate them to goals, instead
+    of inheriting the firm template's hardcoded sample allocation.
+
+    The master's goal rows reference specific sample asset cells (e.g. Car ←
+    '4B_Equity_Stocks'!E26 + =839368) — the sample RM's manual asset→goal
+    assignment. Those are cleared, and each goal is funded from a real,
+    priority-ordered waterfall of the client's investable assets:
+      • growth pool  = equity + mutual funds          (long-horizon goals first)
+      • stable pool  = non-retirement FD/bonds + liquid + gold  (near-term first)
+      • retirement-earmarked FD (PPF/EPF/NPS) is reserved, not spent on goals
+      • real estate is illiquid → excluded
+    Near-term goals (≤5y) draw from the stable pool first; long-term goals draw
+    from growth first. The workbook then computes each goal's gap and SIP off the
+    real allocation.
+    """
+    g = master_wb["10_Financial_Goals"]
+    base = _num(getattr(plan, "_base_year", None))
+    yoy = master_wb["YoY Cash Flow"]
+    c6 = yoy["C6"].value
+    base_year = int(c6) if isinstance(c6, (int, float)) else BASE_YEAR
+
+    # 1. Clear the sample's asset→goal assignment (columns J..W) on every goal row.
+    #    Keep X.. (the goal math: total/gap/FV/SIP formulas).
+    for r in range(3, 18):
+        for col in range(10, 24):  # J(10) .. W(23)
+            g.cell(row=r, column=col).value = None
+
+    # 2. Build the client's investable pools from real holdings.
+    growth = _holdings_value(plan.equity_stocks) + _holdings_value(plan.mutual_funds)
+    fi = plan.fixed_income or []
+    stable = sum(
+        (_num(getattr(r, "current_value", None)) or 0.0)
+        for r in fi
+        if (getattr(r, "instrument", None) or "") not in _RETIREMENT_INSTRUMENTS
+    )
+    stable += _holdings_value(plan.gold)
+    lc = plan.liquid_capital
+    if lc:
+        stable += (_num(getattr(lc, "idle_cash_for_investment", None)) or 0.0)
+        stable += (_num(getattr(lc, "fd_breakable_for_investment", None)) or 0.0)
+
+    # 3. Order goals: priority, then nearest target year. Retirement is funded
+    #    separately (its own tab), so exclude it from the goal waterfall.
+    indexed = []
+    for i, goal in enumerate(plan.financial_goals or []):
+        row = 3 + i
+        if row > 17:
+            break
+        if getattr(goal, "kind", "") == "retirement":
+            continue
+        yr = _num(getattr(goal, "target_year", None)) or (base_year + 99)
+        pr = _PRIORITY_RANK.get((getattr(goal, "priority", None) or "important"), 1)
+        # today's cost is the funding need in today's money
+        need = _num(getattr(goal, "today_cost", None))
+        if need is None:
+            tgt = _num(getattr(goal, "target_amount", None)) or 0.0
+            if getattr(goal, "is_target_in_today_money", True) is False and yr > base_year:
+                infl = _num(getattr(goal, "inflation_assumed", None)) or 0.07
+                need = tgt / ((1 + infl) ** (int(yr) - base_year))
+            else:
+                need = tgt
+        indexed.append((pr, int(yr), row, need or 0.0))
+    indexed.sort(key=lambda x: (x[0], x[1]))
+
+    # 4. Waterfall the pools into each goal's "Current Value" (col K).
+    for pr, yr, row, need in indexed:
+        if need <= 0:
+            continue
+        near_term = (yr - base_year) <= 5
+        first, second = ("stable", "growth") if near_term else ("growth", "stable")
+        alloc = 0.0
+        for which in (first, second):
+            if alloc >= need:
+                break
+            avail = stable if which == "stable" else growth
+            take = min(avail, need - alloc)
+            if take <= 0:
+                continue
+            alloc += take
+            if which == "stable":
+                stable -= take
+            else:
+                growth -= take
+        if alloc > 0:
+            g[f"J{row}"] = "Allocated investable assets"
+            g[f"K{row}"] = round(alloc)
+
+    # 5. Retirement step-up: the firm template hardcodes the starting annual
+    #    contribution (E54 = 1,200,000) and rate (F51 = 10%). Drive them from the
+    #    client's ACTUAL ongoing retirement investments (NPS + PPF + VPF, …) and
+    #    their plan's step-up assumption.
+    rp = master_wb["Retirement Plan"]
+    mi = plan.monthly_investments
+    ret_monthly = 0.0
+    if mi:
+        ret_monthly = (
+            (_num(getattr(mi, "nps", None)) or 0.0)
+            + (_num(getattr(mi, "ppf", None)) or 0.0)
+            + (_num(getattr(mi, "other", None)) or 0.0)  # VPF / other retirement recurring
+        )
+    rp["E54"] = round(ret_monthly * 12) if ret_monthly > 0 else None
+    step_up = _num(getattr(plan.assumptions, "sip_annual_step_up_pct", None)) if plan.assumptions else None
+    if step_up is not None:
+        # accept either a fraction (0.1) or a percent (10)
+        rp["F51"] = step_up / 100.0 if step_up > 1 else step_up
 
 
 def _loan_balance_series(specs, base_year, first_row, last_row):

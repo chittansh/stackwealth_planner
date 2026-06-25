@@ -247,6 +247,41 @@ def test_house_financing():
     print("  [OK ] house financed by loan: down-payment-only FA hit, loan netted off net worth")
 
 
+def test_dynamic_allocation():
+    """Goal asset allocation must come from the CLIENT's real holdings, not the
+    firm template's hardcoded sample (e.g. =839368, or refs to specific sample
+    asset cells). After allocation, the goal's 'Current Value' (K) equals the
+    investable assets waterfalled to it, and the sample hardcode M3 is gone."""
+    print("\n== 7. DYNAMIC ALLOCATION: goals funded from the client's real assets ==")
+    from types import SimpleNamespace
+    from stackwealth.excel_engine.model_writer import apply_dynamic_allocation
+    from stackwealth.excel_engine.engine import MASTER_PATH
+
+    plan = SimpleNamespace(
+        equity_stocks=[SimpleNamespace(current_value=1_000_000)],
+        mutual_funds=[SimpleNamespace(current_value=500_000)],
+        fixed_income=[SimpleNamespace(current_value=300_000, instrument="FD")],
+        gold=[], liquid_capital=None, monthly_investments=None, assumptions=None,
+        financial_goals=[
+            SimpleNamespace(goal_name="Car", kind="other", target_year=2032,
+                            today_cost=2_000_000, priority="essential",
+                            target_amount=None, is_target_in_today_money=True,
+                            inflation_assumed=None),
+        ],
+    )
+    wb = openpyxl.load_workbook(MASTER_PATH, data_only=False)
+    g = wb["10_Financial_Goals"]
+    assert g["M3"].value == "=839368", "expected the sample hardcode in the master"
+    apply_dynamic_allocation(wb, plan)
+    k3 = g["K3"].value
+    m3 = g["M3"].value
+    print(f"  K3(allocated)={k3} | M3(sample hardcode)={m3!r}")
+    # 1.0M equity + 0.5M MF + 0.3M FD = 1.8M investable, all waterfalled to the goal
+    assert k3 == 1_800_000, f"expected 1.8M client assets allocated, got {k3}"
+    assert m3 is None, "sample hardcode =839368 not cleared"
+    print("  [OK ] goal funded from the client's real 1.8M assets; sample hardcode cleared")
+
+
 def test_two_clients_differ():
     print("\n== 3. DISTINCTNESS: different clients -> different net worth ==")
     nws = {}
@@ -271,6 +306,7 @@ if __name__ == "__main__":
     test_cashflow_matches_format()
     test_house_to_nfa()
     test_house_financing()
+    test_dynamic_allocation()
     test_two_clients_differ()
     test_persona_sanity()
     print("\nALL EXCEL-ENGINE GOLDEN TESTS PASSED")

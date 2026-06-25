@@ -346,7 +346,11 @@ def compute_from_plan(
 
     Returns (populated_recalculated_xlsx_bytes, structured_outputs).
     """
-    from .model_writer import apply_loan_financing, write_plan_to_master
+    from .model_writer import (
+        apply_dynamic_allocation,
+        apply_loan_financing,
+        write_plan_to_master,
+    )
 
     master_path = master_path or MASTER_PATH
     if not os.path.exists(master_path):
@@ -355,6 +359,7 @@ def compute_from_plan(
         )
     master_wb = openpyxl.load_workbook(master_path, data_only=False)
     write_plan_to_master(master_wb, plan)
+    apply_dynamic_allocation(master_wb, plan)  # categorise real assets → goals
     apply_house_to_nfa(master_wb)
     apply_loan_financing(master_wb, plan)
     return _recalc_and_extract(master_wb, timeout)
