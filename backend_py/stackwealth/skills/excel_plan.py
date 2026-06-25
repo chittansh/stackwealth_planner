@@ -168,13 +168,16 @@ async def run_excel_plan(household_id: str) -> dict[str, Any]:
 
     plan = await get_plan(household_id)
 
-    # Route by format. The firm's native template injects cell-for-cell (exact).
-    # Any other layout goes through the LLM-normalised PlanState → master writer,
-    # which makes the engine format-agnostic. Fall back to direct injection only
-    # if we somehow have no plan to write from.
+    # Route by format. The firm's native template injects cell-for-cell (exact
+    # inputs); any other layout writes the LLM-normalised PlanState into the
+    # master. BOTH then get the same dynamic layer (no hardcoded sample values):
+    # the firm-template path is passed the plan so it also clears the sample's
+    # leaking lumpsums/remarks and allocates the client's real assets to goals.
     # LibreOffice recalc is blocking + CPU/IO heavy → offload to a thread.
-    if _is_firm_template(source) or plan is None:
+    if plan is None:
         populated, outputs = await asyncio.to_thread(compute_from_upload, source)
+    elif _is_firm_template(source):
+        populated, outputs = await asyncio.to_thread(compute_from_upload, source, plan=plan)
     else:
         populated, outputs = await asyncio.to_thread(compute_from_plan, plan)
 

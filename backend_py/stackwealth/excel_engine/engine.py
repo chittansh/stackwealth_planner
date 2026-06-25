@@ -306,9 +306,19 @@ def render_sheets(recalc_bytes: bytes, sheets: list[str] | None = None) -> list[
 
 
 def compute_from_upload(
-    upload_bytes: bytes, *, master_path: str | None = None, timeout: int = 180
+    upload_bytes: bytes,
+    *,
+    plan=None,
+    master_path: str | None = None,
+    timeout: int = 180,
 ) -> tuple[bytes, dict[str, Any]]:
     """Run the full pipeline on an uploaded firm-template workbook.
+
+    When ``plan`` is given, the same DYNAMIC layer as the model-writer path is
+    applied after injection (clear the sample's leaking lumpsums/remarks, allocate
+    the client's real assets to goals per the firm rule, house->NFA, loan
+    financing) — so firm-template uploads carry no hardcoded sample values either.
+    Without a plan (e.g. the golden tests) it's pure injection.
 
     Returns (populated_recalculated_xlsx_bytes, structured_outputs).
     """
@@ -330,8 +340,20 @@ def compute_from_upload(
     # equals the template's frozen ~20-year horizon, e.g. retire-at-56).
     base_age, retire = _age_retire_from_master(master_wb)
     set_salary_horizon(master_wb, base_age, retire)
-    # House / property purchases become non-financial assets (FA -> NFA).
-    apply_house_to_nfa(master_wb)
+
+    if plan is not None:
+        from .model_writer import (
+            apply_dynamic_allocation,
+            apply_loan_financing,
+            apply_lumpsum_events,
+        )
+
+        apply_lumpsum_events(master_wb, plan)       # clear sample lumpsums/remarks
+        apply_dynamic_allocation(master_wb, plan)   # categorise real assets → goals
+        apply_house_to_nfa(master_wb)               # house -> NFA
+        apply_loan_financing(master_wb, plan)       # down-payment + debt-netted NW
+    else:
+        apply_house_to_nfa(master_wb)
 
     return _recalc_and_extract(master_wb, timeout)
 
@@ -349,6 +371,7 @@ def compute_from_plan(
     from .model_writer import (
         apply_dynamic_allocation,
         apply_loan_financing,
+        apply_lumpsum_events,
         write_plan_to_master,
     )
 
@@ -359,6 +382,7 @@ def compute_from_plan(
         )
     master_wb = openpyxl.load_workbook(master_path, data_only=False)
     write_plan_to_master(master_wb, plan)
+    apply_lumpsum_events(master_wb, plan)      # clear sample lumpsums/remarks
     apply_dynamic_allocation(master_wb, plan)  # categorise real assets → goals
     apply_house_to_nfa(master_wb)
     apply_loan_financing(master_wb, plan)

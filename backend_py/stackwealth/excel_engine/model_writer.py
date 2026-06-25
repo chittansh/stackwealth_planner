@@ -119,27 +119,6 @@ def write_plan_to_master(master_wb, plan) -> int:
     base_age = (BASE_DATE - dob).days / 365.25 if dob else None
     set_salary_horizon(master_wb, base_age, retire)
 
-    # Clear the SAMPLE client's manual cashflow events leaking from the master's
-    # YoY — lumpsum deposits / property sales (col T) and fixed-asset additions /
-    # disposals (col Y) — then write the CLIENT's own lumpsum events into T.
-    # (house->NFA writes Y, and the loan disbursement adds to T, after this.)
-    yws = master_wb["YoY Cash Flow"]
-    for r in range(6, 57):
-        for col in (20, 25):  # T (lumpsum), Y (fixed-asset addition/disposal)
-            cell = yws.cell(row=r, column=col)
-            if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
-                cell.value = None
-    events = (plan.assumptions.lumpsum_events if plan.assumptions else None) or []
-    for ev in events:
-        yr = _num(getattr(ev, "year", None))
-        amt = _num(getattr(ev, "amount", None))
-        if yr and amt and yr >= BASE_YEAR:
-            row = 6 + (int(yr) - BASE_YEAR)
-            if 6 <= row <= 56:
-                cur = yws.cell(row=row, column=20).value
-                base_amt = cur if isinstance(cur, (int, float)) and not isinstance(cur, bool) else 0
-                yws.cell(row=row, column=20).value = round(base_amt + amt)
-
     # ── 3_Expenses (value in col H, total I; map model fields to firm rows) ──
     exp = plan.monthly_expenses
     if exp:
@@ -321,6 +300,35 @@ _RETIREMENT_INSTRUMENTS = {"PPF", "EPF", "NPS", "SukanyaSamriddhi"}
 
 def _holdings_value(rows) -> float:
     return sum((_num(getattr(r, "current_value", None)) or 0.0) for r in (rows or []))
+
+
+def apply_lumpsum_events(master_wb, plan) -> None:
+    """Clear the SAMPLE client's manual cashflow events leaking from the master's
+    YoY and write the CLIENT's own. The firm sample hardcodes lumpsum deposits /
+    property sales (col T), their remarks (col U — e.g. 'Knee Surgery planned…',
+    'Reverse Mortgage', a 15Cr 'Balance sale') and fixed-asset disposals (col Y),
+    none of which belong to other clients. Cleared here; house->NFA re-writes Y
+    and the loan disbursement adds to T afterwards."""
+    yws = master_wb["YoY Cash Flow"]
+    for r in range(6, 57):
+        for col in (20, 21, 25):  # T (lumpsum), U (remarks), Y (asset addition/disposal)
+            cell = yws.cell(row=r, column=col)
+            v = cell.value
+            if v is not None and not (isinstance(v, str) and v.startswith("=")):
+                cell.value = None
+    events = (plan.assumptions.lumpsum_events if (plan and plan.assumptions) else None) or []
+    for ev in events:
+        yr = _num(getattr(ev, "year", None))
+        amt = _num(getattr(ev, "amount", None))
+        if yr and amt and yr >= BASE_YEAR:
+            row = 6 + (int(yr) - BASE_YEAR)
+            if 6 <= row <= 56:
+                cur = yws.cell(row=row, column=20).value
+                base_amt = cur if isinstance(cur, (int, float)) and not isinstance(cur, bool) else 0
+                yws.cell(row=row, column=20).value = round(base_amt + amt)
+                label = getattr(ev, "label", None)
+                if label:
+                    yws.cell(row=row, column=21).value = str(label)
 
 
 def _asset_buckets(plan) -> list[list]:
