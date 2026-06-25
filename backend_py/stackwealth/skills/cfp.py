@@ -1605,13 +1605,14 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     # investing today, NOT a higher planned figure. The required start SIP that
     # closes the gap (solved inside compute_retirement_stepup, independent of
     # the seed) is surfaced separately as the "to fully fund" recommendation.
-    # If they have no ongoing retirement SIP, fall back to the level gross SIP
-    # so the table still illustrates a reach-the-goal trajectory.
+    # Seed = the client's ACTUAL ongoing retirement contribution (0 if they
+    # invest nothing toward retirement). We do NOT fall back to the level gross
+    # SIP — that over-funds when stepped up and shows a phantom "surplus" for a
+    # client who isn't actually saving for retirement. With a 0 seed the table
+    # honestly shows the current trajectory (full shortfall); the SIP needed to
+    # close the gap is surfaced separately as required_first_year_contribution.
     stepup_rate = plan.assumptions.sip_annual_step_up_pct or 0.10
-    first_year_annual = (
-        ongoing_retirement_sip * 12 if ongoing_retirement_sip > 0
-        else retirement.get("gross_monthly_sip", 0) * 12
-    )
+    first_year_annual = ongoing_retirement_sip * 12
     stepup_corpus_allocated = retirement_earmarked_today
     # RM-manual Retirement Plan §3 inputs win when uploaded: the step-up rate
     # (F51) and the corpus already allocated to retirement (H53). The first-year

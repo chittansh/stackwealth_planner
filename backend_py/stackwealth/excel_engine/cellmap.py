@@ -96,7 +96,9 @@ SCALAR_OUTPUTS: dict[str, tuple[str, str]] = {
     "annual_expense_at_retire": ("Retirement Plan", "E20"),
     "retirement_corpus_recurring": ("Retirement Plan", "E25"),
     "retirement_corpus_required": ("Retirement Plan", "E30"),
-    "retirement_monthly_sip": ("Retirement Plan", "E43"),
+    "retirement_gross_monthly_sip": ("Retirement Plan", "E41"),    # SIP needed (gross)
+    "retirement_ongoing_monthly_sip": ("Retirement Plan", "E43"),  # client's ongoing retirement SIP
+    "retirement_monthly_sip": ("Retirement Plan", "E44"),          # ADDITIONAL SIP needed to fund the gap
     "retirement_stepup_start_annual": ("Retirement Plan", "E54"),
     # --- Insurance Computation ---
     "human_life_value": ("Insurance Computation", "F14"),

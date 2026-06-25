@@ -119,6 +119,16 @@ def write_plan_to_master(master_wb, plan) -> int:
     base_age = (BASE_DATE - dob).days / 365.25 if dob else None
     set_salary_horizon(master_wb, base_age, retire)
 
+    # The firm Retirement Plan reads "years to retire" for the SIP (PMT) from the
+    # retirement goal rows (10_Financial_Goals!D19/D20). The model-writer has no
+    # such RM-entered retirement goal, so those are 0 → PMT(rate, 0, …) = #NUM!.
+    # Write the real years-to-retire there so the retirement SIP computes.
+    if base_age is not None and retire and retire > base_age:
+        yrs_to_retire = max(1, round(retire - base_age))
+        gg = master_wb["10_Financial_Goals"]
+        gg["D19"] = yrs_to_retire
+        gg["D20"] = yrs_to_retire
+
     # ── 3_Expenses (value in col H, total I; map model fields to firm rows) ──
     exp = plan.monthly_expenses
     if exp:
