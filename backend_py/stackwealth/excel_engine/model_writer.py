@@ -129,6 +129,22 @@ def write_plan_to_master(master_wb, plan) -> int:
         gg["D19"] = yrs_to_retire
         gg["D20"] = yrs_to_retire
 
+        # Retirement horizon: the firm template reads life expectancy from the
+        # Assumptions tab (self 75 / spouse 80) and bases the post-retirement
+        # years on the SPOUSE — wrong for a single client, and ignores the
+        # client's own life expectancy. Override E12/E13 with the client's
+        # actual: for a single client the spouse mirrors self, so the horizon
+        # (E15 = E13 − E14) becomes the client's own lifetime; for a couple the
+        # corpus provides until the longer-living passes.
+        rp = master_wb["Retirement Plan"]
+        self_le = (_num(getattr(p_self, "life_expectancy", None)) if p_self else None) or 85
+        rp["E12"] = self_le
+        if p_spouse and is_married:
+            spouse_le = _num(getattr(p_spouse, "life_expectancy", None)) or self_le
+            rp["E13"] = max(self_le, spouse_le)
+        else:
+            rp["E13"] = self_le
+
     # ── 3_Expenses (value in col H, total I; map model fields to firm rows) ──
     exp = plan.monthly_expenses
     if exp:
