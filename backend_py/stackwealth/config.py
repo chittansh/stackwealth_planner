@@ -1,5 +1,21 @@
 """Centralized env config."""
 import os
+from pathlib import Path
+
+# Load backend_py/.env for LOCAL development before any env var is read.
+# `override=False` means real environment variables always win, so production
+# (Fly injects secrets into the container env) is unaffected — this only fills
+# in vars that aren't already set, which is exactly the local-dev case. Without
+# this, a locally-launched server has no ANTHROPIC_API_KEY/DATABASE_URL and the
+# LLM intake silently degrades to "no-llm" (empty plan) and chat errors.
+try:
+    from dotenv import load_dotenv  # type: ignore
+
+    _env_path = Path(__file__).resolve().parents[1] / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path, override=False)
+except Exception:
+    pass
 
 
 def env(name: str, default: str | None = None) -> str | None:

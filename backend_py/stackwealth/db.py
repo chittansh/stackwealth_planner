@@ -40,6 +40,9 @@ from .types import PlanState, empty_plan_state
 
 
 _memory: dict[str, PlanState] = {}
+# In-memory fallback for the CFP workbook store (source + computed xlsx, outputs)
+# used when DATABASE_URL is unset. Mirrors `_memory` for plans.
+_memory_wb: dict[str, dict[str, Any]] = {}
 
 
 # ── Postgres pool (lazy) ──────────────────────────────────────────────────
@@ -228,6 +231,14 @@ async def init_db() -> None:
                 );
                 CREATE INDEX IF NOT EXISTS chat_messages_lookup
                     ON chat_messages (household_id, chat_id, id);
+                CREATE TABLE IF NOT EXISTS household_workbooks (
+                    household_id  TEXT        PRIMARY KEY,
+                    source_xlsx   BYTEA,
+                    source_name   TEXT,
+                    computed_xlsx BYTEA,
+                    outputs       JSONB,
+                    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
                 """
             )
         except Exception as e:
@@ -410,6 +421,94 @@ async def list_households_page(limit: int, offset: int) -> tuple[list[str], int]
 def seed_memory(plan: PlanState) -> None:
     """Test helper — bypasses the DB. Only meaningful in in-memory mode."""
     _memory[plan.household_id] = plan
+
+
+# ── CFP workbook persistence (Excel engine) ───────────────────────────────
+# The raw uploaded firm-template .xlsx and the engine's populated/recalculated
+# workbook are stored per household so the engine can recompute and the UI can
+# download the computed sheet. Stored as BYTEA — these are ~200KB each.
+
+
+async def save_source_workbook(household_id: str, filename: str, data: bytes) -> None:
+    async with _acquire_conn() as conn:
+        if conn is None:
+            if not _database_url():
+                _memory_wb.setdefault(household_id, {}).update(
+                    {"source_xlsx": data, "source_name": filename}
+                )
+                return
+            raise ConnectionError("postgres acquire returned None")
+        await conn.execute(
+            """
+            INSERT INTO household_workbooks (household_id, source_xlsx, source_name, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (household_id) DO UPDATE
+              SET source_xlsx = EXCLUDED.source_xlsx,
+                  source_name = EXCLUDED.source_name,
+                  updated_at = NOW()
+            """,
+            household_id,
+            data,
+            filename,
+        )
+
+
+async def get_source_workbook(household_id: str) -> Optional[bytes]:
+    async with _acquire_conn() as conn:
+        if conn is None:
+            return (_memory_wb.get(household_id) or {}).get("source_xlsx")
+        row = await conn.fetchrow(
+            "SELECT source_xlsx FROM household_workbooks WHERE household_id = $1",
+            household_id,
+        )
+        return bytes(row["source_xlsx"]) if row and row["source_xlsx"] else None
+
+
+async def save_computed_workbook(
+    household_id: str, data: bytes, outputs: dict[str, Any]
+) -> None:
+    payload = json.dumps(outputs)
+    async with _acquire_conn() as conn:
+        if conn is None:
+            if not _database_url():
+                _memory_wb.setdefault(household_id, {}).update(
+                    {"computed_xlsx": data, "outputs": outputs}
+                )
+                return
+            raise ConnectionError("postgres acquire returned None")
+        await conn.execute(
+            """
+            INSERT INTO household_workbooks (household_id, computed_xlsx, outputs, updated_at)
+            VALUES ($1, $2, $3::jsonb, NOW())
+            ON CONFLICT (household_id) DO UPDATE
+              SET computed_xlsx = EXCLUDED.computed_xlsx,
+                  outputs = EXCLUDED.outputs,
+                  updated_at = NOW()
+            """,
+            household_id,
+            data,
+            payload,
+        )
+
+
+async def get_computed_workbook(
+    household_id: str,
+) -> tuple[Optional[bytes], Optional[dict[str, Any]]]:
+    async with _acquire_conn() as conn:
+        if conn is None:
+            rec = _memory_wb.get(household_id) or {}
+            return rec.get("computed_xlsx"), rec.get("outputs")
+        row = await conn.fetchrow(
+            "SELECT computed_xlsx, outputs FROM household_workbooks WHERE household_id = $1",
+            household_id,
+        )
+        if not row:
+            return None, None
+        data = bytes(row["computed_xlsx"]) if row["computed_xlsx"] else None
+        outs = row["outputs"]
+        if isinstance(outs, str):
+            outs = json.loads(outs)
+        return data, outs
 
 
 # ── Chat history persistence ──────────────────────────────────────────────

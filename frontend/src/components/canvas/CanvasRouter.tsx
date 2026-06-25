@@ -20,6 +20,7 @@ import { DebtPaydownView } from './DebtPaydownView';
 import { RetirementGlideView } from './RetirementGlideView';
 import { ScenariosView } from './ScenariosView';
 import { RiskAssessmentView } from './RiskAssessmentView';
+import { ComputedExcelView } from './ComputedExcelView';
 import { PlanBlocks } from './PlanBlocks';
 import { RiskBanner } from './RiskBanner';
 import { CalculationsChip } from './CalculationsChip';
@@ -41,7 +42,8 @@ export function CanvasRouter({
     | 'debt'
     | 'retirement'
     | 'scenarios'
-    | 'risk';
+    | 'risk'
+    | 'computed-excel';
   horizon: number;
 }) {
   void horizon; // sourced from server (plan.computed.horizon_years)
@@ -156,6 +158,11 @@ export function CanvasRouter({
       {view === 'risk' && (
         <div className="mt-6">
           <RiskAssessmentView plan={plan} />
+        </div>
+      )}
+      {view === 'computed-excel' && (
+        <div className="mt-6">
+          <ComputedExcelView householdId={householdId} />
         </div>
       )}
 

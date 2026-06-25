@@ -23,7 +23,14 @@ RUN uv pip install --system .
 # atk, cups, drm, dbus, gbm, pango, cairo, alsa, etc.) on debian-slim.
 RUN playwright install --with-deps chromium
 
-# Copy source.
+# LibreOffice (Calc only) — the CFP Excel engine recalculates the firm's
+# workbook headlessly via `soffice`. `--no-install-recommends` keeps the layer
+# lean (no fonts/UI extras); libreoffice-calc pulls the core + Calc.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libreoffice-calc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy source (includes stackwealth/excel_engine/master/cfp_master.xlsx).
 COPY stackwealth/ stackwealth/
 
 EXPOSE 4000

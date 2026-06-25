@@ -647,6 +647,12 @@ class ComputedSnapshot(StrictModel):
     # Scenario engine (brief §6) — verdict + Baseline/Easy/Aggressive paths.
     # See skills/scenarios.py. Loose dict, same rationale as `cfp`.
     scenarios_v2: Optional[dict] = None
+    # Excel-engine outputs (stackwealth.excel_engine) — the deterministic CFP
+    # core computed by the firm's actual workbook via headless LibreOffice
+    # recalculation. Shape: {"scalars": {...}, "tables": {...}, "computed_at": ...}.
+    # This is the authoritative source for the deterministic plan; the Python
+    # advisory layer (Monte Carlo, scenarios, freedom) reads from it.
+    excel_outputs: Optional[dict] = None
 
 
 class ScenarioOp(StrictModel):

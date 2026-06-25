@@ -27,8 +27,9 @@ from typing import Any, AsyncIterator
 from fastapi import APIRouter, File, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
-from ..db import get_plan
+from ..db import get_plan, save_source_workbook
 from ..skills.anomalies import detect_plan_anomalies
+from ..skills.excel_plan import run_excel_plan
 from ..skills.intake import ingest
 from ..skills.scenario import apply_add, apply_set, confirm_field, force_fsi_sync
 
@@ -124,6 +125,14 @@ async def upload_files(
 
             hint = _parser_hint_from_filename(filename, mime)
             yield emit({"event": "parsing", "parser_hint": hint, "filename": filename})
+
+            # Persist the raw firm-template workbook so the Excel engine can
+            # recompute it and the UI can download the populated sheet later.
+            if hint == "xlsx":
+                try:
+                    await save_source_workbook(id, filename, buf)
+                except Exception as e:
+                    print(f"[upload] save_source_workbook failed: {e}")
 
             # Run the LLM call as a task so we can interleave heartbeats while
             # it's waiting on Claude.
@@ -237,6 +246,22 @@ async def upload_files(
                 anomalies = []
             if anomalies:
                 yield emit({"event": "anomalies_detected", "count": len(anomalies)})
+
+            # Run the firm's CFP workbook (deterministic Excel engine) so the
+            # computed sheet + headline numbers are ready immediately. Non-fatal:
+            # a recalc/LibreOffice hiccup must not fail the upload.
+            if hint == "xlsx":
+                yield emit({"event": "excel_computing", "filename": filename})
+                try:
+                    excel_outputs = await run_excel_plan(id)
+                    yield emit({
+                        "event": "excel_computed",
+                        "filename": filename,
+                        "scalars": excel_outputs.get("scalars", {}),
+                    })
+                except Exception as e:
+                    print(f"[upload] excel engine failed: {e}")
+                    yield emit({"event": "excel_failed", "filename": filename, "error": str(e)})
 
             summary = {
                 "filename": filename,
