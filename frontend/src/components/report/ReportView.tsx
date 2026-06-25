@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { fetchPlan } from '@/lib/api';
 import type { PlanState } from '@/types/plan-state';
 import { formatINR } from '@/lib/utils';
+import { ComingSoonChip } from '@/components/common/ComingSoonChip';
 
 /**
  * Polished print-styled plan summary.
@@ -167,7 +168,11 @@ export function ReportView({ householdId }: { householdId: string }) {
 
       {/* Goals ────────────────────────────────────────────────────────── */}
       <section className="report-page">
-        <SectionTitle eyebrow={a ? '03' : '02'} title="Goals" />
+        <div className="flex items-start justify-between gap-4">
+          <SectionTitle eyebrow={a ? '03' : '02'} title="Goals" />
+          {/* Scenario paths within goal planning are still being refined */}
+          <ComingSoonChip className="mt-1" />
+        </div>
         {plan.financial_goals.length === 0 ? (
           <p className="text-zinc-500 text-[13px] mt-6">No goals captured yet.</p>
         ) : (

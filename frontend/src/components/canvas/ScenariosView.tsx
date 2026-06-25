@@ -6,6 +6,7 @@ import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis } from 'recharts';
 import type { PlanState, ScenariosSnapshot, ScenarioPath } from '@/types/plan-state';
 import { fetchScenariosV2 } from '@/lib/api';
 import { formatINR } from '@/lib/utils';
+import { ComingSoonChip } from '@/components/common/ComingSoonChip';
 
 /**
  * Scenarios tab — the brief's §8 Scenario Analysis on screen. Shows the
@@ -74,6 +75,11 @@ export function ScenariosView({ plan }: { plan: PlanState | null }) {
 
   return (
     <div className="flex flex-col gap-5">
+      {/* WIP marker — scenarios are still being refined with the SW team */}
+      <div className="flex justify-end -mb-2">
+        <ComingSoonChip />
+      </div>
+
       {/* What-if banner */}
       {whatif && (
         <div className="flex items-center justify-between rounded-lg border border-sky-200 bg-sky-50 px-4 py-2.5 text-xs">
