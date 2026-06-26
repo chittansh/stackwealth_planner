@@ -27,11 +27,11 @@ from typing import Any, AsyncIterator
 from fastapi import APIRouter, File, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
-from ..db import get_plan, save_source_workbook
-from ..skills.anomalies import detect_plan_anomalies
+from ..db import get_plan, save_plan, save_source_workbook
 from ..skills.excel_plan import run_excel_plan
 from ..skills.intake import ingest
 from ..skills.scenario import apply_add, apply_set, confirm_field, force_fsi_sync
+from ..skills.validation import validate_plan
 
 
 def _normalize_partial_state(ps: dict[str, Any]) -> dict[str, Any]:
@@ -235,15 +235,28 @@ async def upload_files(
             derived = await force_fsi_sync(id)
             yield emit({"event": "fsi_synced", "derived": derived, "filename": filename})
 
-            # Post-upload anomaly scan. The agent's chat prompt reads
-            # `anomalies` out of the upload context and converts each
-            # high-severity finding into a question for the RM rather
-            # than silently producing a nonsensical plan.
+            # Post-upload validation scan — completeness (required inputs per
+            # calc) + value sanity (hardcoding / double-counts / out-of-range)
+            # + the folded-in anomaly scan. Persisted to computed.validation so
+            # the canvas and the `validate_inputs` tool see the same report. The
+            # agent's chat prompt reads these and asks the RM the per-finding
+            # `question` rather than silently producing a nonsensical plan.
+            validation: dict[str, Any] = {}
+            anomalies: list[dict[str, Any]] = []
             try:
                 plan_after = await get_plan(id)
-                anomalies = detect_plan_anomalies(plan_after) if plan_after else []
-            except Exception:
-                anomalies = []
+                if plan_after:
+                    validation = validate_plan(plan_after)
+                    anomalies = validation.get("anomalies") or []
+                    plan_after.computed.validation = validation
+                    await save_plan(plan_after)
+            except Exception as e:
+                print(f"[upload] validation scan failed: {e}")
+            if validation.get("findings"):
+                yield emit({
+                    "event": "validation_findings",
+                    "counts": validation.get("counts", {}),
+                })
             if anomalies:
                 yield emit({"event": "anomalies_detected", "count": len(anomalies)})
 
@@ -273,6 +286,7 @@ async def upload_files(
                 "missing": result.get("missing") or [],
                 "rejected": rejected,
                 "anomalies": anomalies,
+                "validation": validation,
             }
             summaries.append(summary)
             yield emit({"event": "file_done", "summary": summary})

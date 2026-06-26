@@ -26,6 +26,7 @@ from ..skills import scenario as scenario_skill
 from ..skills import scenarios as scenarios_skill
 from ..skills import suggestions as suggestions_skill
 from ..skills import tax as tax_skill
+from ..skills import validation as validation_skill
 from ..skills.allocate import compute_allocation
 from ..skills.report import render_plan_pdf
 
@@ -229,6 +230,19 @@ async def _debt_paydown(**kwargs: Any) -> Any:
     return await _persist_computed(
         kwargs["household_id"], "debt_paydown", await debt_skill.paydown(kwargs)
     )
+
+
+async def _validate_inputs(**kwargs: Any) -> Any:
+    """Run the post-extraction validation layer (completeness + value sanity +
+    folded-in anomaly scan) and persist it to plan.computed.validation. Returns
+    the structured report; the agent reads `findings`/`required_missing`/
+    `suspect_values` and asks the RM the `question` on each before narrating."""
+    kwargs = _coerce_kwargs(kwargs)
+    plan = await get_plan(kwargs["household_id"])
+    if plan is None:
+        return {"error": "plan_not_found"}
+    report = validation_skill.validate_plan(plan)
+    return await _persist_computed(kwargs["household_id"], "validation", report)
 
 
 async def _cfp_plan(**kwargs: Any) -> Any:
@@ -633,6 +647,25 @@ def make_tools() -> list[StructuredTool]:
             ),
             args_schema=HouseholdOnlyArgs,
             coroutine=_debt_paydown,
+        ),
+        StructuredTool.from_function(
+            name="validate_inputs",
+            description=(
+                "Post-extraction input-validation layer. Run this right after an upload/intake "
+                "(or whenever the inputs feel off) BEFORE trusting any calculation. Checks three "
+                "things and returns RM-facing questions for each: (1) COMPLETENESS — are the "
+                "inputs every calc needs present (income, expenses, age/DOB, retirement age, "
+                "portfolio value, goals)? see `required_missing`; (2) VALUE SANITY — hardcoded / "
+                "double-counted / out-of-range / placeholder / sample-leak values, e.g. a "
+                "fixed-income maturity (NSC/FD/PPF) wrongly re-added as a lumpsum cash inflow, "
+                "see `suspect_values`; (3) ANOMALIES — the existing contradiction scan, folded "
+                "in. Returns {ok, counts, findings, required_missing, suspect_values, anomalies}; "
+                "each finding carries a `question` to ASK the RM. Persists to "
+                "`plan.computed.validation`. If `ok` is false, ask the questions before narrating "
+                "the plan as correct."
+            ),
+            args_schema=HouseholdOnlyArgs,
+            coroutine=_validate_inputs,
         ),
         StructuredTool.from_function(
             name="cfp_plan",
