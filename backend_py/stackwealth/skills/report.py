@@ -1240,7 +1240,7 @@ def _build_html(plan: PlanState) -> str:
 def _build_sandeep_html(plan: PlanState) -> str:
     """Client-facing plan, structured to the v2 sample: Page 1 exec summary →
     1 Cash Flow → 2 Net Worth → 3 Risk → 4 Goal Planning →
-    5 Tax → Appendix."""
+    5 Retirement Planning → 6 Tax → Appendix."""
     cfp = cfp_skill.compute_cfp(plan)
     try:
         scen = scenarios_skill.compute_scenarios(plan)
@@ -1252,7 +1252,9 @@ def _build_sandeep_html(plan: PlanState) -> str:
         _v2_s2_networth(plan, cfp),
         _v2_s3_risk(plan, cfp, scen),
         _v2_s4_goals(plan, cfp, scen),
+        _v2_s_retirement(plan, cfp),
         _v2_s5_tax(plan, cfp),
+        _v2_s_actionplan(plan, cfp),
         _v2_appendix(plan, cfp),
     ]
     name = plan.personal_details.full_name or plan.household_id
@@ -1748,45 +1750,132 @@ def _v2_s4_goals(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -
               f'<td class="num">{_v2c(tot_today)}</td><td class="num">{_v2c(tot_fv)}</td>'
               f'<td class="num">{_v2c(tot_alloc)}</td><td class="num">{_v2c(tot_req)+"/mo"}</td><td></td></tr>')
 
-    # ── Retirement readiness detail ────────────────────────────────────────
-    recurring = ret.get("corpus_recurring", 0) or 0
-    one_time = max(0, corpus - recurring)
-    existing_fv = ret.get("existing_retirement_assets_fv", 0) or 0
-    sp = ret.get("stepup_plan") or {}
-    sp_start = sp.get("first_year_monthly_contribution", 0) or 0
-    sp_rate = sp.get("step_up_pct", 0.10) or 0.10
-    sp_proj = sp.get("projected_corpus_at_retirement", 0) or 0
-    sp_funded = sp.get("funded_pct", 0) or 0
-    sp_excess = sp.get("excess_or_gap", 0) or 0
-    reaches = sp.get("reaches_goal")
-    verdict = (f"On this step-up plan your projected corpus is {_v2c(sp_proj)} — "
-               + ("ahead of" if (sp_excess or 0) >= 0 else "short of")
-               + f" the {_v2c(corpus)} target by {_v2c(abs(sp_excess))} ({sp_funded:.0f}% funded).")
-    retire_block = f"""
-  <h3>Retirement readiness</h3>
-  <p>Your retirement corpus has to sustain living expenses across your (and your spouse's) lifetime, plus any one-time post-retirement spend. The firm sizes it on an inflation-adjusted annuity and funds it with a SIP that steps up each year with your income.</p>
-  <table>
-    <tbody>
-      <tr><td class="label-cell">Corpus needed at retirement ({retire_year})</td><td class="num">{_v2c(corpus)}</td></tr>
-      <tr><td class="label-cell">&nbsp;&nbsp;— for ongoing living expenses</td><td class="num">{_v2c(recurring)}</td></tr>
-      <tr><td class="label-cell">&nbsp;&nbsp;— for one-time post-retirement spend</td><td class="num">{_v2c(one_time)}</td></tr>
-      <tr><td class="label-cell">Funded by existing retirement assets (grown to {retire_year})</td><td class="num">{_v2c(existing_fv)}</td></tr>
-      <tr><td class="label-cell">Step-up SIP — start {_v2c(sp_start)}/mo, +{round(sp_rate*100)}%/yr</td><td class="num">projected {_v2c(sp_proj)}</td></tr>
-      <tr class="total"><td class="label-cell">{"Cushion over target" if (sp_excess or 0)>=0 else "Gap vs target"}</td><td class="num">{_v2c(abs(sp_excess))} ({sp_funded:.0f}% funded)</td></tr>
-    </tbody>
-  </table>
-  <p class="muted">{_h(verdict)} Starting the SIP lower and stepping it up {round(sp_rate*100)}%/yr with your annual increment reaches the same corpus while keeping early-year cash-flow comfortable.</p>"""
-
     return f"""<section class="page">
   <h2>4.  Goal Planning</h2>
-  <p>Your stated goals, what they'll cost in the year you want them, how much of each is already funded by your existing assets, and the monthly SIP each one needs from here.</p>
+  <p>Your stated goals, what they'll cost in the year you want them, how much of each is already funded by your existing assets, and the monthly SIP each one needs from here. Retirement — your largest goal — has its own section next.</p>
   <table class="dense">
     <thead><tr><th>Goal</th><th class="num">Year</th><th class="num">Years away</th><th class="num">Today's cost</th><th class="num">Cost at goal year</th><th class="num">Already funded</th><th class="num">SIP needed</th><th>Status at current pace</th></tr></thead>
     <tbody>{grows}</tbody>
   </table>
   <p class="muted"><strong>Reading this.</strong>&nbsp; <em>Cost at goal year</em> inflates today's cost to the year you want the goal (education at 10%, most others at 7–9%). <em>SIP needed</em> is the monthly investment that funds the remaining gap by the goal year at the glide-path return for its horizon. Goals marked "Funded by existing assets" need no fresh SIP — your current allocations already cover them.</p>
-  {retire_block}
   <div class="callout info"><strong>A note on one-time inflows.</strong><p>These figures assume no one-time inflows beyond your current liquid savings. If you expect a bonus, RSU vesting, inheritance, or any maturing lump sum over the next few years, share it with your advisor — it can materially reduce the SIPs above.</p></div>
+</section>"""
+
+
+def _v2_s_retirement(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
+    """Section 5 — Retirement Planning, three-case presentation (mirrors the
+    Retirement Glide canvas): Case 1 recommended flat SIP, Case 2 base case on
+    current surplus, Case 3 stretch combinations. Falls back to the corpus
+    build-up if the cases couldn't be computed."""
+    ret = cfp.retirement or {}
+    cur = datetime.now().year
+    retire_year = cur + round(ret.get("years_to_retire", 0) or 0)
+    corpus = ret.get("corpus_required", 0) or 0
+    recurring = ret.get("corpus_recurring", 0) or 0
+    one_time = max(0, corpus - recurring)
+    cases = ret.get("cases") if isinstance(ret.get("cases"), dict) else None
+
+    # Corpus build-up — always shown.
+    buildup = f"""
+  <h3>5.1&nbsp; The corpus you need</h3>
+  <p>Your retirement corpus must sustain living expenses across your (and your spouse's) lifetime, plus any one-time post-retirement spend. The firm sizes it as an inflation-adjusted annuity discounted at a conservative post-tax return.</p>
+  <table>
+    <tbody>
+      <tr><td class="label-cell">Retirement year (age {int(cfp.summary.get("retirement_age",60) or 60)})</td><td class="num">{retire_year}</td></tr>
+      <tr><td class="label-cell">Monthly expense at retirement (today's terms)</td><td class="num">{_v2c((ret.get("retirement_annual_expense_today",0) or 0)/12)}/mo</td></tr>
+      <tr><td class="label-cell">Monthly expense at retirement (inflated to {retire_year})</td><td class="num">{_v2c((ret.get("annual_expenses_at_retirement",0) or 0)/12)}/mo</td></tr>
+      <tr><td class="label-cell">Corpus for ongoing living expenses</td><td class="num">{_v2c(recurring)}</td></tr>
+      <tr><td class="label-cell">Corpus for one-time post-retirement spend</td><td class="num">{_v2c(one_time)}</td></tr>
+      <tr class="total"><td class="label-cell">Total corpus needed at retirement</td><td class="num">{_v2c(corpus)}</td></tr>
+    </tbody>
+  </table>"""
+
+    if not cases or not cases.get("case1"):
+        return f"""<section class="page">
+  <h2>5.  Retirement Planning</h2>
+  {buildup}
+  <p class="muted">Run the comprehensive plan to generate the funding cases (recommended SIP, base case, and stretch options).</p>
+</section>"""
+
+    inp = cases.get("inputs", {})
+    c1 = cases.get("case1", {})
+    c2 = cases.get("case2", {})
+    c3 = cases.get("case3", {})
+
+    investable = inp.get("investable_surplus", inp.get("total_monthly_surplus", 0)) or 0
+    goal_sip = inp.get("goal_sip_required_monthly", inp.get("other_goal_sip_monthly", 0)) or 0
+    avail = inp.get("surplus_available_for_retirement", 0) or 0
+    band_label = {"feasible": "Feasible", "tight": "Tight", "stretched": "Stretched",
+                  "not_feasible": "Not feasible at a flat SIP"}.get(c1.get("feasibility", ""), "")
+
+    # Case 1
+    case1_html = f"""
+  <h3>5.2&nbsp; Case 1 — Recommended Path (flat SIP)</h3>
+  <p>The same amount every month, from today until you retire — no step-up, no annual review. The cleanest, most predictable commitment that funds your corpus in full.</p>
+  <table>
+    <tbody>
+      <tr><td class="label-cell">Corpus needed at retirement</td><td class="num">{_v2c(c1.get("corpus_required",0))}</td></tr>
+      <tr><td class="label-cell">Existing retirement assets, grown to retirement</td><td class="num">{_v2c(c1.get("existing_assets_fv",0))}</td></tr>
+      <tr><td class="label-cell">Shortfall the SIP must close</td><td class="num">{_v2c(c1.get("shortfall",0))}</td></tr>
+      <tr class="subtotal"><td class="label-cell">Flat monthly SIP to start today</td><td class="num">{_v2c(c1.get("flat_monthly_sip",0))}/mo</td></tr>
+      <tr><td class="label-cell">Projected corpus from this SIP</td><td class="num">{_v2c(c1.get("final_corpus",0))}</td></tr>
+      <tr class="total"><td class="label-cell">Feasibility vs investable surplus</td><td class="num">{(f"{c1.get('band_pct'):.1f}% — {band_label}") if c1.get('band_pct') is not None else band_label}</td></tr>
+    </tbody>
+  </table>"""
+
+    # Case 2
+    if c2.get("available"):
+        case2_html = f"""
+  <h3>5.3&nbsp; Case 2 — Base Case (current surplus only)</h3>
+  <p>If you simply invest the surplus available to you today, flat, with no other change — here is where you land against the {_v2c(corpus)} target. Your investable surplus is {_v2c(investable)}/mo; after the {_v2c(goal_sip)}/mo your other goals need, {_v2c(avail)}/mo is free for retirement.</p>
+  <table>
+    <tbody>
+      <tr><td class="label-cell">Monthly surplus available for retirement</td><td class="num">{_v2c(c2.get("surplus_available",0))}/mo</td></tr>
+      <tr><td class="label-cell">Projected corpus you reach</td><td class="num">{_v2c(c2.get("projected_corpus",0))}</td></tr>
+      <tr><td class="label-cell">Coverage of target corpus</td><td class="num">{c2.get("coverage_pct",0):.1f}%</td></tr>
+      <tr class="total"><td class="label-cell">Gap remaining</td><td class="num">{_v2c(c2.get("gap",0))}</td></tr>
+    </tbody>
+  </table>
+  <div class="callout {'good' if c2.get('on_track') else 'warn'}"><p>{
+      f"On track — your current surplus alone reaches {c2.get('coverage_pct',0):.1f}% of the corpus."
+      if c2.get('on_track') else
+      f"Your current surplus covers {c2.get('coverage_pct',0):.1f}% of the target, leaving a {_v2c(c2.get('gap',0))} gap — the reason Case 1 recommends a higher SIP."
+  }</p></div>"""
+    else:
+        case2_html = f"""
+  <h3>5.3&nbsp; Case 2 — Base Case</h3>
+  <div class="callout warn"><p>{_h(c2.get("reason",""))}</p></div>"""
+
+    # Case 3
+    case3_html = ""
+    if c3.get("triggered"):
+        if c3.get("structurally_infeasible"):
+            case3_html = f"""
+  <h3>5.4&nbsp; Case 3 — Stretch Case</h3>
+  <div class="callout bad"><p>{_h(c3.get("infeasible_note","No combination of allowable levers closes the gap within the 65-year retirement cap. Escalate to the advisor."))}</p></div>"""
+        else:
+            combos = c3.get("combinations", []) or []
+            rows = ""
+            for idx, k in enumerate(combos):
+                tag = chr(65 + idx)
+                sip = _v2c(k.get("start_monthly_sip", 0)) + "/mo"
+                if k.get("is_stepup"):
+                    sip += f" → {_v2c(k.get('final_year_monthly_sip',0))}/mo by final year"
+                rows += f"""
+  <h4>{tag} · {_h(k.get("name",""))}</h4>
+  <p>{_h(k.get("levers_sentence",""))}</p>
+  <p class="muted"><strong>Required SIP today:</strong> {sip}.&nbsp; <strong>Trade-off:</strong> {_h(k.get("trade_off",""))}&nbsp; Final corpus matches the {_v2c(k.get("corpus_target",0))} target.</p>"""
+            case3_html = f"""
+  <h3>5.4&nbsp; Case 3 — Stretch Case (ways to lower today's ask)</h3>
+  <p>Case 1's flat SIP is a stretch against your {_v2c(investable)}/mo investable surplus. Each combination below reaches the same corpus with a lower starting commitment — ordered from least to most disruptive. Pick the one that matches how you want to live the next years.</p>
+  {rows}"""
+
+    return f"""<section class="page">
+  <h2>5.  Retirement Planning</h2>
+  {buildup}
+  {case1_html}
+  {case2_html}
+  {case3_html}
 </section>"""
 
 
@@ -1804,13 +1893,127 @@ def _v2_s5_tax(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
     ]
     body = "".join(f'<tr><td class="label-cell">{_h(a)}</td><td>{b}</td><td>{_h(c)}</td></tr>' for a, b, c in rows)
     return f"""<section class="page">
-  <h2>5.  Tax — things worth knowing</h2>
+  <h2>6.  Tax — things worth knowing</h2>
   <p>Educational notes on how the instruments you hold are taxed. Specific tax-filing decisions are between you and your tax advisor; this section just makes sure you have the lay of the land.</p>
   <table>
     <thead><tr><th>Instrument</th><th>How returns are taxed</th><th>Note</th></tr></thead>
     <tbody>{body}</tbody>
   </table>
   <div class="callout info"><strong>Old vs New regime.</strong><p>If your total deductions (80C + 80D + home-loan interest + NPS + HRA) add up to less than about ₹3 L/year, the New regime usually works out better. Above that, the Old regime is typically more efficient.{regime_line}</p></div>
+</section>"""
+
+
+def _v2_s_actionplan(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
+    """Section 7 — a prioritised action plan + a Now / 1-3 mo / 3-12 mo roadmap,
+    derived from the gaps surfaced in the rest of the report."""
+    s = cfp.summary
+    ins = cfp.insurance or {}
+    ret = cfp.retirement or {}
+    cases = ret.get("cases") if isinstance(ret.get("cases"), dict) else None
+    cur = datetime.now().year
+
+    # Emergency fund
+    bare = (s.get("monthly_expenses", 0) or 0) + (s.get("monthly_emi", 0) or 0)
+    ef = plan.emergency_fund
+    ef_cur = float((ef.total_emergency_corpus if ef else 0) or 0)
+    ef_target = 6 * bare
+    ef_gap = max(0.0, ef_target - ef_cur)
+    ef_sip = round(ef_gap / 36) if ef_gap > 0 else 0
+
+    # Protection
+    add_term = ins.get("additional_cover_required", 0) or 0
+
+    # Retirement ask — the recommended flat SIP, or the least-disruptive stretch
+    # combo when flat isn't feasible.
+    ret_sip = 0
+    ret_note = ""
+    if cases and cases.get("case1"):
+        c1 = cases["case1"]
+        if c1.get("feasibility") in ("feasible", "tight"):
+            ret_sip = c1.get("flat_monthly_sip", 0) or 0
+            ret_note = "flat, no step-up"
+        else:
+            combos = (cases.get("case3", {}) or {}).get("combinations", []) or []
+            if combos:
+                ret_sip = combos[0].get("start_monthly_sip", 0) or 0
+                ret_note = f"start of {_h(combos[0].get('name',''))}"
+            else:
+                ret_sip = c1.get("flat_monthly_sip", 0) or 0
+                ret_note = "flat (review with advisor — stretched)"
+
+    # Goal SIPs (non-retirement) still needed
+    goal_sip = sum(b.get("required_sip_monthly", 0) or 0 for b in cfp.goal_blocks)
+
+    # Build the prioritised list.
+    actions = []
+    n = 1
+    if add_term > 0:
+        actions.append((n, "Close the life-insurance gap",
+                        f"Add {_v2c(add_term)} of term cover on the earner — the single biggest unprotected risk to the family. A small fraction of one EMI buys it."))
+        n += 1
+    if ef_sip > 0:
+        actions.append((n, "Build the emergency fund",
+                        f"SIP {_v2c(ef_sip)}/mo into a liquid fund to reach the {_v2c(ef_target)} six-month target by {cur+3}, before stretching for new goals."))
+        n += 1
+    if ret_sip > 0:
+        actions.append((n, "Start the retirement SIP",
+                        f"Begin {_v2c(ret_sip)}/mo toward retirement ({ret_note}). This is the structural move that takes retirement from “maybe” to “on track” — see Section 5 for the full options."))
+        n += 1
+    if goal_sip > 0:
+        actions.append((n, "Fund the stated goals",
+                        f"Direct {_v2c(goal_sip)}/mo to the goal SIPs in Section 4 so each goal lands fully funded in its target year."))
+        n += 1
+    regime = (s.get("recommended_tax_regime") or "").strip()
+    if regime:
+        actions.append((n, "Lock the tax regime",
+                        f"Your numbers point to the {_h(regime)} regime this year — confirm with your CA before the next declaration and use the full 80C/80D/NPS headroom."))
+        n += 1
+    actions.append((n, "Review allocation annually",
+                    "Rebalance once a year (or on a ±5% drift) so the portfolio mix keeps matching your risk profile and the shortening horizon to each goal."))
+
+    actions_html = "".join(
+        f'<div class="callout info" style="margin-bottom:2mm;"><strong>{i}.&nbsp; {_h(title)}</strong><p style="margin-bottom:0;">{body}</p></div>'
+        for i, title, body in actions
+    )
+
+    # Roadmap table.
+    now_items, soon_items, later_items = [], [], []
+    if add_term > 0:
+        now_items.append(f"Get term-cover quotes for {_v2c(add_term)} additional sum assured")
+    if ef_sip > 0:
+        now_items.append(f"Move idle cash to a liquid fund; set up the {_v2c(ef_sip)}/mo EF SIP")
+        soon_items.append(f"EF crosses 3 months’ cover (~{cur+1})")
+        later_items.append(f"EF reaches the 6-month target ({_v2c(ef_target)}) by {cur+3}")
+    if ret_sip > 0:
+        now_items.append(f"Start the {_v2c(ret_sip)}/mo retirement SIP")
+    if goal_sip > 0:
+        soon_items.append(f"Phase in the {_v2c(goal_sip)}/mo goal SIPs as surplus frees up")
+    if add_term > 0:
+        soon_items.append("Complete medicals and bind the new term policy")
+    later_items.append("Annual review: rebalance, step up SIPs with your increment, re-check insurance")
+    if regime:
+        soon_items.append(f"Confirm the {regime} tax regime with your CA")
+
+    def _ul(items):
+        return "".join(f"<li>{_h(x)}</li>" for x in items) or "<li>—</li>"
+
+    return f"""<section class="page">
+  <h2>7.  Action Plan & 12-Month Roadmap</h2>
+  <p>Everything above, distilled into what to actually do — in priority order. Protection and the emergency fund come first because they cap downside; the SIPs that fund retirement and your goals come next.</p>
+  <h3>7.1&nbsp; Priorities</h3>
+  {actions_html}
+  <h3>7.2&nbsp; Sequenced over the next year</h3>
+  <table>
+    <thead><tr><th>Now (first 90 days)</th><th>1–3 months</th><th>3–12 months</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><ul style="margin:0;padding-left:4mm;">{_ul(now_items)}</ul></td>
+        <td><ul style="margin:0;padding-left:4mm;">{_ul(soon_items)}</ul></td>
+        <td><ul style="margin:0;padding-left:4mm;">{_ul(later_items)}</ul></td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="muted">This roadmap is sequenced so each step funds the next: protection and the emergency fund first, then the retirement and goal SIPs as your surplus frees up (the home-loan payoff and the EF target both release monthly cash on the dates shown in Section 1).</p>
 </section>"""
 
 
