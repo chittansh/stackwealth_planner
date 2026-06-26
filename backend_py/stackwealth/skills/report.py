@@ -191,6 +191,11 @@ li { margin: 0 0 1mm; }
 table { width: 100%; border-collapse: collapse; margin: 2mm 0 4mm; font-size: 9.8pt; background: white; border-radius: 1.5mm; overflow: hidden; box-shadow: 0 1px 0 var(--line); }
 th, td { padding: 2.2mm 3mm; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 tr:last-child th, tr:last-child td { border-bottom: none; }
+/* Compact variant for wide, information-dense tables (year-by-year cashflow,
+   full goals breakdown) so many columns still fit A4 portrait. */
+table.dense { font-size: 7.6pt; }
+table.dense th, table.dense td { padding: 1.3mm 1.6mm; }
+table.dense thead th { font-size: 7pt; }
 thead th {
   background: var(--brand-deep);
   font-weight: 600;
@@ -1234,7 +1239,7 @@ def _build_html(plan: PlanState) -> str:
 
 def _build_sandeep_html(plan: PlanState) -> str:
     """Client-facing plan, structured to the v2 sample: Page 1 exec summary →
-    1 Cash Flow → 2 Net Worth → 3 Risk → 4 Goal Planning (+ three paths) →
+    1 Cash Flow → 2 Net Worth → 3 Risk → 4 Goal Planning →
     5 Tax → Appendix."""
     cfp = cfp_skill.compute_cfp(plan)
     try:
@@ -1413,19 +1418,6 @@ def _v2_page1(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -> s
     on_track_html = "".join(f"<li>{_h(x)}</li>" for x in on_track) or "<li>—</li>"
     attention_html = "".join(f"<li>{_h(x)}</li>" for x in attention) or "<li>—</li>"
 
-    # Three-paths teaser.
-    paths = [sc for sc in (scen or {}).get("scenarios", []) if sc.get("key") in ("path1", "path2", "path3")]
-    paths_html = ""
-    if paths:
-        rows = "".join(
-            f'<tr><td class="label-cell" style="white-space:nowrap;">{_h(p.get("name",""))}</td>'
-            f'<td>{_h(p.get("headline",""))}</td></tr>'
-            for p in paths
-        )
-        paths_html = f"""
-  <h3>Three paths to close the gap</h3>
-  <table><tbody>{rows}</tbody></table>"""
-
     return f"""<section class="page cover">
   <div class="cover-band">
     <p class="brand">Stack Wealth</p>
@@ -1439,7 +1431,6 @@ def _v2_page1(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -> s
     <div class="callout good"><strong>✓  What's on track today</strong><ul style="margin-bottom:0;">{on_track_html}</ul></div>
     <div class="callout warn"><strong>⚠  What needs attention</strong><ul style="margin-bottom:0;">{attention_html}</ul></div>
   </div>
-  {paths_html}
 </section>"""
 
 
@@ -1467,21 +1458,35 @@ def _v2_s1_cashflow(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None
             return " @"
         return ""
 
+    # Full year-by-year waterfall. Every year is shown with the complete
+    # financial-asset flow: Opening → + Net savings → + Returns → − Goal
+    # withdrawals / ± Lump sums → Closing, plus net worth (financial + hard).
     body = ""
+    sum_income = sum_out = sum_save = sum_returns = sum_wd = 0.0
     for r in rows:
         yr = r["year"]
-        wd = r.get("major_withdrawals", 0) or 0
+        wd = r.get("major_withdrawals", 0) or 0          # negative when a goal is funded
         lump = r.get("lumpsum_deposit_withdrawal", 0) or 0
         goal = r.get("goal_remarks") or ""
-        add_cell, remark = "", ""
+        sum_income += r.get("total_income", 0) or 0
+        sum_out += r.get("total_outflow", 0) or 0
+        sum_save += r.get("surplus", 0) or 0
+        sum_returns += r.get("investment_returns", 0) or 0
+        sum_wd += wd
+
+        # Combined event cell: goal withdrawal (with its symbol) and/or lump sum.
+        event = ""
         if wd != 0:
-            add_cell = _v2c(wd) + _sym(goal)
-            if not _sym(goal) and goal:
-                remark = goal
-        elif lump != 0:
-            add_cell = ("+" if lump > 0 else "") + _v2c(lump) + (" ^" if lump > 0 else "")
-            if r.get("remarks"):
-                remark = r["remarks"]
+            event = _v2c(wd) + _sym(goal)
+        if lump != 0:
+            event += ("&nbsp;" if event else "") + ("+" if lump > 0 else "") + _v2c(lump) + (" ^" if lump > 0 else "")
+
+        # Remark: the goal/lumpsum label, or a milestone callout.
+        remark = ""
+        if wd != 0 and goal:
+            remark = goal
+        elif lump != 0 and r.get("remarks"):
+            remark = r["remarks"]
         milestone = ""
         if ef_year and yr == ef_year:
             milestone = f"Emergency fund target ({_v2c(ef_target)}) reached"
@@ -1490,25 +1495,65 @@ def _v2_s1_cashflow(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None
         elif yr == retire_year:
             milestone = "Retirement — corpus deployed to fund living expenses"
         remark = milestone or remark
-        hl = ' class="subtotal"' if (add_cell or remark) else ""
-        body += (f'<tr{hl}><td>{yr}</td><td class="num">{_v2c(r.get("total_income",0))}</td>'
-                 f'<td class="num">{_v2c(r.get("total_outflow",0))}</td>'
-                 f'<td class="num">{_v2c(r.get("fa_opening",0))}</td>'
-                 f'<td class="num">{add_cell}</td><td>{_h(remark)}</td></tr>')
+
+        nw = r.get("net_worth", 0) or (
+            (r.get("financial_assets_closing", 0) or 0) + (r.get("non_financial_assets_closing", 0) or 0))
+        hl = ' class="subtotal"' if (event or milestone) else ""
+        body += (
+            f'<tr{hl}><td>{yr}</td><td class="num">{int(r.get("age",0))}</td>'
+            f'<td class="num">{_v2c(r.get("total_income",0))}</td>'
+            f'<td class="num">{_v2c(r.get("total_outflow",0))}</td>'
+            f'<td class="num">{_v2c(r.get("surplus",0))}</td>'
+            f'<td class="num">{_v2c(r.get("fa_opening",0))}</td>'
+            f'<td class="num">{_v2c(r.get("investment_returns",0))}</td>'
+            f'<td class="num">{event or "—"}</td>'
+            f'<td class="num">{_v2c(r.get("financial_assets_closing",0))}</td>'
+            f'<td class="num">{_v2c(nw)}</td>'
+            f'<td>{_h(remark)}</td></tr>')
+
+    # Totals row across the projected horizon.
+    body += (
+        f'<tr class="total"><td>Total</td><td></td>'
+        f'<td class="num">{_v2c(sum_income)}</td><td class="num">{_v2c(sum_out)}</td>'
+        f'<td class="num">{_v2c(sum_save)}</td><td></td>'
+        f'<td class="num">{_v2c(sum_returns)}</td>'
+        f'<td class="num">{_v2c(sum_wd)}</td><td></td><td></td><td></td></tr>')
 
     final_fa = rows[-1].get("financial_assets_closing", 0)
+    final_nw = rows[-1].get("net_worth", 0) or (
+        (rows[-1].get("financial_assets_closing", 0) or 0) + (rows[-1].get("non_financial_assets_closing", 0) or 0))
     corpus = ret.get("corpus_required", 0) or 0
+    income0 = rows[0].get("total_income", 0) or 0
+    out0 = rows[0].get("total_outflow", 0) or 0
+    save0 = rows[0].get("surplus", 0) or 0
+    n_years = len(rows) - 1
     return f"""<section class="page">
   <h2>1.  Cash Flow</h2>
-  <p>Your money flow today, and how it compounds across the next {len(rows)-1} years to fund every goal you've set.</p>
-  <h3>Year-by-year view</h3>
-  <p>This is your baseline trajectory — what unfolds at your current pace, with the goals you've stated taken in the years you've stated. Years that compound quietly through returns and ongoing SIPs are left blank; only material events are called out. The three paths in Section 4 show how this baseline changes.</p>
+  <p>Your money flow today, and how it compounds across the next {n_years} years to fund every goal you've set. This is the firm's baseline trajectory — what unfolds at your current pace, with the goals you've stated taken in the years you've stated.</p>
+
+  <h3>This year at a glance</h3>
   <table>
-    <thead><tr><th>Year</th><th class="num">Income</th><th class="num">Expense + EMI</th><th class="num">Opening financial assets</th><th class="num">Additions / Withdrawals</th><th>Remarks</th></tr></thead>
+    <thead><tr><th></th><th class="num">Monthly</th><th class="num">Annual</th></tr></thead>
+    <tbody>
+      <tr><td class="label-cell">Total income</td><td class="num">{_v2c(income0/12)}</td><td class="num">{_v2c(income0)}</td></tr>
+      <tr><td class="label-cell">Total outflow (expenses + EMI)</td><td class="num">{_v2c(out0/12)}</td><td class="num">{_v2c(out0)}</td></tr>
+      <tr class="total"><td class="label-cell">Net annual cash savings</td><td class="num">{_v2c(save0/12)}</td><td class="num">{_v2c(save0)}</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Year-by-year view</h3>
+  <p>The complete financial-asset waterfall for every year to retirement. Each year: you start with the <em>opening</em> balance, add your <em>net savings</em> and <em>investment returns</em>, then subtract any <em>goal withdrawals</em> (or add one-off lump sums) to reach the <em>closing</em> balance. <em>Net worth</em> adds your hard assets (real estate, gold) on top.</p>
+  <table class="dense">
+    <thead><tr>
+      <th>Year</th><th class="num">Age</th><th class="num">Income</th><th class="num">Expense + EMI</th>
+      <th class="num">Net savings</th><th class="num">Opening FA</th><th class="num">Returns</th>
+      <th class="num">Goal / Lump</th><th class="num">Closing FA</th><th class="num">Net worth</th><th>Remarks</th>
+    </tr></thead>
     <tbody>{body}</tbody>
   </table>
-  <p class="muted"><strong>Reading the symbols.</strong>&nbsp; # children's education withdrawal.&nbsp; $ vacation withdrawal.&nbsp; @ property withdrawal.&nbsp; ^ expected one-time inflow (bonus, RSU, inheritance) — none provided in your inputs; share with your advisor if any are expected. Returns on invested capital are implicit in the year-on-year growth of opening financial assets.</p>
-  <p class="muted"><strong>Reading this view.</strong>&nbsp; Blank rows are years where things compound quietly through returns and your ongoing SIPs. Highlighted rows mark material events — a goal spend, the loan ending, retirement. By {rows[-1]['year']} your financial assets land around {_v2c(final_fa)} — against the {_v2c(corpus)} retirement target. The three paths in Section 4 show how that gap closes.</p>
+  <p class="muted"><strong>Reading the columns.</strong>&nbsp; <em>Net savings</em> = income − expenses − EMI for the year. <em>Returns</em> = the year's growth on invested capital. <em>Goal / Lump</em> = a goal spend (shown negative) or a one-off inflow (shown with +). <em>Closing FA</em> = opening + net savings + returns − goal spend ± lump. <em>Net worth</em> = closing financial assets plus hard assets.</p>
+  <p class="muted"><strong>Reading the symbols.</strong>&nbsp; # children's education withdrawal.&nbsp; $ vacation withdrawal.&nbsp; @ property withdrawal.&nbsp; ^ expected one-time inflow (bonus, RSU, inheritance) — none provided in your inputs; share with your advisor if any are expected.</p>
+  <p class="muted"><strong>Where this lands.</strong>&nbsp; By {rows[-1]['year']} your financial assets reach about {_v2c(final_fa)} and your net worth about {_v2c(final_nw)} — against the {_v2c(corpus)} retirement corpus target. Goal Planning (Section 4) breaks down each goal and your retirement readiness in detail.</p>
 </section>"""
 
 
@@ -1615,7 +1660,7 @@ def _v2_s3_risk(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) ->
     if ef_sip > 0:
         actions.append(f"<strong>2.&nbsp; Build your emergency fund to {_v2c(ef_target)}.</strong> {_v2c(ef_sip)}/month into a liquid fund — fully cushioned in 36 months.")
     if target_sip > existing_sip:
-        actions.append(f"<strong>3.&nbsp; Increase your monthly SIP from {_v2c(existing_sip)} to {_v2c(target_sip)}.</strong> The structural change that takes retirement from \"maybe\" to \"on track\" before you choose between the three paths.")
+        actions.append(f"<strong>3.&nbsp; Increase your monthly SIP from {_v2c(existing_sip)} to {_v2c(target_sip)}.</strong> The structural change that takes retirement from \"maybe\" to \"on track\" and funds your stated goals on time.")
     actions_html = "<br/><br/>".join(actions) or "Your protection foundations are in good shape."
 
     # Insurance cover table
@@ -1640,7 +1685,7 @@ def _v2_s3_risk(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) ->
     return f"""<section class="page">
   <h2>3.  Risk Management</h2>
   <p>Two things stand between your plan and a shock: an emergency fund, and the right insurance covers. Both are addressable this quarter.</p>
-  <div class="callout info"><strong>Three foundational actions — regardless of which path you pick later</strong><p>{actions_html}</p></div>
+  <div class="callout info"><strong>Three foundational actions</strong><p>{actions_html}</p></div>
 
   <h3>3.1&nbsp; Emergency Fund</h3>
   <table>
@@ -1666,97 +1711,42 @@ def _v2_s4_goals(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -
     ret = cfp.retirement or {}
     cur = datetime.now().year
     retire_year = cur + round(ret.get("years_to_retire", 0) or 0)
-    # Goals table
+    # Goals table — full detail per goal: cost today, cost at goal year, what's
+    # already funded, the SIP each goal needs, and the standing at current pace.
     grows = ""
+    tot_today = tot_fv = tot_alloc = tot_req = 0.0
     for g in cfp.goal_blocks:
         gap = g.get("fv_gap", 0) or 0
         req = g.get("required_sip_monthly", 0) or 0
-        short = (g.get("sip_shortfall_monthly", 0) or 0) > 0
+        incr = g.get("incremental_sip_monthly", g.get("sip_shortfall_monthly", 0)) or 0
         alloc = g.get("allocated_today_total", 0) or 0
-        funded = _v2c(alloc) + " allocated" if alloc > 0 else "None allocated yet"
+        yrs = max(0, (g.get("target_year", cur) or cur) - cur)
+        tot_today += g.get("today_cost", 0) or 0
+        tot_fv += g.get("future_value_needed", 0) or 0
+        tot_alloc += alloc
+        tot_req += req
+        funded = _v2c(alloc) if alloc > 0 else "—"
         if gap <= 0:
             status = "Funded by existing assets"
-        elif short:
-            status = "Shortfall — see three paths below"
+        elif incr > 0:
+            status = f"Needs {_v2c(incr)}/mo more"
         else:
-            status = f"On track with {_v2c(req)}/mo SIP"
+            status = f"On track at {_v2c(req)}/mo"
         grows += (f'<tr><td class="label-cell">{_h(g.get("goal_name",""))}</td><td class="num">{g.get("target_year","")}</td>'
+                  f'<td class="num">{yrs}</td>'
                   f'<td class="num">{_v2c(g.get("today_cost",0))}</td><td class="num">{_v2c(g.get("future_value_needed",0))}</td>'
-                  f'<td>{_h(funded)}</td><td>{_h(status)}</td></tr>')
+                  f'<td class="num">{funded}</td><td class="num">{_v2c(req)+"/mo" if req>0 else "—"}</td>'
+                  f'<td>{_h(status)}</td></tr>')
     corpus = ret.get("corpus_required", 0) or 0
     rsip = ret.get("stepup_required_start_sip_monthly", 0) or ret.get("gross_monthly_sip", 0) or 0
     grows += (f'<tr><td class="label-cell">Retirement (age {int(cfp.summary.get("retirement_age",60) or 60)})</td><td class="num">{retire_year}</td>'
-              f'<td class="num">monthly income</td><td class="num">{_v2c(corpus)} corpus</td>'
-              f'<td>EPF, MF, PPF in trajectory</td><td>Step up from {_v2c(rsip)}/mo start</td></tr>')
-
-    gap = max(0, ((scen or {}).get("total_sip_needed", 0) or 0) - ((scen or {}).get("surplus", {}).get("investable_surplus", 0) or 0))
-    achievable = bool((scen or {}).get("achievable"))
-    if achievable:
-        gap_box = ("<strong>Your situation: on track</strong><p>Your stated goals are fundable on the structural plan. "
-                   "The single optimised plan below keeps every goal at its year and amount.</p>")
-    else:
-        gap_box = (f"<strong>Your situation: a gap of about {_v2c(gap)}/month</strong>"
-                   f"<p>Some goals are achievable on the structural plan from Page 1; the rest push the math beyond your current "
-                   f"surplus. The three paths below each fund 100% of your goals a different way — each internally consistent and "
-                   f"fully calculated. Pick the one that matches how you want to live the next {retire_year-cur} years.</p>")
-
-    # Three paths
-    paths_html = ""
-    paths = [sc for sc in (scen or {}).get("scenarios", []) if sc.get("key") in ("path1", "path2", "path3")]
-    for p in paths:
-        levers = "".join(
-            f'<li>{_h(l.get("text","") if isinstance(l,dict) else str(l))}</li>'
-            for l in p.get("levers", [])
-        )
-        funds = "".join(
-            f'<li>{_h(o.get("goal",""))}: {_h(o.get("status",""))}</li>'
-            for o in p.get("outcomes", [])
-        )
-        caution = (f'<div class="callout bad"><p>{_h(p["caution"])}</p></div>') if p.get("caution") else ""
-        advisor = (f'<div class="callout warn"><p>{_h(p["advisor_note"])}</p></div>') if p.get("advisor_note") else ""
-        paths_html += f"""
-  <h3>{_h(p.get('name',''))}</h3>
-  <p><strong>Headline.</strong>&nbsp; {_h(p.get('headline',''))}</p>
-  <h4>What you change</h4>
-  <ul>{levers}</ul>
-  {caution}
-  <h4>What this funds</h4>
-  <ul>{funds}</ul>
-  <div class="callout good"><strong>What this asks of you</strong><p>{_h(p.get('trade_off',''))}</p></div>
-  {advisor}"""
-
-    # Comparison
-    comp = (scen or {}).get("comparison") or []
-    comp_html = ""
-    if comp:
-        def _cell(v, kind):
-            if v is None:
-                return "—"
-            if kind == "money":
-                return _v2c(v)
-            if kind == "pct":
-                return f"{v}%"
-            if kind == "age":
-                return f"Age {v}"
-            return _h(str(v))
-        rows = "".join(
-            f'<tr><td class="label-cell">{_h(r["metric"])}</td><td>{_cell(r.get("path1"),r["kind"])}</td>'
-            f'<td>{_cell(r.get("path2"),r["kind"])}</td><td>{_cell(r.get("path3"),r["kind"])}</td></tr>'
-            for r in comp
-        )
-        comp_html = f"""
-  <h3>Comparing the three paths</h3>
-  <table>
-    <thead><tr><th>Metric</th><th>Path 1 · Reducing</th><th>Path 2 · Stretching</th><th>Path 3 · Balanced</th></tr></thead>
-    <tbody>{rows}</tbody>
-  </table>"""
-
-    # Which path
-    wp = (scen or {}).get("which_path") or []
-    wp_html = ""
-    if wp:
-        wp_html = "<h4>How to choose between these paths</h4>" + "".join(
-            f'<p><strong>{_h(w["path"])}.</strong>&nbsp; {_h(w["suits"])}</p>' for w in wp)
+              f'<td class="num">{retire_year-cur}</td>'
+              f'<td class="num">monthly income</td><td class="num">{_v2c(corpus)}</td>'
+              f'<td class="num">EPF/MF/PPF</td><td class="num">{_v2c(rsip)+"/mo"}</td>'
+              f'<td>Step-up SIP from {_v2c(rsip)}/mo start</td></tr>')
+    grows += (f'<tr class="total"><td class="label-cell">All goals (ex-retirement)</td><td></td><td></td>'
+              f'<td class="num">{_v2c(tot_today)}</td><td class="num">{_v2c(tot_fv)}</td>'
+              f'<td class="num">{_v2c(tot_alloc)}</td><td class="num">{_v2c(tot_req)+"/mo"}</td><td></td></tr>')
 
     # ── Retirement readiness detail ────────────────────────────────────────
     recurring = ret.get("corpus_recurring", 0) or 0
@@ -1789,17 +1779,14 @@ def _v2_s4_goals(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None) -
 
     return f"""<section class="page">
   <h2>4.  Goal Planning</h2>
-  <p>Your stated goals, what they'll cost in the year you want them, and how much of each is already funded by your existing assets and SIPs.</p>
-  <table>
-    <thead><tr><th>Goal</th><th class="num">Year</th><th class="num">Today's cost</th><th class="num">Cost at goal year</th><th>Already funded</th><th>Status at current pace</th></tr></thead>
+  <p>Your stated goals, what they'll cost in the year you want them, how much of each is already funded by your existing assets, and the monthly SIP each one needs from here.</p>
+  <table class="dense">
+    <thead><tr><th>Goal</th><th class="num">Year</th><th class="num">Years away</th><th class="num">Today's cost</th><th class="num">Cost at goal year</th><th class="num">Already funded</th><th class="num">SIP needed</th><th>Status at current pace</th></tr></thead>
     <tbody>{grows}</tbody>
   </table>
+  <p class="muted"><strong>Reading this.</strong>&nbsp; <em>Cost at goal year</em> inflates today's cost to the year you want the goal (education at 10%, most others at 7–9%). <em>SIP needed</em> is the monthly investment that funds the remaining gap by the goal year at the glide-path return for its horizon. Goals marked "Funded by existing assets" need no fresh SIP — your current allocations already cover them.</p>
   {retire_block}
-  <div class="callout info">{gap_box}</div>
-  {paths_html}
-  {comp_html}
-  {wp_html}
-  <div class="callout info"><strong>A note.</strong><p>These paths assume no one-time inflows beyond your current liquid savings. If you expect a bonus, RSU vesting, inheritance, or any lump sum over the next few years, share that with your advisor — it can meaningfully accelerate any of these paths.</p></div>
+  <div class="callout info"><strong>A note on one-time inflows.</strong><p>These figures assume no one-time inflows beyond your current liquid savings. If you expect a bonus, RSU vesting, inheritance, or any maturing lump sum over the next few years, share it with your advisor — it can materially reduce the SIPs above.</p></div>
 </section>"""
 
 
@@ -1914,7 +1901,7 @@ def _v2_appendix(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
         ("Education inflation", "10% p.a.", "Child education costs"),
         ("Real estate appreciation", "7% p.a.", "Property future value"),
         ("Equity returns — hybrid (post-tax)", "10.5%", "Long-horizon goals"),
-        ("Equity returns — aggressive (post-tax)", "12.25%", "Path 2, long-horizon money"),
+        ("Equity returns — aggressive (post-tax)", "12.25%", "Aggressive, long-horizon money"),
         ("PPF / EPF (tax-free)", "7.1% / 8.1%", "Debt portfolio"),
         ("Liquid Fund (post-tax)", "3.85%", "Emergency fund"),
         ("Life expectancy", f"{le} years", "Retirement corpus sizing"),
