@@ -98,7 +98,7 @@ function InputsStrip({ inputs }: { inputs: CaseInputs }) {
 function Case1Card({ c, inputs }: { c: Case1; inputs: CaseInputs }) {
   return (
     <section className="rounded-xl border border-zinc-200 bg-white p-5">
-      <CaseHeader n={1} title="Recommended Path — flat SIP" badge={<FeasBadge band={c.feasibility} pct={c.band_pct} />} />
+      <CaseHeader n={1} title="Flat SIP Path" badge={<FeasBadge band={c.feasibility} pct={c.band_pct} />} />
       <p className="text-xs text-zinc-500 mb-4">
         The same amount every month, from today until you retire — no step-up, no annual review. The
         cleanest, most predictable commitment that funds your corpus in full.

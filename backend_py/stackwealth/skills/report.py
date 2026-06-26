@@ -1843,7 +1843,7 @@ def _v2_s_retirement(plan: PlanState, cfp: cfp_skill.CFPOutput) -> str:
 
     # Case 1
     case1_html = f"""
-  <h3>5.2&nbsp; Case 1 — Recommended Path (flat SIP)</h3>
+  <h3>5.2&nbsp; Case 1 — Flat SIP Path</h3>
   <p>The same amount every month, from today until you retire — no step-up, no annual review. The cleanest, most predictable commitment that funds your corpus in full.</p>
   <table>
     <tbody>
