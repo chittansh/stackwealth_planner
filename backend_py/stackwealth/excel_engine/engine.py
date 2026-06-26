@@ -219,7 +219,6 @@ VIEW_SHEETS: list[str] = [
     "10_Financial_Goals",
     "Retirement Plan",
     "YoY Cash Flow",
-    "Insurance Computation",
     "11. Inc Exp,Networth,Rec Invest",
     "2_Income",
     "3_Expenses ",
