@@ -196,6 +196,9 @@ tr:last-child th, tr:last-child td { border-bottom: none; }
 table.dense { font-size: 7.6pt; }
 table.dense th, table.dense td { padding: 1.3mm 1.6mm; }
 table.dense thead th { font-size: 7pt; }
+/* Post-retirement drawdown rows — warm tint so the two phases read apart. */
+tbody tr.drawdown td { background: #faf6ef; color: var(--ink-soft); }
+tbody tr.drawdown:nth-child(even) td { background: #f6f1e8; }
 thead th {
   background: var(--brand-deep);
   font-weight: 600;
@@ -1441,7 +1444,26 @@ def _v2_s1_cashflow(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None
     ret = cfp.retirement or {}
     cur = datetime.now().year
     retire_year = cur + round(ret.get("years_to_retire", 0) or 0)
-    rows = [r for r in yoy if r["year"] <= retire_year] or yoy[:15]
+
+    # Two phases: ACCUMULATION (to retirement) and the post-retirement DRAWDOWN
+    # where employment income stops and the corpus funds living expenses. The
+    # drawdown is shown until the corpus is exhausted (closing FA ≤ 0) — the
+    # deeply-negative tail beyond that point isn't meaningful, so it's truncated
+    # and flagged. A fully-funded plan instead runs to life expectancy with a
+    # positive terminal balance (a legacy).
+    accumulation = [r for r in yoy if r["year"] <= retire_year]
+    drawdown_all = [r for r in yoy if r["year"] > retire_year]
+    drawdown: list[dict] = []
+    exhausted_year = None
+    for r in drawdown_all:
+        drawdown.append(r)
+        if (r.get("financial_assets_closing", 0) or 0) <= 0:
+            exhausted_year = r["year"]
+            break
+    if not accumulation:
+        accumulation = yoy[:15]
+    rows = accumulation + drawdown
+    corpus_lasts = exhausted_year is None and bool(drawdown_all)
 
     emi_years = [r["year"] for r in yoy if (r.get("loan_repayment") or 0) > 0]
     loan_paid_year = (max(emi_years) + 1) if emi_years else None
@@ -1460,48 +1482,35 @@ def _v2_s1_cashflow(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None
             return " @"
         return ""
 
-    # Full year-by-year waterfall. Every year is shown with the complete
-    # financial-asset flow: Opening → + Net savings → + Returns → − Goal
-    # withdrawals / ± Lump sums → Closing, plus net worth (financial + hard).
-    body = ""
-    sum_income = sum_out = sum_save = sum_returns = sum_wd = 0.0
-    for r in rows:
+    def _row_html(r, *, retired: bool) -> str:
         yr = r["year"]
-        wd = r.get("major_withdrawals", 0) or 0          # negative when a goal is funded
+        wd = r.get("major_withdrawals", 0) or 0
         lump = r.get("lumpsum_deposit_withdrawal", 0) or 0
         goal = r.get("goal_remarks") or ""
-        sum_income += r.get("total_income", 0) or 0
-        sum_out += r.get("total_outflow", 0) or 0
-        sum_save += r.get("surplus", 0) or 0
-        sum_returns += r.get("investment_returns", 0) or 0
-        sum_wd += wd
-
-        # Combined event cell: goal withdrawal (with its symbol) and/or lump sum.
         event = ""
         if wd != 0:
             event = _v2c(wd) + _sym(goal)
         if lump != 0:
             event += ("&nbsp;" if event else "") + ("+" if lump > 0 else "") + _v2c(lump) + (" ^" if lump > 0 else "")
-
-        # Remark: the goal/lumpsum label, or a milestone callout.
         remark = ""
         if wd != 0 and goal:
             remark = goal
         elif lump != 0 and r.get("remarks"):
             remark = r["remarks"]
         milestone = ""
-        if ef_year and yr == ef_year:
+        if exhausted_year and yr == exhausted_year:
+            milestone = "Corpus exhausted — savings can no longer cover living expenses"
+        elif ef_year and yr == ef_year:
             milestone = f"Emergency fund target ({_v2c(ef_target)}) reached"
         elif loan_paid_year and yr == loan_paid_year:
             milestone = "Home loan paid off — EMI frees up for retirement SIP"
         elif yr == retire_year:
-            milestone = "Retirement — corpus deployed to fund living expenses"
-        remark = milestone or remark
-
+            milestone = "Retirement — employment income stops; corpus funds living expenses"
+        remark = milestone or (("Living on corpus" if retired and not remark else remark))
         nw = r.get("net_worth", 0) or (
             (r.get("financial_assets_closing", 0) or 0) + (r.get("non_financial_assets_closing", 0) or 0))
-        hl = ' class="subtotal"' if (event or milestone) else ""
-        body += (
+        hl = ' class="subtotal"' if (event or milestone) else (' class="drawdown"' if retired else "")
+        return (
             f'<tr{hl}><td>{yr}</td><td class="num">{int(r.get("age",0))}</td>'
             f'<td class="num">{_v2c(r.get("total_income",0))}</td>'
             f'<td class="num">{_v2c(r.get("total_outflow",0))}</td>'
@@ -1513,25 +1522,49 @@ def _v2_s1_cashflow(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None
             f'<td class="num">{_v2c(nw)}</td>'
             f'<td>{_h(remark)}</td></tr>')
 
-    # Totals row across the projected horizon.
+    # Accumulation rows + a phase subtotal (income / savings / returns to retirement).
+    body = "".join(_row_html(r, retired=False) for r in accumulation)
     body += (
-        f'<tr class="total"><td>Total</td><td></td>'
-        f'<td class="num">{_v2c(sum_income)}</td><td class="num">{_v2c(sum_out)}</td>'
-        f'<td class="num">{_v2c(sum_save)}</td><td></td>'
-        f'<td class="num">{_v2c(sum_returns)}</td>'
-        f'<td class="num">{_v2c(sum_wd)}</td><td></td><td></td><td></td></tr>')
+        f'<tr class="total"><td>To retirement</td><td></td>'
+        f'<td class="num">{_v2c(sum(r.get("total_income",0) or 0 for r in accumulation))}</td>'
+        f'<td class="num">{_v2c(sum(r.get("total_outflow",0) or 0 for r in accumulation))}</td>'
+        f'<td class="num">{_v2c(sum(r.get("surplus",0) or 0 for r in accumulation))}</td><td></td>'
+        f'<td class="num">{_v2c(sum(r.get("investment_returns",0) or 0 for r in accumulation))}</td>'
+        f'<td class="num">{_v2c(sum(r.get("major_withdrawals",0) or 0 for r in accumulation))}</td><td></td><td></td><td></td></tr>')
+    # Post-retirement drawdown phase.
+    if drawdown:
+        body += (
+            '<tr class="subtotal"><td colspan="11">— Post-retirement drawdown — employment income stops; '
+            'living expenses are met by drawing down the corpus —</td></tr>')
+        body += "".join(_row_html(r, retired=True) for r in drawdown)
 
-    final_fa = rows[-1].get("financial_assets_closing", 0)
-    final_nw = rows[-1].get("net_worth", 0) or (
-        (rows[-1].get("financial_assets_closing", 0) or 0) + (rows[-1].get("non_financial_assets_closing", 0) or 0))
     corpus = ret.get("corpus_required", 0) or 0
-    income0 = rows[0].get("total_income", 0) or 0
-    out0 = rows[0].get("total_outflow", 0) or 0
-    save0 = rows[0].get("surplus", 0) or 0
-    n_years = len(rows) - 1
+    corpus_at_retire = (accumulation[-1].get("financial_assets_closing", 0) or 0) if accumulation else 0
+    terminal = (drawdown[-1] if drawdown else (accumulation[-1] if accumulation else {}))
+    terminal_age = int(terminal.get("age", 0) or 0)
+    terminal_nw = terminal.get("net_worth", 0) or 0
+    income0 = accumulation[0].get("total_income", 0) or 0
+    out0 = accumulation[0].get("total_outflow", 0) or 0
+    save0 = accumulation[0].get("surplus", 0) or 0
+    n_years = retire_year - cur
+
+    if corpus_lasts:
+        phase_note = (f"The corpus funds living expenses through age {terminal_age} with about "
+                      f"{_v2c(terminal_nw)} of net worth remaining — a legacy for the family.")
+        phase_cls = "good"
+    elif exhausted_year:
+        exhausted_age = next((int(r.get("age", 0) or 0) for r in drawdown if r["year"] == exhausted_year), 0)
+        phase_note = (f"At the current pace the corpus is drawn down to zero by {exhausted_year} "
+                      f"(age {exhausted_age}) — a retirement shortfall begins there. Section 5 sizes the "
+                      f"SIP that closes it so the corpus lasts your full lifetime.")
+        phase_cls = "warn"
+    else:
+        phase_note = "Retirement drawdown is not yet projected."
+        phase_cls = "info"
+
     return f"""<section class="page">
   <h2>1.  Cash Flow</h2>
-  <p>Your money flow today, and how it compounds across the next {n_years} years to fund every goal you've set. This is the firm's baseline trajectory — what unfolds at your current pace, with the goals you've stated taken in the years you've stated.</p>
+  <p>Your money flow across your whole financial life — the {n_years} <strong>accumulation</strong> years to retirement, where savings and returns build your corpus, and the <strong>drawdown</strong> years after, where employment income stops and the corpus funds your living expenses. This is the firm's baseline trajectory at your current pace.</p>
 
   <h3>This year at a glance</h3>
   <table>
@@ -1543,8 +1576,8 @@ def _v2_s1_cashflow(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None
     </tbody>
   </table>
 
-  <h3>Year-by-year view</h3>
-  <p>The complete financial-asset waterfall for every year to retirement. Each year: you start with the <em>opening</em> balance, add your <em>net savings</em> and <em>investment returns</em>, then subtract any <em>goal withdrawals</em> (or add one-off lump sums) to reach the <em>closing</em> balance. <em>Net worth</em> adds your hard assets (real estate, gold) on top.</p>
+  <h3>Year-by-year view — accumulation, then drawdown</h3>
+  <p>Each year: you start with the <em>opening</em> balance, add <em>net savings</em> and <em>investment returns</em>, then subtract any <em>goal withdrawals</em> (or add lump sums) to reach the <em>closing</em> balance. After retirement, income stops, <em>net savings</em> turns negative, and the corpus is drawn down. <em>Net worth</em> adds your hard assets (real estate, gold) on top.</p>
   <table class="dense">
     <thead><tr>
       <th>Year</th><th class="num">Age</th><th class="num">Income</th><th class="num">Expense + EMI</th>
@@ -1553,9 +1586,9 @@ def _v2_s1_cashflow(plan: PlanState, cfp: cfp_skill.CFPOutput, scen: dict | None
     </tr></thead>
     <tbody>{body}</tbody>
   </table>
-  <p class="muted"><strong>Reading the columns.</strong>&nbsp; <em>Net savings</em> = income − expenses − EMI for the year. <em>Returns</em> = the year's growth on invested capital. <em>Goal / Lump</em> = a goal spend (shown negative) or a one-off inflow (shown with +). <em>Closing FA</em> = opening + net savings + returns − goal spend ± lump. <em>Net worth</em> = closing financial assets plus hard assets.</p>
-  <p class="muted"><strong>Reading the symbols.</strong>&nbsp; # children's education withdrawal.&nbsp; $ vacation withdrawal.&nbsp; @ property withdrawal.&nbsp; ^ expected one-time inflow (bonus, RSU, inheritance) — none provided in your inputs; share with your advisor if any are expected.</p>
-  <p class="muted"><strong>Where this lands.</strong>&nbsp; By {rows[-1]['year']} your financial assets reach about {_v2c(final_fa)} and your net worth about {_v2c(final_nw)} — against the {_v2c(corpus)} retirement corpus target. Goal Planning (Section 4) breaks down each goal and your retirement readiness in detail.</p>
+  <p class="muted"><strong>Reading the columns.</strong>&nbsp; <em>Net savings</em> = income − expenses − EMI (negative after retirement). <em>Returns</em> = the year's growth on invested capital. <em>Goal / Lump</em> = a goal spend (negative) or a one-off inflow (+). <em>Closing FA</em> = opening + net savings + returns − goal spend ± lump. <em>Net worth</em> = closing financial assets plus hard assets.</p>
+  <p class="muted"><strong>Reading the symbols.</strong>&nbsp; # children's education withdrawal.&nbsp; $ vacation withdrawal.&nbsp; @ property withdrawal.&nbsp; ^ expected one-time inflow (bonus, RSU, inheritance) — none provided in your inputs.</p>
+  <div class="callout {phase_cls}"><p><strong>Accumulation → drawdown.</strong>&nbsp; You retire in {retire_year} with about {_v2c(corpus_at_retire)} in financial assets, against a {_v2c(corpus)} corpus target. {phase_note}</p></div>
 </section>"""
 
 
