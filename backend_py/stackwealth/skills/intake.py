@@ -433,6 +433,135 @@ async def _parse_pdf(buf: bytes, filename: str) -> dict[str, Any]:
     )
 
 
+def _goal_kind_from_name(name: str) -> str:
+    """Map a free-text goal label to a canonical GoalKind."""
+    n = (name or "").lower()
+    if any(k in n for k in ("education", "college", "school", "tuition", "study")):
+        return "child_education"
+    if any(k in n for k in ("marriage", "wedding")):
+        return "child_marriage"
+    if any(k in n for k in ("retire", "fire", "pension")):
+        return "retirement"
+    if any(k in n for k in ("house", "home", "property", "flat", "apartment", "villa", "plot", "real estate")):
+        return "house_purchase"
+    if any(k in n for k in ("travel", "foreign", "vacation", "trip", "holiday", "tour")):
+        return "foreign_travel"
+    return "other"
+
+
+_INR_AMT_RE = re.compile(r"([0-9][0-9,]*\.?[0-9]*)\s*(cr|crore|crores|l|lac|lakh|lakhs|k|thousand)?", re.I)
+
+
+def _parse_inr_amount(v: Any) -> Optional[float]:
+    """Parse an INR amount cell — number, or a string like '2 Crore', '50L',
+    '₹6 Crore', '1,50,000'. Returns None for blank/zero/unparseable."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if v else None
+    if not isinstance(v, str):
+        return None
+    s = v.strip().lower().replace("₹", "").replace("rs.", "").replace("rs", "").strip()
+    if not s:
+        return None
+    m = _INR_AMT_RE.search(s)
+    if not m:
+        return None
+    try:
+        num = float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    unit = (m.group(2) or "").lower()
+    if unit in ("cr", "crore", "crores"):
+        num *= 1e7
+    elif unit in ("l", "lac", "lakh", "lakhs"):
+        num *= 1e5
+    elif unit in ("k", "thousand"):
+        num *= 1e3
+    return num if num > 0 else None
+
+
+def _parse_goals_sheet(wb) -> list[dict]:
+    """Deterministically capture EVERY named goal row from the financial-goals
+    sheet — INCLUDING name-only rows the LLM drops because they carry no amount
+    or year. Each row becomes a goal with `kind` inferred from the name;
+    target_year and target_amount are filled when present and left null
+    otherwise, so a goal the RM has only named (e.g. 'House Purchase') still
+    appears on the canvas for them to quantify, instead of silently vanishing."""
+    sheet = None
+    for sn in wb.sheetnames:
+        if "goal" in sn.lower():
+            sheet = wb[sn]
+            break
+    if sheet is None:
+        return []
+    rows = list(sheet.iter_rows(values_only=True))
+    hdr_idx = None
+    col: dict[str, int] = {}
+    for i, row in enumerate(rows):
+        low = [str(c).lower().strip() if c is not None else "" for c in row]
+        has_goal = any(c == "goal" or c.startswith("goal") for c in low)
+        has_field = any(("year" in c) or ("future value" in c) or ("cost" in c) for c in low)
+        if has_goal and has_field:
+            hdr_idx = i
+            for j, c in enumerate(low):
+                if c.startswith("goal") and "name" not in col:
+                    col["name"] = j
+                elif ("target year" in c) or c == "year":
+                    col["year"] = j
+                elif ("today" in c and "cost" in c) or c == "cost":
+                    col["today"] = j
+                elif "future value" in c:
+                    col["fv"] = j
+            break
+    if hdr_idx is None or "name" not in col:
+        return []
+
+    out: list[dict] = []
+    for row in rows[hdr_idx + 1:]:
+        ni = col["name"]
+        name = row[ni] if ni < len(row) else None
+        if not isinstance(name, str):
+            continue
+        name = name.strip()
+        if not name or name.lower() in ("total", "goal", "goals"):
+            continue
+        goal: dict[str, Any] = {"goal_name": name, "kind": _goal_kind_from_name(name)}
+        yr = row[col["year"]] if col.get("year") is not None and col["year"] < len(row) else None
+        if isinstance(yr, (int, float)) and not isinstance(yr, bool) and 2000 <= yr <= 2100:
+            goal["target_year"] = int(yr)
+        today = row[col["today"]] if col.get("today") is not None and col["today"] < len(row) else None
+        fv = row[col["fv"]] if col.get("fv") is not None and col["fv"] < len(row) else None
+        amt_today = _parse_inr_amount(today)
+        amt_fv = _parse_inr_amount(fv)
+        if amt_today:
+            goal["target_amount"] = amt_today
+            goal["is_target_in_today_money"] = True
+        elif amt_fv:
+            goal["target_amount"] = amt_fv
+            goal["is_target_in_today_money"] = False
+        out.append(goal)
+    return out
+
+
+def _merge_goal_rows(partial_state: dict, goal_rows: list[dict]) -> None:
+    """Append any named goal the deterministic sheet parse found that the LLM
+    didn't already extract (matched case-insensitively by name). Never drops or
+    overwrites an LLM-parsed goal — only fills in the ones it missed."""
+    if not goal_rows:
+        return
+    existing = partial_state.get("financial_goals") or []
+    have = {
+        str(g.get("goal_name", "")).strip().lower()
+        for g in existing if isinstance(g, dict)
+    }
+    merged = list(existing)
+    for g in goal_rows:
+        if str(g.get("goal_name", "")).strip().lower() not in have:
+            merged.append(g)
+    partial_state["financial_goals"] = merged
+
+
 def _row_is_blank(row: tuple) -> bool:
     """A row is blank if every cell is None or an empty-string after
     stripping. Excel templates have hundreds of trailing empty rows
@@ -760,6 +889,10 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
             recurring_rows = _parse_recurring_investments(wb)
         except Exception:
             recurring_rows = None
+        try:
+            goal_rows = _parse_goals_sheet(wb)
+        except Exception:
+            goal_rows = []
         chunks: list[str] = []
         for sn in wb.sheetnames:
             # Skip COMPUTED / projection tabs — they hold derived figures
@@ -825,6 +958,12 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
     # step-up start/rate, allocated corpus) → authoritative for the corpus + table.
     if retirement_inputs and result.get("partial_state") is not None:
         result["partial_state"]["retirement_plan_inputs"] = retirement_inputs
+
+    # Deterministic goals capture — ensure EVERY named goal row reaches the plan,
+    # even the name-only ones the LLM omits for having no amount/year. Only adds
+    # goals the LLM missed; never overwrites an LLM-parsed goal.
+    if goal_rows and result.get("partial_state") is not None:
+        _merge_goal_rows(result["partial_state"], goal_rows)
 
     if yoy_manual and result.get("partial_state") is not None:
         ps = result["partial_state"]
