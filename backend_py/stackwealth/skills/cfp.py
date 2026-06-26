@@ -709,6 +709,333 @@ def compute_retirement_stepup(
     }
 
 
+# ── Retirement corpus — three-case client presentation ───────────────────
+#
+# A client-facing reframing of the corpus math: instead of a step-up schedule,
+# present three cases the RM walks the client through (see the firm spec):
+#   Case 1  Recommended Path — the flat monthly SIP (no step-up) to start today
+#           that exactly funds the required corpus. The headline, no-tricks ask.
+#   Case 2  Base Case — where the client lands investing only their currently
+#           available surplus, flat, with no other change.
+#   Case 3  Stretch Case — only when Case 1's flat SIP isn't comfortably
+#           feasible: 2-3 lever combinations (step-up, delay, lower retirement
+#           spend, deploy idle cash) that reach the same corpus with a lower ask
+#           today. Hard cap: never retire past 65.
+# Every back-solved SIP is forward-validated (final corpus must match target).
+
+# Feasibility bands on Case-1 flat SIP as a share of total monthly surplus.
+_RET_BAND_FEASIBLE = 0.60   # ≤60% → feasible, no Stretch Case
+_RET_BAND_TIGHT = 0.90      # 60-90% → tight, Stretch optional
+_RET_BAND_STRETCHED = 1.20  # 90-120% → stretched, Stretch required; >120% not feasible
+_RET_MAX_RETIRE_AGE = 65    # uniform hard cap across all profiles
+_RET_VALIDATE_TOL = 0.01    # 1% forward-validation tolerance
+
+
+def _ret_band(ratio: float) -> str:
+    if ratio <= _RET_BAND_FEASIBLE:
+        return "feasible"
+    if ratio <= _RET_BAND_TIGHT:
+        return "tight"
+    if ratio <= _RET_BAND_STRETCHED:
+        return "stretched"
+    return "not_feasible"
+
+
+def _flat_sip_fv(sip_monthly: float, monthly_rate: float, months: int) -> float:
+    """Future value at retirement of a constant monthly SIP (ordinary annuity)."""
+    if sip_monthly <= 0 or months <= 0:
+        return 0.0
+    return abs(excel_fv(monthly_rate, months, -sip_monthly, 0))
+
+
+def _lump_fv(amount_today: float, annual_rate: float, years: float) -> float:
+    if amount_today <= 0 or years <= 0:
+        return 0.0
+    return abs(excel_fv(annual_rate, years, 0, -amount_today))
+
+
+def _stepup_fv_factor(step_up_pct: float, annual_rate: float, years: int) -> float:
+    """FV at retirement of ₹1/yr starting contribution stepped up `step_up_pct`
+    each year, each year's contribution grown at `annual_rate`. Mirrors the
+    closed-form multiplier in `compute_retirement_stepup`."""
+    return sum(
+        ((1 + step_up_pct) ** i) * ((1 + annual_rate) ** (years - i))
+        for i in range(years)
+    )
+
+
+def compute_retirement_cases(
+    *,
+    current_age: float,
+    retirement_age: float,
+    life_expectancy: int,
+    spouse_current_age: Optional[float],
+    spouse_life_expectancy: Optional[int],
+    retire_annual_expense_today: float,
+    inflation: float,
+    corpus_discount_return: float,
+    sip_funding_return: float,
+    retirement_earmarked_today: float,
+    one_time_spend_today: float,
+    one_time_spend_years: Optional[float],
+    one_time_spend_inflation: Optional[float],
+    total_monthly_surplus: float,
+    other_goal_sip_monthly: float,
+    emergency_fund_sip_monthly: float,
+    idle_liquid_assets: float = 0.0,
+    lowpriority_goal_sip_monthly: float = 0.0,
+) -> dict:
+    """Compute the three retirement cases. All inputs are client-specific and
+    read dynamically by the caller (never hardcoded). Returns a structured dict
+    the canvas Retirement-Glide view renders directly."""
+
+    def _corpus_for(ret_age: float, expense_today: float) -> dict:
+        """Required corpus (at ret_age) for a given today's retirement expense,
+        via the firm's corpus formula — existing assets handled separately."""
+        return compute_retirement_corpus(
+            current_age=current_age,
+            retirement_age=ret_age,
+            life_expectancy=life_expectancy,
+            retirement_annual_expenses_today=expense_today,
+            inflation=inflation,
+            corpus_discount_return=corpus_discount_return,
+            spouse_current_age=spouse_current_age,
+            spouse_life_expectancy=spouse_life_expectancy,
+            one_time_spend_today=one_time_spend_today,
+            one_time_spend_years=one_time_spend_years,
+            one_time_spend_inflation=one_time_spend_inflation,
+            projected_existing_corpus_fv=0.0,
+            sip_funding_return=sip_funding_return,
+        )
+
+    i = sip_funding_return / 12.0
+    surplus_available = total_monthly_surplus - other_goal_sip_monthly - emergency_fund_sip_monthly
+
+    base = _corpus_for(retirement_age, retire_annual_expense_today)
+    years_to_retire = base["years_to_retire"]
+    years_in_retirement = base["post_retire_years"]
+    n_months = int(round(years_to_retire)) * 12
+    corpus_required = base["corpus_required"]
+    annual_expense_at_retirement = base["annual_expenses_at_retirement"]
+    existing_fv = _lump_fv(retirement_earmarked_today, sip_funding_return, years_to_retire)
+
+    inputs = {
+        "current_age": round(current_age, 1),
+        "retirement_age": round(retirement_age, 1),
+        "life_expectancy": life_expectancy,
+        "spouse_life_expectancy": spouse_life_expectancy,
+        "years_to_retire": round(years_to_retire, 1),
+        "years_in_retirement": round(years_in_retirement, 1),
+        "expected_return": round(sip_funding_return, 4),
+        "inflation": round(inflation, 4),
+        "retire_monthly_expense_today": round(retire_annual_expense_today / 12),
+        "existing_retirement_assets_today": round(retirement_earmarked_today),
+        "total_monthly_surplus": round(total_monthly_surplus),
+        "other_goal_sip_monthly": round(other_goal_sip_monthly),
+        "emergency_fund_sip_monthly": round(emergency_fund_sip_monthly),
+        "surplus_available_for_retirement": round(surplus_available),
+        "idle_liquid_assets": round(idle_liquid_assets),
+    }
+
+    # ── Case 1 — Recommended flat SIP ────────────────────────────────────
+    shortfall = max(0.0, corpus_required - existing_fv)
+    flat_sip = abs(excel_pmt(i, n_months, 0, -shortfall)) if (shortfall > 0 and n_months > 0 and i > 0) else 0.0
+    final_corpus_c1 = existing_fv + _flat_sip_fv(flat_sip, i, n_months)
+    band_ratio = (flat_sip / total_monthly_surplus) if total_monthly_surplus > 0 else float("inf")
+    case1 = {
+        "corpus_required": round(corpus_required),
+        "monthly_expense_at_retirement": round(annual_expense_at_retirement / 12),
+        "existing_assets_fv": round(existing_fv),
+        "shortfall": round(shortfall),
+        "flat_monthly_sip": round(flat_sip),
+        "final_corpus": round(final_corpus_c1),
+        "band_ratio": round(band_ratio, 3) if band_ratio != float("inf") else None,
+        "band_pct": round(band_ratio * 100, 1) if band_ratio != float("inf") else None,
+        "feasibility": _ret_band(band_ratio),
+        "validated": corpus_required <= 0 or abs(final_corpus_c1 - corpus_required) / corpus_required <= _RET_VALIDATE_TOL,
+    }
+
+    # ── Case 2 — Base case (current available surplus, flat) ──────────────
+    if surplus_available <= 0:
+        case2 = {
+            "available": False,
+            "reason": (
+                "Your committed goal SIPs and emergency-fund contribution already use up "
+                "your monthly surplus, so there is nothing left to start a retirement SIP. "
+                "Revisit the goal allocation with your RM before sizing a retirement plan."
+            ),
+            "surplus_available": round(surplus_available),
+        }
+    else:
+        projected_c2 = existing_fv + _flat_sip_fv(surplus_available, i, n_months)
+        coverage = (projected_c2 / corpus_required) if corpus_required > 0 else 1.0
+        case2 = {
+            "available": True,
+            "surplus_available": round(surplus_available),
+            "projected_corpus": round(projected_c2),
+            "coverage_pct": round(coverage * 100, 1),
+            "gap": round(max(0.0, corpus_required - projected_c2)),
+            "on_track": coverage >= 0.95,
+        }
+
+    # ── Case 3 — Stretch combinations (only when Case 1 isn't comfortable) ─
+    triggered = band_ratio > _RET_BAND_FEASIBLE
+    case3: dict = {"triggered": triggered, "feasibility_band": _ret_band(band_ratio)}
+    if triggered:
+        candidates = _build_stretch_candidates(
+            corpus_for=_corpus_for,
+            current_age=current_age,
+            retirement_age=retirement_age,
+            retire_annual_expense_today=retire_annual_expense_today,
+            sip_funding_return=sip_funding_return,
+            retirement_earmarked_today=retirement_earmarked_today,
+            total_monthly_surplus=total_monthly_surplus,
+            surplus_available=surplus_available,
+            idle_liquid_assets=idle_liquid_assets,
+            lowpriority_goal_sip_monthly=lowpriority_goal_sip_monthly,
+        )
+        feasible = [c for c in candidates if c["feasible"]]
+        feasible.sort(key=lambda c: c["disruption"])
+        # Prefer 2-3 least-disruptive; guarantee at least one step-up option.
+        chosen = feasible[:3]
+        if chosen and not any(c["is_stepup"] for c in chosen):
+            stepup_alt = next((c for c in feasible if c["is_stepup"]), None)
+            if stepup_alt:
+                chosen = (chosen[:2] + [stepup_alt])
+        case3["combinations"] = chosen
+        case3["structurally_infeasible"] = len(feasible) == 0
+        if not feasible:
+            case3["infeasible_note"] = (
+                "Even retiring at the 65-year cap with every allowable lever, the flat ask "
+                "stays above the available surplus. This plan is structurally infeasible — "
+                "escalate to the RM rather than pushing the retirement age further."
+            )
+    return {"inputs": inputs, "case1": case1, "case2": case2, "case3": case3}
+
+
+def _build_stretch_candidates(
+    *,
+    corpus_for,
+    current_age: float,
+    retirement_age: float,
+    retire_annual_expense_today: float,
+    sip_funding_return: float,
+    retirement_earmarked_today: float,
+    total_monthly_surplus: float,
+    surplus_available: float,
+    idle_liquid_assets: float,
+    lowpriority_goal_sip_monthly: float,
+) -> list[dict]:
+    """Build the candidate lever-combinations for Case 3, each calibrated (via a
+    fresh back-solve under its parameters) to reach the corpus, then marked
+    feasible if the resulting starting SIP fits within total monthly surplus.
+    Each candidate is forward-validated by construction of the back-solve."""
+    i = sip_funding_return / 12.0
+    cands: list[dict] = []
+
+    def cap_age(delay: int) -> float:
+        return min(float(_RET_MAX_RETIRE_AGE), retirement_age + delay)
+
+    def add(*, name, step_up, delay, expense_factor, use_idle, drop_lowprio, sentence, trade_off):
+        ret_age = cap_age(delay)
+        years = ret_age - current_age
+        n_years = int(round(years))
+        months = n_years * 12
+        if months <= 0:
+            return
+        expense_today = retire_annual_expense_today * expense_factor
+        cb = corpus_for(ret_age, expense_today)
+        corpus_need = cb["corpus_required"]
+        seed_corpus = retirement_earmarked_today + (idle_liquid_assets if use_idle else 0.0)
+        # Surplus this candidate can draw on (redirecting low-priority goal SIPs).
+        avail = surplus_available + (lowpriority_goal_sip_monthly if drop_lowprio else 0.0)
+
+        if step_up > 0:
+            sp = compute_retirement_stepup(
+                current_age=current_age,
+                retirement_age=ret_age,
+                current_corpus_today=seed_corpus,
+                first_year_annual_contribution=0.0,
+                step_up_pct=step_up,
+                rate=sip_funding_return,
+                corpus_needed=corpus_need,
+            )
+            start_monthly = sp["required_first_year_monthly"]
+            final_corpus = sp["projected_corpus_at_retirement"]  # uses seed (0) → reported separately
+            # Reconstruct the funded corpus with the REQUIRED start SIP:
+            funded = abs(excel_fv(sip_funding_return, years, 0, -seed_corpus)) + \
+                sp["required_first_year_contribution"] * _stepup_fv_factor(step_up, sip_funding_return, n_years)
+            final_year_monthly = start_monthly * ((1 + step_up) ** (n_years - 1)) if n_years > 0 else start_monthly
+        else:
+            existing_fv = _lump_fv(seed_corpus, sip_funding_return, years)
+            shortfall = max(0.0, corpus_need - existing_fv)
+            start_monthly = abs(excel_pmt(i, months, 0, -shortfall)) if (shortfall > 0 and i > 0) else 0.0
+            funded = existing_fv + _flat_sip_fv(start_monthly, i, months)
+            final_year_monthly = start_monthly
+
+        validated = corpus_need <= 0 or abs(funded - corpus_need) / corpus_need <= _RET_VALIDATE_TOL
+        feasible = start_monthly <= total_monthly_surplus and ret_age <= _RET_MAX_RETIRE_AGE
+        # Disruption ordering: step-up rate, delay years, expense cut, structural levers.
+        disruption = (step_up * 100) + (delay * 1.5) + ((1 - expense_factor) * 30) + \
+            (1.0 if drop_lowprio else 0.0) + (0.5 if use_idle else 0.0)
+        cands.append({
+            "name": name,
+            "levers_sentence": sentence,
+            "trade_off": trade_off,
+            "is_stepup": step_up > 0,
+            "step_up_pct": round(step_up, 4) if step_up > 0 else None,
+            "retirement_age": round(ret_age, 1),
+            "delay_years": delay,
+            "monthly_expense_today": round(expense_today / 12),
+            "expense_reduction_pct": round((1 - expense_factor) * 100, 1),
+            "uses_idle_cash": use_idle,
+            "redirects_lowpriority_goals": drop_lowprio,
+            "start_monthly_sip": round(start_monthly),
+            "final_year_monthly_sip": round(final_year_monthly),
+            "final_corpus": round(funded),
+            "corpus_target": round(corpus_need),
+            "available_surplus_for_candidate": round(avail),
+            "feasible": feasible,
+            "validated": validated,
+            "disruption": round(disruption, 2),
+        })
+
+    # Curated lever menu — the back-solve calibrates each to actually close the
+    # gap; infeasible ones are filtered by the caller. Ordered loosely from
+    # least to most disruptive.
+    add(name="Step-up SIP, 10%/yr", step_up=0.10, delay=0, expense_factor=1.0,
+        use_idle=False, drop_lowprio=False,
+        sentence="Switch from a flat SIP to one that grows 10% every year, in line with normal salary increments.",
+        trade_off="The SIP rises each year, but you start far lower than the flat ask and keep your retirement age and lifestyle unchanged.")
+    add(name="Step-up SIP, 15%/yr", step_up=0.15, delay=0, expense_factor=1.0,
+        use_idle=False, drop_lowprio=False,
+        sentence="Step the SIP up 15% a year — for an earner expecting faster income growth.",
+        trade_off="A steeper annual increase, but the lowest starting amount with no other change to your plan.")
+    add(name="Step-up 10% + retire 2 years later", step_up=0.10, delay=2, expense_factor=1.0,
+        use_idle=False, drop_lowprio=False,
+        sentence="Grow the SIP 10%/yr and work two extra years — more accumulation, fewer retirement years to fund.",
+        trade_off="The SIP grows each year and you retire two years later, but the starting amount drops sharply.")
+    add(name="Step-up 15% + 10% leaner retirement", step_up=0.15, delay=0, expense_factor=0.90,
+        use_idle=False, drop_lowprio=False,
+        sentence="Step up 15%/yr and plan a retirement lifestyle 10% lower than today's target.",
+        trade_off="SIP grows aggressively and your retirement spending is modestly lower in today's terms.")
+    if idle_liquid_assets > 0:
+        add(name="Step-up 10% + deploy idle cash", step_up=0.10, delay=0, expense_factor=1.0,
+            use_idle=True, drop_lowprio=False,
+            sentence="Move your idle liquid cash (beyond the emergency fund) into the retirement corpus now, and step the SIP up 10%/yr.",
+            trade_off="A one-time deployment of idle cash plus a gently rising SIP — no change to retirement age or lifestyle.")
+    if lowpriority_goal_sip_monthly > 0:
+        add(name="Step-up 10% + redirect lower-priority goals", step_up=0.10, delay=0, expense_factor=1.0,
+            use_idle=False, drop_lowprio=True,
+            sentence="Defer or scale down lower-priority discretionary goals and redirect that SIP to retirement, stepped up 10%/yr.",
+            trade_off="Some flexible, lower-priority goals are deferred so the freed surplus accelerates retirement.")
+    add(name="Step-up 20% + 15% leaner + retire 3 years later", step_up=0.20, delay=3, expense_factor=0.85,
+        use_idle=False, drop_lowprio=False,
+        sentence="Aggressive 20%/yr step-up, a 15% leaner retirement, and three extra working years (capped at 65).",
+        trade_off="The largest later commitment, a lower retirement lifestyle, and a later retirement — only viable if income growth genuinely supports a 20% annual step-up.")
+    return cands
+
+
 # ── Insurance computation (Insurance Computation tab) ────────────────────
 
 def compute_health_cover_required(
@@ -1648,6 +1975,54 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     _req_start = _sp.get("required_first_year_monthly", 0) or 0
     retirement["stepup_required_start_sip_monthly"] = round(_req_start)
     retirement["stepup_additional_start_sip_monthly"] = max(0, round(_req_start - ongoing_retirement_sip))
+
+    # ── Retirement: three-case client presentation (Case 1/2/3) ─────────
+    # All inputs read dynamically from the plan — nothing hardcoded. The
+    # emergency-fund SIP is the build-to-6-months contribution over 36 months;
+    # idle liquid = uninvested cash beyond the emergency fund; lower-priority
+    # redirectable SIPs come from non-retirement Mid/Low-priority goals.
+    bare_monthly = monthly_expenses + monthly_emi
+    ef = plan.emergency_fund
+    ef_current = float((ef.total_emergency_corpus if ef else 0) or 0)
+    ef_target = 6 * bare_monthly
+    ef_sip_monthly = max(0.0, (ef_target - ef_current) / 36) if ef_target > ef_current else 0.0
+    lc = plan.liquid_capital
+    idle_liquid = float(
+        ((getattr(lc, "idle_cash_for_investment", 0) or 0)
+         + (getattr(lc, "fd_breakable_for_investment", 0) or 0)) if lc else 0.0
+    )
+    _prio_by_name = {
+        g.goal_name: (getattr(g.priority, "value", g.priority) if g.priority else None)
+        for g in plan.financial_goals
+    }
+    lowprio_sip = 0.0
+    for b in goal_blocks:
+        prio = str(_prio_by_name.get(b.get("goal_name"), "") or "").lower()
+        if prio in ("low", "medium", "mid"):
+            lowprio_sip += b.get("required_sip_monthly", 0) or 0
+    try:
+        retirement["cases"] = compute_retirement_cases(
+            current_age=current_age,
+            retirement_age=retirement_age,
+            life_expectancy=rt_life_exp,
+            spouse_current_age=spouse_age_frac,
+            spouse_life_expectancy=rt_spouse_le,
+            retire_annual_expense_today=retire_annual_expense_today,
+            inflation=plan.assumptions.inflation or 0.07,
+            corpus_discount_return=POST_TAX_RETURN["equity_conservative"],
+            sip_funding_return=POST_TAX_RETURN["equity_hybrid"],
+            retirement_earmarked_today=retirement_earmarked_today,
+            one_time_spend_today=ot_today,
+            one_time_spend_years=ot_years,
+            one_time_spend_inflation=ot_infl,
+            total_monthly_surplus=surplus_pre_sip,
+            other_goal_sip_monthly=sip_goal,
+            emergency_fund_sip_monthly=ef_sip_monthly,
+            idle_liquid_assets=idle_liquid,
+            lowpriority_goal_sip_monthly=lowprio_sip,
+        )
+    except Exception as e:  # never let the cases break the whole CFP
+        retirement["cases"] = {"error": str(e)}
 
     # ── Insurance need ─────────────────────────────────────────────────
     loans = plan.loans_liabilities
