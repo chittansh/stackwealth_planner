@@ -1977,20 +1977,32 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
     retirement["stepup_additional_start_sip_monthly"] = max(0, round(_req_start - ongoing_retirement_sip))
 
     # ── Retirement: three-case client presentation (Case 1/2/3) ─────────
-    # All inputs read dynamically from the plan — nothing hardcoded. The
-    # emergency-fund SIP is the build-to-6-months contribution over 36 months;
-    # idle liquid = uninvested cash beyond the emergency fund; lower-priority
-    # redirectable SIPs come from non-retirement Mid/Low-priority goals.
-    bare_monthly = monthly_expenses + monthly_emi
+    # All inputs read dynamically from the plan — nothing hardcoded.
+    #
+    # The surplus the retirement SIP can draw on is the INVESTABLE surplus
+    # (pre-SIP surplus net of the emergency-fund build SIP — identical to the
+    # cash-flow card and scenarios.compute_investable_surplus, so the numbers
+    # tie out), LESS the SIPs the other goals actually REQUIRE. We net out the
+    # goals' *required* SIP (total_required_sip), NOT just the small amounts
+    # already committed (sip_goal) — otherwise a goal needing ₹50k/mo but only
+    # funded ₹3k/mo would falsely look like it leaves the surplus untouched.
+    me = plan.monthly_expenses
     ef = plan.emergency_fund
     ef_current = float((ef.total_emergency_corpus if ef else 0) or 0)
-    ef_target = 6 * bare_monthly
-    ef_sip_monthly = max(0.0, (ef_target - ef_current) / 36) if ef_target > ef_current else 0.0
+    essential = sum(float(getattr(me, k) or 0) for k in (
+        "household_expenses", "rent_or_emi", "groceries", "utilities",
+        "school_fees", "insurance_premium", "medical")) or monthly_expenses
+    bare_minimum = essential + monthly_emi
+    ef_gap = max(0.0, 6 * bare_minimum - ef_current)
+    ef_sip_monthly = round(ef_gap / 36) if (ef_gap > 0 and bare_minimum > 0) else 0
+    investable_surplus = max(0.0, surplus_pre_sip - ef_sip_monthly)
     lc = plan.liquid_capital
     idle_liquid = float(
         ((getattr(lc, "idle_cash_for_investment", 0) or 0)
          + (getattr(lc, "fd_breakable_for_investment", 0) or 0)) if lc else 0.0
     )
+    # Required SIPs for lower-priority, non-retirement goals — redirectable in
+    # the Case-3 "defer lower-priority goals" lever.
     _prio_by_name = {
         g.goal_name: (getattr(g.priority, "value", g.priority) if g.priority else None)
         for g in plan.financial_goals
@@ -2015,12 +2027,20 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
             one_time_spend_today=ot_today,
             one_time_spend_years=ot_years,
             one_time_spend_inflation=ot_infl,
-            total_monthly_surplus=surplus_pre_sip,
-            other_goal_sip_monthly=sip_goal,
-            emergency_fund_sip_monthly=ef_sip_monthly,
+            # Investable surplus is already net of the emergency-fund SIP, so the
+            # cases function subtracts only the goals' required SIP on top.
+            total_monthly_surplus=investable_surplus,
+            other_goal_sip_monthly=total_required_sip,
+            emergency_fund_sip_monthly=0.0,
             idle_liquid_assets=idle_liquid,
             lowpriority_goal_sip_monthly=lowprio_sip,
         )
+        # Carry the components through for a transparent breakdown in the UI.
+        if isinstance(retirement["cases"].get("inputs"), dict):
+            retirement["cases"]["inputs"]["investable_surplus"] = round(investable_surplus)
+            retirement["cases"]["inputs"]["emergency_fund_sip_monthly"] = ef_sip_monthly
+            retirement["cases"]["inputs"]["goal_sip_required_monthly"] = round(total_required_sip)
+            retirement["cases"]["inputs"]["pre_sip_surplus"] = round(surplus_pre_sip)
     except Exception as e:  # never let the cases break the whole CFP
         retirement["cases"] = {"error": str(e)}
 

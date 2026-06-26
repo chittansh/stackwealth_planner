@@ -57,6 +57,8 @@ export function RetirementGlideView({ plan }: { plan: PlanState | null }) {
 /* ── Inputs strip ──────────────────────────────────────────────────────── */
 
 function InputsStrip({ inputs }: { inputs: CaseInputs }) {
+  const investable = inputs.investable_surplus ?? inputs.total_monthly_surplus;
+  const goalSip = inputs.goal_sip_required_monthly ?? inputs.other_goal_sip_monthly;
   const items: [string, string][] = [
     ['Current age', `${oneDp(inputs.current_age)}`],
     ['Retirement age', `${oneDp(inputs.retirement_age)}`],
@@ -78,9 +80,14 @@ function InputsStrip({ inputs }: { inputs: CaseInputs }) {
         ))}
       </div>
       <p className="text-[10px] text-zinc-400 mt-3">
-        Surplus for retirement = total monthly surplus {formatINR(inputs.total_monthly_surplus, { compact: true })} −
-        other-goal SIPs {formatINR(inputs.other_goal_sip_monthly, { compact: true })} −
-        emergency-fund SIP {formatINR(inputs.emergency_fund_sip_monthly, { compact: true })}.
+        Surplus for retirement = investable surplus {formatINR(investable, { compact: true })}/mo −
+        SIPs your other goals need {formatINR(goalSip, { compact: true })}/mo.
+        {inputs.emergency_fund_sip_monthly != null && inputs.pre_sip_surplus != null && (
+          <>
+            {' '}Investable surplus is your {formatINR(inputs.pre_sip_surplus, { compact: true })}/mo pre-SIP surplus
+            net of the {formatINR(inputs.emergency_fund_sip_monthly, { compact: true })}/mo emergency-fund build SIP.
+          </>
+        )}
       </p>
     </div>
   );
@@ -111,7 +118,7 @@ function Case1Card({ c, inputs }: { c: Case1; inputs: CaseInputs }) {
         <Row label="Shortfall the SIP must close" value={formatINR(c.shortfall, { compact: true })} />
         <Row label="Projected corpus from this SIP" value={formatINR(c.final_corpus, { compact: true })} />
         <Row
-          label="Feasibility vs total surplus"
+          label="Feasibility vs investable surplus"
           value={c.band_pct != null ? `${oneDp(c.band_pct)}% of surplus` : '—'}
         />
       </dl>
@@ -287,6 +294,10 @@ type CaseInputs = {
   emergency_fund_sip_monthly: number;
   surplus_available_for_retirement: number;
   idle_liquid_assets: number;
+  // Added by compute_cfp for a transparent breakdown.
+  investable_surplus?: number;
+  goal_sip_required_monthly?: number;
+  pre_sip_surplus?: number;
 };
 
 type Case1 = {
