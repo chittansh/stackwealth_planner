@@ -323,7 +323,8 @@ def render_sheets(recalc_bytes: bytes, sheets: list[str] | None = None) -> list[
             "name": name.strip(),
             "cols": cols,
             "rows": rows,
-            "freeze": {"rows": header_idx + 1, "cols": 1},
+            # Freeze the top header row(s) only — no left-column freeze.
+            "freeze": {"rows": header_idx + 1, "cols": 0},
         })
     return out
 
