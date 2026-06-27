@@ -330,30 +330,59 @@ _CONFIGURED = False
 def setup_logging(
     level: Optional[str] = None,
     fmt: Optional[str] = None,
+    log_dir: Optional[str] = None,
 ) -> None:
-    """Configure root + app loggers once at startup. Logs to STDOUT so the
-    container runtime (Fly) collects it; idempotent (clears handlers) so reload
-    doesn't double-log. Format/level come from env:
+    """Configure root + app loggers once at startup. Idempotent (clears handlers)
+    so reload doesn't double-log.
+
+    Logs always go to STDOUT — on Fly/containers the filesystem is ephemeral
+    (wiped on restart), so the runtime collecting stdout is the right sink:
+        fly logs -a stackwealth-backend-py     # prod
+        (your terminal)                        # local uvicorn
+
+    Additionally writes a ROTATING FILE when a directory is given (arg or
+    STACKWEALTH_LOG_DIR env) — handy for local dev / a persistent volume:
+        logs/application.log  (daily rotation, keeps 7 days)
+
+    Config via env:
       STACKWEALTH_LOG_LEVEL  (default INFO)
       STACKWEALTH_LOG_FORMAT (json | pipe; default json in prod, pipe on a TTY)
+      STACKWEALTH_LOG_DIR    (if set, also write <dir>/application.log)
     """
     global _CONFIGURED
     level = (level or os.getenv("STACKWEALTH_LOG_LEVEL", "INFO")).upper()
     if fmt is None:
         fmt = os.getenv("STACKWEALTH_LOG_FORMAT") or ("pipe" if sys.stderr.isatty() else "json")
+    log_dir = log_dir or os.getenv("STACKWEALTH_LOG_DIR")
 
-    handler = logging.StreamHandler(sys.stdout)
     formatter = (PipeFormatter if fmt == "pipe" else JsonFormatter)(datefmt="%Y-%m-%dT%H:%M:%S")
-    handler.setFormatter(formatter)
-    handler.addFilter(ContextFilter())   # WHO + WHERE
-    handler.addFilter(PIIMaskFilter())   # safety net (after context)
+
+    def _attach_filters(h: logging.Handler) -> logging.Handler:
+        h.setFormatter(formatter)
+        h.addFilter(ContextFilter())   # WHO + WHERE
+        h.addFilter(PIIMaskFilter())   # safety net (after context)
+        return h
+
+    handlers: list[logging.Handler] = [_attach_filters(logging.StreamHandler(sys.stdout))]
+
+    file_path = None
+    if log_dir:
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            file_path = os.path.join(log_dir, "application.log")
+            handlers.append(_attach_filters(logging.handlers.TimedRotatingFileHandler(
+                file_path, when="midnight", interval=1, backupCount=7, encoding="utf-8",
+            )))
+        except Exception:  # a bad log dir must never crash startup
+            file_path = None
 
     # Root catches everything; the app namespace gets the level; noisy libraries
     # are turned down so the firehose stays readable.
     root = logging.getLogger()
     root.handlers.clear()
     root.setLevel(level)
-    root.addHandler(handler)
+    for h in handlers:
+        root.addHandler(h)
 
     app = logging.getLogger("stackwealth")
     app.setLevel(level)
@@ -368,4 +397,4 @@ def setup_logging(
         logging.getLogger(noisy).setLevel(lvl)
 
     _CONFIGURED = True
-    app.info("logging.configured", extra={"fmt": fmt, "level": level})
+    app.info("logging.configured", extra={"fmt": fmt, "level": level, "file": file_path or "stdout-only"})
