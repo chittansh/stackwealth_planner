@@ -30,7 +30,7 @@ router = APIRouter()
 # Tools that edit the plan — after a turn that calls any of these, we recompute
 # the plan through the firm's Excel engine so the canvas reflects the RM's change
 # with the firm's own calculations (not the in-platform Python approximation).
-_MUTATION_TOOLS = {"plan_set", "plan_add", "plan_remove", "plan_assumption"}
+_MUTATION_TOOLS = {"plan_set", "plan_add", "plan_remove", "plan_assumption", "lumpsum_add"}
 
 
 # The frontend appends an agent-only annotation to the user's chat text when
