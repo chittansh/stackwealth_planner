@@ -46,7 +46,10 @@ from ..langfuse_client import (
     trace_meta,
     transcript_for_trace,
 )
+from ..logging_config import get_logger
 from ..tracing import reset_context, set_context
+
+_log = get_logger(__name__)
 from .prompt import SYSTEM_PROMPT, render_state_summary
 from .tools import make_tools
 
@@ -121,7 +124,7 @@ async def clear_convo_db(household_id: str, chat_id: Optional[str] = None) -> No
     try:
         await clear_chat_history(household_id=household_id, chat_id=chat_id or "main")
     except Exception as e:
-        print(f"[chat] DB clear failed: {e}")
+        _log.warning("planner.db_clear.failed", exc_info=True)
 
 
 def get_convo(household_id: str, chat_id: Optional[str] = None) -> list[BaseMessage]:
@@ -167,7 +170,7 @@ async def _ensure_db_hydrated(household_id: str, chat_id: Optional[str]) -> list
             limit=MAX_HISTORY_MESSAGES,
         )
     except Exception as e:
-        print(f"[chat] DB hydration failed for {k}: {e}")
+        _log.warning("planner.db_hydrate.failed", extra={"key": k}, exc_info=True)
         rows = []
     msgs: list[BaseMessage] = []
     for r in rows:
@@ -290,7 +293,7 @@ async def run_planner_turn(
                 model_parameters={"temperature": 0.2},
             )
         except Exception as e:
-            print(f"[langfuse] trace setup failed: {e}")
+            _log.warning("planner.langfuse_setup.failed", exc_info=True)
 
     # Point granular calculation spans (CFP, risk, allocation, …) at this turn,
     # so the math that the tools run nests inside the turn in Langfuse. Reset in
@@ -408,7 +411,7 @@ async def run_planner_turn(
                     }
                 )
             except Exception as e:
-                print(f"[langfuse] close failed: {e}")
+                _log.warning("planner.langfuse_close.failed", exc_info=True)
             flush_langfuse()
 
         yield {"event": "_final_text", "data": final_text}

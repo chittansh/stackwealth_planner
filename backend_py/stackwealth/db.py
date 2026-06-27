@@ -33,7 +33,10 @@ import json
 import os
 from typing import Any, Optional
 
+from .logging_config import get_logger
 from .types import PlanState, empty_plan_state
+
+_log = get_logger(__name__)
 
 
 # ── In-memory fallback (no DATABASE_URL) ──────────────────────────────────
@@ -120,9 +123,7 @@ async def _get_pool() -> Any | None:
                 ssl=False,
             )
         except Exception as e:
-            print(
-                f"[db] Postgres unreachable this attempt. err={type(e).__name__}: {e!r}"
-            )
+            _log.warning("db.pool.unreachable", extra={"err_type": type(e).__name__}, exc_info=True)
             return None
     return _pool
 
@@ -159,7 +160,7 @@ class _PgConn:
                 global _last_pool_fail_log_ts
                 now = asyncio.get_event_loop().time()
                 if now - _last_pool_fail_log_ts > _POOL_FAIL_LOG_INTERVAL_S:
-                    print(f"[db] pool acquire failed, falling back to direct connect: {type(e).__name__} (suppressing duplicate logs for {int(_POOL_FAIL_LOG_INTERVAL_S)}s)")
+                    _log.warning("db.pool.acquire_failed", extra={"err_type": type(e).__name__, "suppress_s": int(_POOL_FAIL_LOG_INTERVAL_S)})
                     _last_pool_fail_log_ts = now
                 # Tear the pool down on a flap so the *next* request rebuilds
                 # from scratch instead of hitting the same stale sockets.
@@ -177,7 +178,7 @@ class _PgConn:
             self._direct = True
             return self.conn
         except Exception as e:
-            print(f"[db] direct connect also failed: {type(e).__name__}: {e!r}")
+            _log.error("db.direct_connect.failed", extra={"err_type": type(e).__name__}, exc_info=True)
             self.conn = None
             self._direct = False
             return None
@@ -242,7 +243,7 @@ async def init_db() -> None:
                 """
             )
         except Exception as e:
-            print(f"[db] schema bootstrap failed: {e}")
+            _log.error("db.schema_bootstrap.failed", exc_info=True)
 
 
 async def close_db() -> None:
@@ -339,7 +340,7 @@ async def get_plan(household_id: str) -> Optional[PlanState]:
         except Exception as e:
             if attempt < _MAX_PG_RETRIES and (_is_transient_pg_error(e) or isinstance(e, ConnectionError)):
                 backoff = min(_PG_BACKOFF_MAX_S, _PG_BACKOFF_BASE_S * (2 ** attempt))
-                print(f"[db] transient pg err in get_plan (attempt {attempt+1}/{_MAX_PG_RETRIES+1}): {type(e).__name__} — backoff {backoff:.2f}s")
+                _log.warning("db.get_plan.transient", extra={"attempt": attempt+1, "max": _MAX_PG_RETRIES+1, "err_type": type(e).__name__, "backoff_s": round(backoff,2)})
                 await _reset_pool()
                 await asyncio.sleep(backoff)
                 continue
@@ -368,7 +369,7 @@ async def save_plan(plan: PlanState) -> None:
         except Exception as e:
             if attempt < _MAX_PG_RETRIES and (_is_transient_pg_error(e) or isinstance(e, ConnectionError)):
                 backoff = min(_PG_BACKOFF_MAX_S, _PG_BACKOFF_BASE_S * (2 ** attempt))
-                print(f"[db] transient pg err in save_plan (attempt {attempt+1}/{_MAX_PG_RETRIES+1}): {type(e).__name__} — backoff {backoff:.2f}s")
+                _log.warning("db.save_plan.transient", extra={"attempt": attempt+1, "max": _MAX_PG_RETRIES+1, "err_type": type(e).__name__, "backoff_s": round(backoff,2)})
                 await _reset_pool()
                 await asyncio.sleep(backoff)
                 continue
@@ -548,7 +549,7 @@ async def save_chat_message(
                 await _reset_pool()
                 await asyncio.sleep(0.1)
                 continue
-            print(f"[db] save_chat_message dropped: {type(e).__name__}: {e}")
+            _log.warning("db.save_chat_message.dropped", extra={"err_type": type(e).__name__})
             return
 
 

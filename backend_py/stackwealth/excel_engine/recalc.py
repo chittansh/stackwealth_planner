@@ -26,6 +26,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+
+from ..logging_config import get_logger
+
+_log = get_logger(__name__)
 
 # Resolved once. Override with STACKWEALTH_SOFFICE if installed somewhere odd.
 _CANDIDATES = [
@@ -82,13 +87,20 @@ def _to_url(path: str) -> str:
     return "file://" + os.path.abspath(path)
 
 
-def _recalc_via_uno(staged: str, out: str, timeout: int) -> None:
-    """Recalculate ``staged`` and write ``out`` by driving LibreOffice over UNO."""
+def _recalc_via_uno(soffice: str, staged: str, out: str, work: str, env: dict, timeout: int) -> None:
+    """Recalculate ``staged`` and write ``out`` by driving LibreOffice over UNO.
+
+    We spawn soffice ourselves (rather than officehelper.bootstrap, which fails
+    in the uvicorn process — its default profile path / HOME isn't writable). The
+    explicit ``-env:UserInstallation`` gives soffice a writable, isolated profile,
+    a unique pipe name avoids collisions between concurrent recalcs, and ``env``
+    carries a writable HOME."""
     mods = _import_uno()
     if mods is None:
         raise RecalcError("uno-unavailable")
-    uno, officehelper = mods
+    uno, _officehelper = mods
     from com.sun.star.beans import PropertyValue  # type: ignore
+    from com.sun.star.connection import NoConnectException  # type: ignore
 
     def pv(name, value):
         p = PropertyValue()
@@ -96,19 +108,54 @@ def _recalc_via_uno(staged: str, out: str, timeout: int) -> None:
         p.Value = value
         return p
 
-    # officehelper.bootstrap() launches its own private soffice and connects.
-    ctx = officehelper.bootstrap()
-    smgr = ctx.ServiceManager
-    desktop = smgr.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
+    pipe = "cfp_" + os.path.basename(work)
+    profile = "file://" + os.path.join(work, "lo_profile")
+    proc = subprocess.Popen(
+        [
+            soffice,
+            f"-env:UserInstallation={profile}",
+            "--headless",
+            "--invisible",
+            "--nodefault",
+            "--norestore",
+            "--nologo",
+            "--nofirststartwizard",
+            f"--accept=pipe,name={pipe};urp;StarOffice.ComponentContext",
+        ],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    local_ctx = uno.getComponentContext()
+    resolver = local_ctx.ServiceManager.createInstanceWithContext(
+        "com.sun.star.bridge.UnoUrlResolver", local_ctx
+    )
+    url = f"uno:pipe,name={pipe};urp;StarOffice.ComponentContext"
+
+    ctx = None
+    deadline = time.monotonic() + min(timeout, 60)
+    while time.monotonic() < deadline:
+        try:
+            ctx = resolver.resolve(url)
+            break
+        except NoConnectException:
+            if proc.poll() is not None:
+                raise RecalcError(f"soffice exited early (rc={proc.returncode}) before UNO was ready")
+            time.sleep(0.3)
+    if ctx is None:
+        proc.terminate()
+        raise RecalcError("timed out connecting to soffice over UNO")
+
     doc = None
     try:
+        smgr = ctx.ServiceManager
+        desktop = smgr.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
         doc = desktop.loadComponentFromURL(
             _to_url(staged), "_blank", 0, (pv("Hidden", True),)
         )
         doc.calculateAll()
-        doc.storeToURL(
-            _to_url(out), (pv("FilterName", "Calc MS Excel 2007 XML"),)
-        )
+        doc.storeToURL(_to_url(out), (pv("FilterName", "Calc MS Excel 2007 XML"),))
     finally:
         try:
             if doc is not None:
@@ -119,6 +166,10 @@ def _recalc_via_uno(staged: str, out: str, timeout: int) -> None:
             desktop.terminate()
         except Exception:
             pass
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            proc.kill()
 
 
 def _recalc_via_convert(soffice: str, staged: str, work: str, env: dict, timeout: int) -> str:
@@ -162,18 +213,37 @@ def recalc_file(in_path: str, timeout: int = 180) -> str:
     out = os.path.join(work, "recalced.xlsx")
     shutil.copy(in_path, staged)
     env = dict(os.environ, HOME=work)
+    start = time.monotonic()
+    path_method = "uno" if _import_uno() is not None else "convert"
+    _log.info("recalc.start", extra={"method": path_method, "timeout_s": timeout,
+                                     "size_bytes": os.path.getsize(staged), "category": "excel"})
 
-    if _import_uno() is not None:
+    if path_method == "uno":
         try:
-            _recalc_via_uno(staged, out, timeout)
+            _recalc_via_uno(soffice, staged, out, work, env, timeout)
         except RecalcError:
+            _log.error("recalc.failed", extra={"method": "uno", "category": "excel",
+                                               "duration_ms": round((time.monotonic() - start) * 1000, 1)}, exc_info=True)
             raise
         except Exception as e:
+            _log.error("recalc.failed", extra={"method": "uno", "category": "excel",
+                                               "duration_ms": round((time.monotonic() - start) * 1000, 1)}, exc_info=True)
             raise RecalcError(f"UNO recalc failed: {type(e).__name__}: {e}") from e
         if not os.path.exists(out):
+            _log.error("recalc.no_output", extra={"method": "uno", "category": "excel"})
             raise RecalcError("UNO recalc produced no output")
+        _log.info("recalc.done", extra={"method": "uno", "category": "excel",
+                                        "duration_ms": round((time.monotonic() - start) * 1000, 1)})
         return out
 
     # No UNO on this host (e.g. local macOS without python3-uno) — convert-to
     # recalcs there, so fall back to it.
-    return _recalc_via_convert(soffice, staged, work, env, timeout)
+    try:
+        res = _recalc_via_convert(soffice, staged, work, env, timeout)
+    except Exception:
+        _log.error("recalc.failed", extra={"method": "convert", "category": "excel",
+                                           "duration_ms": round((time.monotonic() - start) * 1000, 1)}, exc_info=True)
+        raise
+    _log.info("recalc.done", extra={"method": "convert", "category": "excel",
+                                    "duration_ms": round((time.monotonic() - start) * 1000, 1)})
+    return res

@@ -28,10 +28,13 @@ from fastapi import APIRouter, File, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from ..db import get_plan, save_plan, save_source_workbook
+from ..logging_config import get_logger, logging_context, request_id_ctx
 from ..skills.excel_plan import run_excel_plan
 from ..skills.intake import ingest
 from ..skills.scenario import apply_add, apply_set, confirm_field, force_fsi_sync
 from ..skills.validation import validate_plan
+
+_log = get_logger(__name__)
 
 
 def _normalize_partial_state(ps: dict[str, Any]) -> dict[str, Any]:
@@ -114,6 +117,8 @@ async def upload_files(
         buf = await f.read()
         files_data.append((f.filename or "untitled", f.content_type or "application/octet-stream", buf))
 
+    _rid = request_id_ctx.get()
+
     async def stream() -> AsyncIterator[bytes]:
         summaries: list[dict[str, Any]] = []
 
@@ -121,13 +126,17 @@ async def upload_files(
             return (json.dumps(obj) + "\n").encode("utf-8")
 
         # Trace the whole upload pipeline (intake + Excel engine + validation) so
-        # the granular calc spans emitted inside land under one Langfuse trace.
+        # the granular calc spans emitted inside land under one Langfuse trace,
+        # and correlate every log line for the upload to this household.
         from ..tracing import trace_root
 
-        with trace_root("upload", user_id=id, tags=["upload"],
-                        metadata={"n_files": len(files_data)}):
+        with logging_context(request_id=_rid, household_id=id), trace_root(
+            "upload", user_id=id, tags=["upload"], metadata={"n_files": len(files_data)}
+        ):
+            _log.info("upload.start", extra={"n_files": len(files_data), "category": "upload"})
             async for chunk in _process(emit, summaries):
                 yield chunk
+            _log.info("upload.done", extra={"n_files": len(files_data), "category": "upload"})
 
     async def _process(emit, summaries) -> AsyncIterator[bytes]:
         for filename, mime, buf in files_data:
@@ -141,8 +150,9 @@ async def upload_files(
             if hint == "xlsx":
                 try:
                     await save_source_workbook(id, filename, buf)
-                except Exception as e:
-                    print(f"[upload] save_source_workbook failed: {e}")
+                except Exception:
+                    _log.error("upload.save_source.failed",
+                               extra={"filename": filename, "category": "upload"}, exc_info=True)
 
             # Run the LLM call as a task so we can interleave heartbeats while
             # it's waiting on Claude.
@@ -260,8 +270,8 @@ async def upload_files(
                     anomalies = validation.get("anomalies") or []
                     plan_after.computed.validation = validation
                     await save_plan(plan_after)
-            except Exception as e:
-                print(f"[upload] validation scan failed: {e}")
+            except Exception:
+                _log.error("upload.validation.failed", extra={"category": "upload"}, exc_info=True)
             if validation.get("findings"):
                 yield emit({
                     "event": "validation_findings",
@@ -283,7 +293,8 @@ async def upload_files(
                         "scalars": excel_outputs.get("scalars", {}),
                     })
                 except Exception as e:
-                    print(f"[upload] excel engine failed: {e}")
+                    _log.error("upload.excel_engine.failed",
+                               extra={"filename": filename, "category": "excel"}, exc_info=True)
                     yield emit({"event": "excel_failed", "filename": filename, "error": str(e)})
 
             summary = {

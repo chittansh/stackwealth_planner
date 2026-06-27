@@ -7,6 +7,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from ..langfuse_client import flush_langfuse, get_langfuse
+from ..logging_config import get_logger
+
+_log = get_logger(__name__)
 
 router = APIRouter()
 
@@ -23,7 +26,7 @@ async def feedback(request: Request) -> JSONResponse:
 
     lf = get_langfuse()
     if lf is None:
-        print("[feedback] received but langfuse is disabled")
+        _log.info("feedback.langfuse_disabled")
         return JSONResponse(content={"ok": True, "recorded": False})
 
     try:
@@ -38,5 +41,5 @@ async def feedback(request: Request) -> JSONResponse:
         flush_langfuse()
         return JSONResponse(content={"ok": True, "recorded": True})
     except Exception as err:
-        print(f"[feedback] failed: {err}")
+        _log.error("feedback.failed", exc_info=True)
         return JSONResponse(content={"ok": False, "error": str(err)}, status_code=500)

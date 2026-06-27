@@ -24,6 +24,9 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .. import config
+from ..logging_config import get_logger
+
+_log = get_logger(__name__)
 
 
 def _now() -> str:
@@ -356,13 +359,14 @@ async def _llm_extract(
             )
             raw = "".join(b.text for b in resp.content if hasattr(b, "text"))
             if getattr(resp, "stop_reason", None) == "max_tokens":
-                print(
-                    f"[intake] claude hit max_tokens (output={resp.usage.output_tokens}); "
-                    "JSON likely truncated — consider raising max_tokens"
+                _log.warning(
+                    "intake.claude.truncated",
+                    extra={"output_tokens": getattr(resp.usage, "output_tokens", None),
+                           "category": "llm"},
                 )
             out = _try_parse_json(raw)
-        except Exception as e:
-            print(f"[intake] claude failed: {e}")
+        except Exception:
+            _log.error("intake.claude.failed", extra={"category": "llm"}, exc_info=True)
 
     if out is None:
         oa = _openai_client()
@@ -389,8 +393,8 @@ async def _llm_extract(
                 )
                 raw = resp.choices[0].message.content or ""
                 out = _try_parse_json(raw)
-            except Exception as e:
-                print(f"[intake] openai failed: {e}")
+            except Exception:
+                _log.error("intake.openai.failed", extra={"category": "llm"}, exc_info=True)
 
     if out is None:
         return _empty_result(f"{parser_label}:no-llm")
@@ -1012,7 +1016,11 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
                     "extractor": "xlsx_footer_reconciler",
                 })
                 result["evidence"] = ev
-                print(f"[intake] xlsx expense reconciliation: LLM sum ₹{extracted:,.0f} vs footer ₹{expense_footer_total:,.0f}; added ₹{shortfall:,.0f} to household_expenses")
+                _log.info(
+                    "intake.expense.reconciled",
+                    extra={"llm_sum": round(extracted), "footer_total": round(expense_footer_total),
+                           "added_to_household": round(shortfall), "category": "intake"},
+                )
     return result
 
 

@@ -26,7 +26,10 @@ import io
 import openpyxl
 
 from ..excel_engine.engine import compute_from_plan, compute_from_upload
+from ..logging_config import get_logger
 from ..types import CashFlowRow, NetWorthSeriesPoint
+
+_log = get_logger(__name__)
 
 
 class NoWorkbookError(RuntimeError):
@@ -207,11 +210,21 @@ async def recompute_excel(household_id: str) -> Optional[dict[str, Any]]:
     # Nothing to compute from an empty plan (e.g. a household with no income).
     if not (plan.income_details or plan.financial_goals or plan.assumptions.persons):
         return None
+    import time as _time
+    _t = _time.monotonic()
     try:
         populated, outputs = await asyncio.to_thread(compute_from_plan, plan)
-    except Exception as e:
-        print(f"[excel] chat recompute failed for {household_id}: {e}")
+    except Exception:
+        _log.error(
+            "excel.recompute.failed",
+            extra={"household_id": household_id, "category": "excel",
+                   "duration_ms": round((_time.monotonic() - _t) * 1000, 1)},
+            exc_info=True,
+        )
         return None
+    _log.info("excel.recompute.done", extra={
+        "household_id": household_id, "category": "excel",
+        "duration_ms": round((_time.monotonic() - _t) * 1000, 1)})
 
     await save_computed_workbook(household_id, populated, outputs)
     # Reload in case the plan changed between get_plan and now, then mirror.

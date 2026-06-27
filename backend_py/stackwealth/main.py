@@ -22,8 +22,58 @@ from .api import (
     upload,
 )
 from .db import close_db, init_db
+from .logging_config import (
+    bind_context,
+    get_logger,
+    new_request_id,
+    reset_context,
+    setup_logging,
+)
+
+# Configure structured logging once, at import — before anything emits a line.
+setup_logging()
+logger = get_logger(__name__)
 
 app = FastAPI(title="stackwealth-planner-backend", version="0.1.0")
+
+
+def _household_from_path(path: str) -> str:
+    segs = [p for p in path.split("/") if p]
+    return next((p for p in reversed(segs) if p.startswith("h_")), "-")
+
+
+@app.middleware("http")
+async def _request_logging_middleware(request, call_next):
+    """Stamp a request_id (and household_id) onto every log line for this request,
+    and emit one access line with status + duration_ms. Streaming endpoints
+    (chat/upload) re-bind inside their generators so the stream stays correlated."""
+    import time as _time
+
+    rid = request.headers.get("x-request-id") or new_request_id()
+    hid = _household_from_path(request.url.path)
+    tokens = bind_context(request_id=rid, household_id=hid)
+    start = _time.monotonic()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        response.headers["x-request-id"] = rid
+        return response
+    finally:
+        ms = round((_time.monotonic() - start) * 1000, 1)
+        # Quiet the health-check firehose; everything else is one access line.
+        if request.url.path not in ("/health", "/"):
+            logger.info(
+                "http.request",
+                extra={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": status,
+                    "duration_ms": ms,
+                    "category": "http",
+                },
+            )
+        reset_context(tokens)
 
 
 @app.on_event("startup")

@@ -14,6 +14,9 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from . import config
+from .logging_config import get_logger
+
+_log = get_logger(__name__)
 
 _client: Any = None
 _initialized = False
@@ -27,7 +30,7 @@ def get_langfuse() -> Optional[Any]:
     _initialized = True
 
     if not config.LANGFUSE_PUBLIC_KEY or not config.LANGFUSE_SECRET_KEY:
-        print("[langfuse] keys not set — tracing disabled")
+        _log.info("langfuse.disabled", extra={"reason": "keys_not_set"})
         _client = None
         return None
 
@@ -43,9 +46,9 @@ def get_langfuse() -> Optional[Any]:
             # flush explicitly at the end of each turn / request instead.
             flush_at=25,
         )
-        print(f"[langfuse] tracing enabled (host={config.LANGFUSE_BASE_URL})")
+        _log.info("langfuse.enabled", extra={"host": config.LANGFUSE_BASE_URL})
     except Exception as e:  # pragma: no cover
-        print(f"[langfuse] failed to init: {e}")
+        _log.error("langfuse.init.failed", exc_info=True)
         _client = None
     return _client
 
@@ -85,7 +88,7 @@ def flush_langfuse() -> None:
     try:
         lf.flush()
     except Exception as e:
-        print(f"[langfuse] flush failed: {e}")
+        _log.warning("langfuse.flush.failed", exc_info=True)
 
 
 # ── per-chat trace registry ───────────────────────────────────────────────

@@ -22,8 +22,11 @@ from ..db import (
     load_chat_history,
     save_chat_message,
 )
+from ..logging_config import get_logger, logging_context, request_id_ctx
 from ..skills.excel_plan import recompute_excel
 from ..validator import collect_numbers, validate_assistant_text
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -209,8 +212,30 @@ async def chat(request: Request) -> EventSourceResponse:
             text=display_message,
         )
 
+    # Capture the request id bound by the middleware so the streaming generator
+    # (which runs after the handler returns) stays correlated to this request.
+    rid = request_id_ctx.get()
+
     async def event_stream() -> AsyncIterator[dict]:
+        import time as _time
+
         yield {"event": "status", "data": "thinking"}
+        with logging_context(request_id=rid, household_id=household_id, chat_id=chat_id or "main"):
+            _turn_start = _time.monotonic()
+            logger.info("chat.turn.start", extra={"msg_len": len(message), "category": "chat"})
+            try:
+                async for ev in _run_turn():
+                    yield ev
+                logger.info(
+                    "chat.turn.done",
+                    extra={"duration_ms": round((_time.monotonic() - _turn_start) * 1000, 1),
+                           "category": "chat"},
+                )
+            except Exception:
+                logger.error("chat.turn.failed", extra={"category": "chat"}, exc_info=True)
+                raise
+
+    async def _run_turn() -> AsyncIterator[dict]:
         try:
             final_text = ""
             added_paths: set[str] = set()  # plan_add target paths seen this turn
@@ -282,10 +307,13 @@ async def chat(request: Request) -> EventSourceResponse:
             # the canvas off the recomputed (Excel) numbers.
             if plan_mutated:
                 yield {"event": "status", "data": "recomputing"}
+                logger.info("chat.recompute.start", extra={"category": "excel"})
                 try:
                     await recompute_excel(household_id)
-                except Exception as e:
-                    print(f"[chat] excel recompute failed: {e}")
+                    logger.info("chat.recompute.done", extra={"category": "excel"})
+                except Exception:
+                    # Non-fatal: the turn still returns; the canvas keeps prior numbers.
+                    logger.error("chat.recompute.failed", extra={"category": "excel"}, exc_info=True)
                 yield {
                     "event": "tool_result",
                     "data": json.dumps(
