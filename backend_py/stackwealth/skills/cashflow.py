@@ -143,6 +143,15 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
             continue
         goals_by_year.setdefault(max(target_year, start_year), []).append(g)
 
+    # One-off lumpsum events (assumptions.lumpsum_events): positive = inflow
+    # (gift, dowry, bonus, sale proceeds, inheritance), negative = outflow. Summed
+    # per calendar year so the projection picks them up in the right year.
+    lumpsum_by_year: dict[int, float] = {}
+    for ev in (plan.assumptions.lumpsum_events or []):
+        yr = int(getattr(ev, "year", 0) or 0)
+        if start_year <= yr <= start_year + horizon - 1:
+            lumpsum_by_year[yr] = lumpsum_by_year.get(yr, 0.0) + float(getattr(ev, "amount", 0) or 0)
+
     for i in range(horizon):
         year = start_year + i
         age = start_age + i
@@ -202,6 +211,20 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
         # return is on the opening balance, not on a freshly-spent figure.
         portfolio = portfolio * (1 + expected_return) + invested_this_year
         liquid = liquid * (1 + cash_return) + cash_added_this_year
+
+        # One-off lumpsum event this year. A positive inflow (gift, dowry,
+        # bonus, sale proceeds, inheritance) lands in the portfolio so it
+        # compounds onward; a negative one-off outflow drains liquid then
+        # portfolio, like a goal spend.
+        lump = lumpsum_by_year.get(year, 0.0)
+        if lump > 0:
+            portfolio += lump
+        elif lump < 0:
+            need = -lump
+            from_liquid = min(liquid, need)
+            liquid -= from_liquid
+            need -= from_liquid
+            portfolio -= min(portfolio, need)
 
         # Post-retirement drawdown: living expenses come out of liquid
         # first, then portfolio. Only fires when NOT earning (we don't
@@ -280,6 +303,7 @@ def compute_cashflow(plan: PlanState, horizon: int) -> CashFlowProjection:
                 total_net_worth=round(total_net_worth),
                 goal_outflow=round(goal_outflow_total),
                 goal_outflow_breakdown=breakdown,
+                lumpsum=round(lumpsum_by_year.get(year, 0.0)),
             )
         )
 

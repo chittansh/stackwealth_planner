@@ -470,6 +470,10 @@ class CashFlowRow(StrictModel):
     goal_outflow: float = 0
     # Per-goal breakdown for the canvas/PDF — empty when no goal hits this year.
     goal_outflow_breakdown: list[CashFlowGoalOutflow] = Field(default_factory=list)
+    # One-off lumpsum cash event this year (assumptions.lumpsum_events):
+    # positive = inflow (gift, dowry, bonus, sale proceeds, inheritance),
+    # negative = one-off outflow. Reflected in the year's net worth.
+    lumpsum: float = 0
     # Asset-class breakdown for this year. `assets` field above is the
     # sum of financial pools only (liquid + portfolio). `total_net_worth`
     # adds real_estate + gold. These fields let the canvas show what

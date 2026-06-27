@@ -143,6 +143,32 @@ async def _plan_add(**kwargs: Any) -> Any:
     return await scenario_skill.apply_add(kwargs)
 
 
+class LumpsumAddArgs(BaseModel):
+    household_id: str
+    year: int
+    amount: float
+    label: Optional[str] = None
+    source_type: SourceType = "user"
+
+
+async def _lumpsum_add(**kwargs: Any) -> Any:
+    """Append a one-off lumpsum cash event to assumptions.lumpsum_events. A
+    POSITIVE amount is an inflow (gift, dowry, bonus, sale proceeds,
+    inheritance); a NEGATIVE amount is a one-off outflow. The cashflow engine and
+    the computed-Excel YoY 'Lumpsum' column pick it up in that calendar year."""
+    kwargs = _coerce_kwargs(kwargs)
+    return await scenario_skill.apply_add({
+        "household_id": kwargs["household_id"],
+        "path": "assumptions.lumpsum_events",
+        "row": {
+            "year": kwargs["year"],
+            "amount": kwargs["amount"],
+            "label": kwargs.get("label"),
+        },
+        "source_type": kwargs.get("source_type", "user"),
+    })
+
+
 class PlanRemoveArgs(BaseModel):
     household_id: str
     path: str
@@ -591,6 +617,21 @@ def make_tools() -> list[StructuredTool]:
             ),
             args_schema=PlanAddArgs,
             coroutine=_plan_add,
+        ),
+        StructuredTool.from_function(
+            name="lumpsum_add",
+            description=(
+                "Record a ONE-OFF future cash event in a specific year as a lumpsum event — "
+                "use this (NOT a goal, NOT idle cash) whenever the user mentions money arriving "
+                "or leaving once, e.g. a gift, dowry, bonus/ESOP, property or asset sale, "
+                "inheritance, an external maturity, or a one-time expense. `amount` POSITIVE = "
+                "inflow (added to the portfolio that year), NEGATIVE = one-off outflow. It lands "
+                "in the cashflow projection and the computed-Excel YoY 'Lumpsum Further deposit / "
+                "(Withdrawal)' column for that calendar `year`. `label` describes it (e.g. "
+                "'Marriage dowry'). Recompute cashflow/Monte-Carlo after to see the impact."
+            ),
+            args_schema=LumpsumAddArgs,
+            coroutine=_lumpsum_add,
         ),
         StructuredTool.from_function(
             name="plan_remove",

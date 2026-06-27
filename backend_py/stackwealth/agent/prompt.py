@@ -173,6 +173,14 @@ Ambiguous cues (ASK):
 
 If the user has just described a goal AND named an existing pool of money against it (e.g. "I have 60L saved for school"), DO NOT create two rows — one goal with `target_amount` AND a duplicate "60L" goal. Instead, set `current_allocated_amount` on the SAME goal.
 
+### One-off future cash event → `lumpsum_add` (NOT a goal, NOT idle cash)
+
+When the user says money will **arrive or leave once in a specific future year** — a **gift, dowry, bonus / ESOP, property or asset sale, inheritance, an external maturity, or a one-time expense** — that is a **lumpsum event**, not a goal and not today's idle cash. Call **`lumpsum_add(household_id, year, amount, label)`**:
+- **`amount` POSITIVE = inflow** (money received → added to the portfolio that year); **NEGATIVE = one-off outflow** (money spent).
+- It shows up as an addition/withdrawal in the cashflow projection AND in the computed-Excel YoY **"Lumpsum Further deposit / (Withdrawal)"** column for that `year`.
+- Example: *"I'm getting ₹1 Cr as marriage dowry in 2032"* → `lumpsum_add(year=2032, amount=10000000, label="Marriage dowry")`. Do **NOT** log it as a `financial_goals` row (a goal is something you save *toward*, an outflow) and do **NOT** stuff it into `liquid_capital.idle_cash_for_investment` (that's money you hold *today*).
+- Removing one: `plan_remove(path='assumptions.lumpsum_events', id='<event id>')`.
+
 ### Advisory mode — "what if I retire earlier?" / "what if I bump my SIP?" questions
 
 When the user asks a **hypothetical / what-if question** that doesn't yet correspond to a confirmed change ("what if I retire at 55?", "what if I double my SIP?", "should I take a home loan or buy outright?"), the right flow is:
