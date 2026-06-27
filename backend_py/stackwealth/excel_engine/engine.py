@@ -276,20 +276,27 @@ def render_sheets(recalc_bytes: bytes, sheets: list[str] | None = None) -> list[
             continue
         wsv = wb_v[name]
         wsf = wb_f[name]
-        # Trim to the used range (ignore trailing empties).
+        # Trim to the USED range on every side — drop leading/trailing empty rows
+        # and columns so the field columns line up under their headers (firm
+        # templates pad each tab with blank margin rows/cols).
+        first_row = first_col = None
         last_row = last_col = 0
         for r in range(1, wsv.max_row + 1):
             for c in range(1, wsv.max_column + 1):
                 if wsv.cell(r, c).value not in (None, ""):
                     last_row = max(last_row, r)
                     last_col = max(last_col, c)
+                    first_row = r if first_row is None else min(first_row, r)
+                    first_col = c if first_col is None else min(first_col, c)
         if last_row == 0:
             continue
-        cols = [get_column_letter(c) for c in range(1, last_col + 1)]
+        first_row = first_row or 1
+        first_col = first_col or 1
+        cols = [get_column_letter(c) for c in range(first_col, last_col + 1)]
         rows = []
-        for r in range(1, last_row + 1):
+        for r in range(first_row, last_row + 1):
             cells = []
-            for c in range(1, last_col + 1):
+            for c in range(first_col, last_col + 1):
                 vcell = wsv.cell(r, c)
                 disp = _fmt_cell(vcell.value, vcell.number_format)
                 cells.append(
@@ -301,7 +308,23 @@ def render_sheets(recalc_bytes: bytes, sheets: list[str] | None = None) -> list[
                     }
                 )
             rows.append({"n": r, "cells": cells})
-        out.append({"name": name.strip(), "cols": cols, "rows": rows})
+        # Freeze hint for the viewer: top rows through the column-header row, and
+        # the leftmost (label/year) column. The header row is the row carrying the
+        # MOST text labels among the first dozen — the detailed field header (a
+        # merged section-title row collapses to one cell in openpyxl, so it loses
+        # to the per-column header). Freezing through it also pins any group-title
+        # rows above. List-style sheets (no text-heavy row) freeze just the title.
+        header_idx, best = 0, 0
+        for i, row in enumerate(rows[:12]):
+            text_cells = sum(1 for cell in row["cells"] if cell["v"] and not cell["num"])
+            if text_cells >= 3 and text_cells > best:
+                best, header_idx = text_cells, i
+        out.append({
+            "name": name.strip(),
+            "cols": cols,
+            "rows": rows,
+            "freeze": {"rows": header_idx + 1, "cols": 1},
+        })
     return out
 
 

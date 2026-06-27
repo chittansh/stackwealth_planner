@@ -6,8 +6,15 @@ const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:4000';
 
 type Cell = { v: string; f: string | null; num: boolean };
 type Row = { n: number; cells: Cell[] };
-type Sheet = { name: string; cols: string[]; rows: Row[] };
+type Freeze = { rows: number; cols: number };
+type Sheet = { name: string; cols: string[]; rows: Row[]; freeze?: Freeze };
 type Selected = { r: number; c: number } | null;
+
+// Frozen-pane geometry. Heights/widths are fixed so the sticky offsets for the
+// stacked header rows line up exactly.
+const GUTTER_H = 26; // column-letter header row
+const ROW_H = 26; // a frozen header data row
+const ROWNUM_W = 48; // row-number gutter column (w-12)
 
 /**
  * In-browser view of the firm's CFP workbook after the backend injects the
@@ -50,6 +57,8 @@ export function ComputedExcelView({ householdId }: { householdId: string }) {
   }, [load]);
 
   const sheet = sheets?.[active];
+  const freezeRows = sheet?.freeze?.rows ?? 0;
+  const freezeCols = sheet?.freeze?.cols ?? 0;
   const selCell = useMemo<Cell | null>(() => {
     if (!sheet || !sel) return null;
     return sheet.rows[sel.r]?.cells[sel.c] ?? null;
@@ -172,11 +181,15 @@ export function ComputedExcelView({ householdId }: { householdId: string }) {
         <table className="border-separate border-spacing-0 text-xs">
           <thead>
             <tr>
-              <th className="sticky left-0 top-0 z-30 w-12 border-b border-r border-neutral-200 bg-neutral-100" />
+              <th
+                style={{ height: GUTTER_H }}
+                className="sticky left-0 top-0 z-50 w-12 border-b border-r border-neutral-300 bg-neutral-200"
+              />
               {sheet?.cols.map((col, ci) => (
                 <th
                   key={ci}
-                  className={`sticky top-0 z-20 min-w-[84px] border-b border-r border-neutral-200 px-2 py-1 text-center text-[11px] font-semibold ${
+                  style={{ height: GUTTER_H }}
+                  className={`sticky top-0 z-40 min-w-[84px] border-b border-r border-neutral-300 px-2 text-center text-[11px] font-semibold ${
                     sel?.c === ci ? 'bg-emerald-100 text-emerald-800' : 'bg-neutral-100 text-neutral-500'
                   }`}
                 >
@@ -186,34 +199,61 @@ export function ComputedExcelView({ householdId }: { householdId: string }) {
             </tr>
           </thead>
           <tbody>
-            {sheet?.rows.map((row, ri) => (
-              <tr key={ri}>
-                <td
-                  className={`sticky left-0 z-10 w-12 border-b border-r border-neutral-200 px-1 text-center text-[11px] font-semibold ${
-                    sel?.r === ri ? 'bg-emerald-100 text-emerald-800' : 'bg-neutral-100 text-neutral-400'
-                  }`}
-                >
-                  {row.n}
-                </td>
-                {row.cells.map((cell, ci) => {
-                  const selected = sel?.r === ri && sel?.c === ci;
-                  return (
-                    <td
-                      key={ci}
-                      onClick={() => setSel({ r: ri, c: ci })}
-                      title={cell.f ?? undefined}
-                      className={`cursor-cell whitespace-nowrap border-b border-r border-neutral-100 px-2 py-1 ${
-                        cell.num ? 'text-right tabular-nums text-neutral-800' : 'text-neutral-700'
-                      } ${cell.f ? 'bg-emerald-50/40' : ''} ${
-                        selected ? 'outline outline-2 -outline-offset-2 outline-emerald-500 bg-emerald-50' : 'hover:bg-neutral-50'
-                      }`}
-                    >
-                      {cell.v}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
+            {sheet?.rows.map((row, ri) => {
+              const frozenRow = ri < freezeRows;
+              const rowTop = frozenRow ? GUTTER_H + ri * ROW_H : undefined;
+              return (
+                <tr key={ri}>
+                  <td
+                    style={{ position: 'sticky', left: 0, top: rowTop, height: frozenRow ? ROW_H : undefined, zIndex: frozenRow ? 45 : 30 }}
+                    className={`w-12 border-b border-r border-neutral-300 px-1 text-center text-[11px] font-semibold ${
+                      sel?.r === ri ? 'bg-emerald-100 text-emerald-800' : 'bg-neutral-100 text-neutral-400'
+                    }`}
+                  >
+                    {row.n}
+                  </td>
+                  {row.cells.map((cell, ci) => {
+                    const frozenCol = ci < freezeCols;
+                    const selected = sel?.r === ri && sel?.c === ci;
+                    const sticky = frozenRow || frozenCol;
+                    const style: React.CSSProperties = {};
+                    if (sticky) style.position = 'sticky';
+                    if (frozenRow) {
+                      style.top = rowTop;
+                      style.height = ROW_H;
+                    }
+                    if (frozenCol) style.left = ROWNUM_W;
+                    if (frozenRow && frozenCol) style.zIndex = 35;
+                    else if (frozenRow) style.zIndex = 25;
+                    else if (frozenCol) style.zIndex = 15;
+                    // Frozen cells need an OPAQUE background so scrolled content
+                    // doesn't bleed through; header rows read as headers.
+                    const frozenBg = frozenRow
+                      ? 'bg-neutral-100 font-medium'
+                      : frozenCol
+                        ? 'bg-white'
+                        : cell.f
+                          ? 'bg-emerald-50/40'
+                          : '';
+                    return (
+                      <td
+                        key={ci}
+                        style={style}
+                        onClick={() => setSel({ r: ri, c: ci })}
+                        title={cell.f ?? undefined}
+                        className={`cursor-cell whitespace-nowrap border-b border-r border-neutral-100 px-2 py-1 ${
+                          cell.num ? 'text-right tabular-nums text-neutral-800' : 'text-neutral-700'
+                        } ${frozenBg} ${
+                          selected ? 'outline outline-2 -outline-offset-2 outline-emerald-500 bg-emerald-50' : sticky ? '' : 'hover:bg-neutral-50'
+                        }`}
+                      >
+                        {cell.v}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
