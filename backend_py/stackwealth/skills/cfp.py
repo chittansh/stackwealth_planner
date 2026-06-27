@@ -2364,7 +2364,7 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         unit="ratio",
     ))
 
-    return CFPOutput(
+    out = CFPOutput(
         summary=summary,
         goal_blocks=goal_blocks,
         retirement=retirement,
@@ -2375,6 +2375,77 @@ def compute_cfp(plan: PlanState) -> CFPOutput:
         debt=debt_block,
         tax_regime=tax_regime_block,
     )
+    _emit_cfp_trace(out)
+    return out
+
+
+def _emit_cfp_trace(out: "CFPOutput") -> None:
+    """Surface the CFP calculation as a granular Langfuse span tree — per-goal
+    FV/SIP with their formula steps, the retirement corpus + three cases, and
+    insurance — so the math is inspectable alongside the chat trace. No-op when
+    no Langfuse trace is active (report/eval/internal calls)."""
+    from ..tracing import emit_steps, is_active, span
+
+    if not is_active():
+        return
+    try:
+        s = out.summary or {}
+        with span("calc.cfp", input={
+            "monthly_income": s.get("monthly_income"),
+            "monthly_expenses": s.get("monthly_expenses"),
+            "monthly_emi": s.get("monthly_emi"),
+            "monthly_surplus_pre_sip": s.get("monthly_surplus_pre_sip"),
+            "n_goals": len(out.goal_blocks or []),
+        }) as cfp_span:
+            cfp_span.set_output({
+                "total_required_sip_monthly": s.get("total_required_sip_monthly"),
+                "retirement_corpus_required": (out.retirement or {}).get("corpus_required"),
+            })
+            # Per-goal calculation.
+            with span("calc.cfp.goals", input={"count": len(out.goal_blocks or [])}):
+                for b in out.goal_blocks or []:
+                    with span(f"goal: {b.get('goal_name','')}", input={
+                        "today_cost": b.get("today_cost"),
+                        "target_year": b.get("target_year"),
+                        "inflation_used": b.get("inflation_used"),
+                        "effective_return": b.get("effective_return"),
+                    }) as gs:
+                        gs.set_output({
+                            "future_value_needed": b.get("future_value_needed"),
+                            "fv_gap": b.get("fv_gap"),
+                            "required_sip_monthly": b.get("required_sip_monthly"),
+                            "allocated_today_total": b.get("allocated_today_total"),
+                        })
+                        emit_steps(b.get("computation_trace") or [])
+            # Retirement corpus + the three cases.
+            ret = out.retirement or {}
+            with span("calc.cfp.retirement", input={
+                "current_age": ret.get("current_age"),
+                "retirement_age": ret.get("retirement_age"),
+                "years_to_retire": ret.get("years_to_retire"),
+                "post_retire_years": ret.get("post_retire_years"),
+            }) as rs:
+                rs.set_output({
+                    "corpus_required": ret.get("corpus_required"),
+                    "required_monthly_sip": ret.get("required_monthly_sip"),
+                    "projected_existing_corpus_fv": ret.get("projected_existing_corpus_fv"),
+                })
+                emit_steps(ret.get("computation_trace") or [])
+                cases = ret.get("cases") if isinstance(ret.get("cases"), dict) else None
+                if cases:
+                    with span("calc.cfp.retirement.cases", input=cases.get("inputs")) as cs:
+                        cs.set_output({
+                            "case1": cases.get("case1"),
+                            "case2": cases.get("case2"),
+                            "case3_triggered": (cases.get("case3") or {}).get("triggered"),
+                            "case3_combinations": len((cases.get("case3") or {}).get("combinations") or []),
+                        })
+            # Insurance need.
+            if out.insurance:
+                with span("calc.cfp.insurance") as ins:
+                    ins.set_output(out.insurance)
+    except Exception:
+        pass  # tracing must never break a calculation
 
 
 def _build_asset_pool(plan: PlanState) -> dict[str, float]:

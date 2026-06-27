@@ -38,7 +38,10 @@ def get_langfuse() -> Optional[Any]:
             public_key=config.LANGFUSE_PUBLIC_KEY,
             secret_key=config.LANGFUSE_SECRET_KEY,
             host=config.LANGFUSE_BASE_URL,
-            flush_at=1,
+            # Batch observations — granular calc tracing emits dozens of spans
+            # per turn, so flushing after every one (flush_at=1) thrashes. We
+            # flush explicitly at the end of each turn / request instead.
+            flush_at=25,
         )
         print(f"[langfuse] tracing enabled (host={config.LANGFUSE_BASE_URL})")
     except Exception as e:  # pragma: no cover

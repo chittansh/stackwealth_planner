@@ -10,6 +10,7 @@ import math
 from typing import Any
 
 from ..db import get_plan
+from ..tracing import traced_calc
 from ..types import FreedomOutput, FreedomPillars, PlanState
 
 WEIGHTS = {
@@ -111,6 +112,7 @@ def _estimate_freedom_age(plan: PlanState) -> float:
     return age + lo
 
 
+@traced_calc("calc.freedom")
 def compute_freedom(plan: PlanState) -> FreedomOutput:
     fsi = plan.freedom_score_inputs
     monthly_income = fsi.monthly_income or 0

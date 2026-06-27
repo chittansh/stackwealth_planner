@@ -120,6 +120,16 @@ async def upload_files(
         def emit(obj: dict[str, Any]) -> bytes:
             return (json.dumps(obj) + "\n").encode("utf-8")
 
+        # Trace the whole upload pipeline (intake + Excel engine + validation) so
+        # the granular calc spans emitted inside land under one Langfuse trace.
+        from ..tracing import trace_root
+
+        with trace_root("upload", user_id=id, tags=["upload"],
+                        metadata={"n_files": len(files_data)}):
+            async for chunk in _process(emit, summaries):
+                yield chunk
+
+    async def _process(emit, summaries) -> AsyncIterator[bytes]:
         for filename, mime, buf in files_data:
             yield emit({"event": "file_started", "filename": filename, "size": len(buf)})
 

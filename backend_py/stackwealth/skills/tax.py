@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..db import get_plan
+from ..tracing import traced_calc
 from ..types import GainHarvest, LossHarvest, PlanState, TaxView
 
 LTCG_HEADROOM_INR = 125_000
@@ -24,6 +25,7 @@ async def harvest(args: dict[str, Any]) -> dict | TaxView:
     return compute_tax(plan)
 
 
+@traced_calc("calc.tax")
 def compute_tax(plan: PlanState) -> TaxView:
     realized_ltcg_fy = 0
     realized_stcg_fy = 0

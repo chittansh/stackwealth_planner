@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..db import get_plan
+from ..tracing import traced_calc
 from ..types import Goal, PlanState, RiskOutput
 
 VOL_MAP = {"sell_everything": 10, "sell_some": 30, "hold_steady": 60, "buy_more": 90}
@@ -99,6 +100,7 @@ def _goal_need(g: Goal, inflation: float) -> dict:
     }
 
 
+@traced_calc("calc.risk")
 def compute_risk(plan: PlanState, w: dict[str, Any]) -> RiskOutput:
     # Willingness
     vol = VOL_MAP.get(w.get("volatility_reaction"), 60)

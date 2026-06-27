@@ -28,6 +28,7 @@ import copy
 from datetime import datetime
 from typing import Optional
 
+from ..tracing import traced_calc
 from ..types import Goal, PlanState
 from .cfp import compute_cfp
 from .suggestions import (
@@ -643,6 +644,7 @@ def _retire_age(retire: dict) -> int:
 
 # ── Orchestrator ────────────────────────────────────────────────────────────
 
+@traced_calc("calc.scenarios")
 def compute_scenarios(plan: PlanState, overrides: Optional[dict] = None) -> dict:
     from .scenario import simulate_mutation  # local import avoids cycle
 

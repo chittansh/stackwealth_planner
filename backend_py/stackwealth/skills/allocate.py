@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..db import get_plan
+from ..tracing import traced_calc
 from ..types import (
     AllocationBuckets,
     AllocationOutput,
@@ -51,6 +52,7 @@ async def recommend(args: dict[str, Any]) -> dict | AllocationOutput:
     return compute_allocation(plan)
 
 
+@traced_calc("calc.allocation")
 def compute_allocation(plan: PlanState) -> AllocationOutput:
     band = plan.computed.risk_profile.recommended_profile  # type: ignore[union-attr]
     strategic = STRATEGIC.get(band) or STRATEGIC["Moderate"]

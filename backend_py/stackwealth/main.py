@@ -52,6 +52,32 @@ app.add_middleware(
 )
 
 
+# Open a Langfuse trace around calculation-triggering API calls (canvas widgets,
+# the computed-Excel engine, scenarios, report) so the granular calc spans emitted
+# deep inside the compute functions land somewhere. Streaming endpoints are
+# excluded: /api/chat self-traces, and /api/upload wraps its own stream.
+_CALC_TRACE_PREFIXES = ("/api/skill", "/api/excel", "/api/scenario", "/api/report")
+
+
+@app.middleware("http")
+async def _calc_trace_middleware(request, call_next):
+    path = request.url.path
+    if not path.startswith(_CALC_TRACE_PREFIXES):
+        return await call_next(request)
+    from .tracing import trace_root
+
+    segs = [p for p in path.split("/") if p]
+    hid = next((p for p in reversed(segs) if p.startswith("h_")), segs[-1] if segs else None)
+    surface = segs[1] if len(segs) > 1 else "api"
+    with trace_root(
+        f"api {request.method} /{'/'.join(segs[:3])}",
+        user_id=hid,
+        tags=["api", surface],
+        metadata={"path": path, "method": request.method},
+    ):
+        return await call_next(request)
+
+
 @app.get("/")
 async def root() -> dict:
     return {"name": "stackwealth-planner-backend", "status": "ok"}

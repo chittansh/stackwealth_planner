@@ -46,6 +46,7 @@ from ..langfuse_client import (
     trace_meta,
     transcript_for_trace,
 )
+from ..tracing import reset_context, set_context
 from .prompt import SYSTEM_PROMPT, render_state_summary
 from .tools import make_tools
 
@@ -291,6 +292,13 @@ async def run_planner_turn(
         except Exception as e:
             print(f"[langfuse] trace setup failed: {e}")
 
+    # Point granular calculation spans (CFP, risk, allocation, …) at this turn,
+    # so the math that the tools run nests inside the turn in Langfuse. Reset in
+    # the finally below so context never leaks across turns/requests.
+    _calc_token = None
+    if trace is not None:
+        _calc_token = set_context(meta.trace_id, getattr(turn_span, "id", None))
+
     # Initial graph state — system + history + new user message.
     initial: list[BaseMessage] = [SystemMessage(content=dynamic_system), *history, user_msg]
     final_text = ""
@@ -433,3 +441,7 @@ async def run_planner_turn(
                 pass
         flush_langfuse()
         yield {"event": "error", "data": {"message": msg}}
+
+    finally:
+        if _calc_token is not None:
+            reset_context(_calc_token)
