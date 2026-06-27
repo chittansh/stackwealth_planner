@@ -219,6 +219,7 @@ VIEW_SHEETS: list[str] = [
     "10_Financial_Goals",
     "Retirement Plan",
     "YoY Cash Flow",
+    "Insurance",
     "11. Inc Exp,Networth,Rec Invest",
     "2_Income",
     "3_Expenses ",
@@ -345,12 +346,14 @@ def compute_from_upload(
             apply_dynamic_allocation,
             apply_loan_financing,
             apply_lumpsum_events,
+            write_insurance_sheet,
         )
 
         apply_lumpsum_events(master_wb, plan)       # clear sample lumpsums/remarks
         apply_dynamic_allocation(master_wb, plan)   # categorise real assets → goals
         apply_house_to_nfa(master_wb)               # house -> NFA
         apply_loan_financing(master_wb, plan)       # down-payment + debt-netted NW
+        write_insurance_sheet(master_wb, plan)      # platform-faithful Insurance tab
     else:
         apply_house_to_nfa(master_wb)
 
@@ -371,6 +374,7 @@ def compute_from_plan(
         apply_dynamic_allocation,
         apply_loan_financing,
         apply_lumpsum_events,
+        write_insurance_sheet,
         write_plan_to_master,
     )
 
@@ -385,6 +389,7 @@ def compute_from_plan(
     apply_dynamic_allocation(master_wb, plan)  # categorise real assets → goals
     apply_house_to_nfa(master_wb)
     apply_loan_financing(master_wb, plan)
+    write_insurance_sheet(master_wb, plan)     # platform-faithful Insurance tab
     return _recalc_and_extract(master_wb, timeout)
 
 

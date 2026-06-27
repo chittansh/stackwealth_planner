@@ -582,3 +582,160 @@ def apply_loan_financing(master_wb, plan) -> None:
         ac = yoy[f"AC{row}"].value
         if isinstance(ac, str) and ac.startswith("="):
             yoy[f"AC{row}"] = f"=SUM(V{row},AA{row})-AF{row}"
+
+
+def write_insurance_sheet(master_wb, plan) -> None:
+    """Write a client-facing 'Insurance' sheet that mirrors the platform's
+    insurance page — life-cover adequacy (avg of Human Life Value & needs-based
+    corpus, plus loans, less existing cover and disposable assets) and health
+    cover adequacy — using the SAME engine the page reads (compute_cfp's
+    insurance block), so the computed-Excel tab and the page show identical
+    numbers.
+
+    Written as STATIC VALUES (not formulas): the rest of the workbook keeps its
+    LibreOffice-recalculated formula caches, and a values-only sheet survives the
+    recalc untouched. Non-fatal — any failure just skips the sheet."""
+    try:
+        from ..skills.cfp import compute_cfp
+
+        ins = (compute_cfp(plan).insurance or {})
+    except Exception:
+        return
+    if not ins:
+        return
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    health = ins.get("health") or {}
+    money = "#,##0"
+    hdr_fill = PatternFill("solid", fgColor="2F4A3A")
+    hdr_font = Font(bold=True, color="FFFFFF")
+    title_font = Font(bold=True, size=14, color="2F4A3A")
+    bold = Font(bold=True)
+    accent = Font(bold=True, color="9A3412")
+
+    if "Insurance" in master_wb.sheetnames:
+        del master_wb["Insurance"]
+    ws = master_wb.create_sheet("Insurance")
+    ws.column_dimensions["A"].width = 48
+    ws.column_dimensions["B"].width = 18
+    ws.column_dimensions["C"].width = 40
+
+    r = 1
+
+    def row(label, value=None, *, fmt=money, font=None, note="", fill=False, label_font=None):
+        nonlocal r
+        c_a = ws.cell(row=r, column=1, value=label)
+        if label_font:
+            c_a.font = label_font
+        if value is not None:
+            c_b = ws.cell(row=r, column=2, value=value)
+            c_b.number_format = fmt
+            if font:
+                c_b.font = font
+            c_b.alignment = Alignment(horizontal="right")
+        if note:
+            ws.cell(row=r, column=3, value=note)
+        if fill:
+            for col in (1, 2, 3):
+                ws.cell(row=r, column=col).fill = hdr_fill
+                ws.cell(row=r, column=col).font = hdr_font
+        r += 1
+
+    def gap():
+        nonlocal r
+        r += 1
+
+    ws.cell(row=r, column=1, value="Insurance Needs Analysis").font = title_font
+    r += 1
+    ws.cell(row=r, column=1, value="Same methodology as the platform's Insurance page.").font = Font(
+        italic=True, color="71717A"
+    )
+    r += 2
+
+    # ── Life cover adequacy ──────────────────────────────────────────────
+    hlv = ins.get("human_life_value", 0) or 0
+    needs = ins.get("needs_based_corpus", 0) or 0
+    avg = ins.get("average", 0) or 0
+    total_need = ins.get("total_need_including_loans", 0) or 0
+    loans = max(0, total_need - avg)
+    existing = ins.get("existing_cover", 0) or 0
+    assets = ins.get("investable_assets", 0) or 0
+    additional = ins.get("additional_cover_required", 0) or 0
+    covered = existing + assets
+    life_pct = (covered / total_need) if total_need else 0
+
+    row("LIFE COVER ADEQUACY", fill=True)
+    row("Method A — Human Life Value (PV of future income to retirement)", hlv)
+    row("Method B — Needs-based corpus (PV of dependants' expenses)", needs)
+    row("Average of both methods", avg)
+    row("Add: outstanding loans", loans)
+    row("Total cover needed", total_need, font=bold, label_font=bold)
+    row("Less: existing term cover", existing)
+    row("Less: disposable financial assets credited", assets)
+    row("Additional cover required", additional, font=accent, label_font=bold)
+    row("Coverage of need (existing cover + assets)", round(life_pct, 4), fmt="0.0%")
+    gap()
+
+    # ── Health cover adequacy ────────────────────────────────────────────
+    h_req = health.get("required", 0) or 0
+    h_base = health.get("family_base", 0) or 0
+    h_senior = health.get("senior_parent_cover", 0) or 0
+    h_existing = health.get("existing_cover", 0) or 0
+    h_additional = health.get("additional_cover_required", 0) or 0
+    h_pct = (h_existing / h_req) if h_req else 0
+
+    row("MEDICAL / HEALTH COVER ADEQUACY", fill=True)
+    row("Required cover (higher of 50% income or family base + senior parents)", h_req, font=bold, label_font=bold)
+    row("  — family base cover", h_base)
+    if h_senior:
+        row("  — separate senior-parent policies", h_senior)
+    row("Existing cover (health + family floater)", h_existing)
+    row("Additional cover required", h_additional, font=accent, label_font=bold)
+    row("Coverage of need", round(h_pct, 4), fmt="0.0%")
+    gap()
+
+    # ── Existing policies ────────────────────────────────────────────────
+    row("EXISTING POLICIES", fill=True)
+    idet = plan.insurance_details
+
+    def policy(label, b):
+        nonlocal r
+        ws.cell(row=r, column=1, value=label)
+        if not b or not (getattr(b, "cover_amount", None) or getattr(b, "company", None)):
+            ws.cell(row=r, column=3, value="—")
+            r += 1
+            return
+        cover = getattr(b, "cover_amount", 0) or 0
+        prem = getattr(b, "annual_premium", 0) or 0
+        cb = ws.cell(row=r, column=2, value=cover)
+        cb.number_format = money
+        cb.alignment = Alignment(horizontal="right")
+        comp = getattr(b, "company", None) or "—"
+        ws.cell(row=r, column=3, value=f"{comp} · premium {prem:,.0f}/yr" if prem else str(comp))
+        r += 1
+
+    if idet:
+        policy("Term plan (life)", idet.term_plan)
+        policy("Health insurance", idet.health_insurance)
+        policy("Family floater", idet.family_floater)
+        policy("ULIP / Endowment", idet.ulip_or_endowment)
+    gap()
+
+    # ── How the life cover is calculated (formula trail) ─────────────────
+    steps = ins.get("computation_trace") or []
+    if steps:
+        row("HOW THE LIFE COVER IS CALCULATED", fill=True)
+        c = ws.cell(row=r, column=1, value="Step")
+        c.font = bold
+        ws.cell(row=r, column=2, value="Result").font = bold
+        ws.cell(row=r, column=3, value="Formula").font = bold
+        r += 1
+        for st in steps:
+            ws.cell(row=r, column=1, value=str(st.get("label", "")))
+            val = st.get("value")
+            if isinstance(val, (int, float)):
+                cb = ws.cell(row=r, column=2, value=val)
+                cb.number_format = money if (st.get("unit") != "%") else "0.0000"
+                cb.alignment = Alignment(horizontal="right")
+            ws.cell(row=r, column=3, value=str(st.get("formula", "")))
+            r += 1
