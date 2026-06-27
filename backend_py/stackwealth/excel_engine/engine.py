@@ -308,23 +308,14 @@ def render_sheets(recalc_bytes: bytes, sheets: list[str] | None = None) -> list[
                     }
                 )
             rows.append({"n": r, "cells": cells})
-        # Freeze hint for the viewer: top rows through the column-header row, and
-        # the leftmost (label/year) column. The header row is the row carrying the
-        # MOST text labels among the first dozen — the detailed field header (a
-        # merged section-title row collapses to one cell in openpyxl, so it loses
-        # to the per-column header). Freezing through it also pins any group-title
-        # rows above. List-style sheets (no text-heavy row) freeze just the title.
-        header_idx, best = 0, 0
-        for i, row in enumerate(rows[:12]):
-            text_cells = sum(1 for cell in row["cells"] if cell["v"] and not cell["num"])
-            if text_cells >= 3 and text_cells > best:
-                best, header_idx = text_cells, i
         out.append({
             "name": name.strip(),
             "cols": cols,
             "rows": rows,
-            # Freeze the top header row(s) only — no left-column freeze.
-            "freeze": {"rows": header_idx + 1, "cols": 0},
+            # No frozen panes — only the column-letter / row-number gutters stay
+            # sticky (handled in the viewer). Leading empty rows/cols are still
+            # trimmed so the fields line up under their headers.
+            "freeze": {"rows": 0, "cols": 0},
         })
     return out
 
