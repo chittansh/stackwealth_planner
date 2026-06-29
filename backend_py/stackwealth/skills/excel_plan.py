@@ -619,3 +619,127 @@ async def run_cfp(household_id: str) -> dict[str, Any]:
         "scalars": scal,
         "computation_trace": _excel_trace(scal, cfp),
     }
+
+
+# ── Excel-backed CFP view (replaces compute_cfp for scenarios/suggestions) ────
+# The scenario + suggestion engines need a CFPOutput-shaped object. We build it
+# from the recalculated firm workbook (every BASELINE number is an Excel cell)
+# and layer on ONLY the thin advisory derivations the firm sheet doesn't model:
+# the surplus-rationing affordability fields and the step-up fulfilment view.
+# These are generic finance arithmetic seeded from Excel baselines — NOT a
+# re-implementation of the firm's deterministic core (that stays in Excel).
+
+from types import SimpleNamespace  # noqa: E402
+
+_SIP_FUNDING_RETURN = 0.105  # hybrid post-tax SIP funding return (matches scenarios)
+
+
+def _ensure_excel_outputs(plan) -> dict[str, Any]:
+    """Return the plan's Excel outputs, recomputing through the firm workbook if
+    they aren't cached yet (e.g. a freshly-mutated plan copy)."""
+    outputs = getattr(plan.computed, "excel_outputs", None)
+    if outputs:
+        return outputs
+    _, outputs = compute_from_plan(plan)
+    plan.computed.excel_outputs = outputs
+    _apply_excel_to_computed(plan, outputs)
+    return outputs
+
+
+def _enrich_retirement(scal: dict[str, Any], base: dict | None = None) -> dict:
+    """Retirement block for the advisory engines: Excel baselines + the step-up
+    fulfilment / shortfall derivations (closed-form, seeded from Excel)."""
+    r = dict(base or {})
+    corpus = _f(scal.get("retirement_corpus_required"))
+    gross = _f(scal.get("retirement_gross_monthly_sip"))
+    ongoing = _f(scal.get("retirement_ongoing_monthly_sip"))
+    additional = _f(scal.get("retirement_monthly_sip"))            # E44 (flat, additional)
+    stepup_start_monthly = _f(scal.get("retirement_stepup_start_annual")) / 12.0
+    # Fraction of the required SIP the client's ongoing contribution already runs
+    # → the corpus that's effectively provisioned vs the shortfall the new SIP
+    # (or the step-up) must close. additional<=0 ⇒ already on track.
+    funded_frac = min(1.0, ongoing / gross) if gross > 0 else (1.0 if additional <= 0 else 0.0)
+    on_track = additional <= 1.0
+    start_sip = stepup_start_monthly or gross
+    r.update({
+        "corpus_required": corpus,
+        "years_to_retire": _f(scal.get("years_to_retire")),
+        "retirement_age": _f(scal.get("retire_age")) or r.get("retirement_age"),
+        "required_monthly_sip": round(additional or max(0.0, gross - ongoing)),
+        "gross_monthly_sip": round(gross),
+        "ongoing_retirement_sip_monthly": round(ongoing),
+        "sip_funding_return": _SIP_FUNDING_RETURN,
+        "corpus_shortfall_after_existing": round(corpus * (1 - funded_frac)),
+        "projected_existing_corpus_fv": round(corpus * funded_frac),
+        "stepup_funded_pct": round(funded_frac * 100, 1),
+        "stepup_reaches_goal": on_track,
+        "stepup_required_start_sip_monthly": round(start_sip),
+        "stepup_additional_start_sip_monthly": round(max(0.0, start_sip - ongoing)),
+        "stepup_plan": {
+            "projected_corpus_at_retirement": round(corpus if on_track else corpus * funded_frac),
+            "required_first_year_monthly": round(start_sip),
+        },
+    })
+    return r
+
+
+def excel_cfp(plan):
+    """Excel-sourced stand-in for compute_cfp used by the scenario + suggestion
+    engines. Returns an object with .summary / .goal_blocks / .retirement /
+    .insurance, every baseline figure straight from the recalculated firm
+    workbook, plus the thin affordability + step-up derivations those engines
+    read. Does NOT mutate the persisted plan.computed.cfp (works on copies)."""
+    outputs = _ensure_excel_outputs(plan)
+    scal = outputs.get("scalars") or {}
+    cfp = plan.computed.cfp or {}
+
+    # Goal blocks: copy the Excel blocks and add the per-goal shortfall +
+    # surplus-rationed affordability fields.
+    blocks = [dict(b) for b in (cfp.get("goal_blocks") or [])]
+    total_short = 0.0
+    for b in blocks:
+        req = _f(b.get("required_sip_monthly"))
+        ex = _f(b.get("existing_sip_monthly"))
+        short = max(0.0, req - ex)
+        b["sip_shortfall_monthly"] = round(short)
+        b["incremental_sip_monthly"] = round(short)
+        total_short += short
+
+    # Summary: Excel monthly figures + the affordability gate.
+    summary = dict(cfp.get("summary") or {})
+    income = _f(summary.get("monthly_income"))
+    expenses = _f(summary.get("monthly_expenses"))
+    emi = _f(summary.get("monthly_emi"))
+    existing_sip = _f(summary.get("monthly_existing_sip")) or _f(scal.get("monthly_investments_ongoing"))
+    surplus_pre_sip = income - expenses - emi
+    affordable_new = max(0.0, surplus_pre_sip - existing_sip)
+    summary.update({
+        "monthly_existing_sip": round(existing_sip, 2),
+        "monthly_surplus_pre_sip": round(surplus_pre_sip, 2),
+        "affordable_new_sip_monthly": round(affordable_new, 2),
+        "total_incremental_sip_monthly": round(total_short),
+    })
+
+    # Ration the affordable surplus across goals (proportional to shortfall).
+    ration = min(1.0, affordable_new / total_short) if total_short > 0 else 0.0
+    for b in blocks:
+        req = _f(b.get("required_sip_monthly"))
+        ex = _f(b.get("existing_sip_monthly"))
+        afford = ex + max(0.0, req - ex) * ration
+        b["affordable_sip_monthly"] = round(afford)
+        b["funded_share_at_affordable_sip"] = min(1.0, afford / req) if req > 0 else 1.0
+
+    return SimpleNamespace(
+        summary=summary,
+        goal_blocks=blocks,
+        retirement=_enrich_retirement(scal, cfp.get("retirement")),
+        insurance=cfp.get("insurance") or {},
+    )
+
+
+def excel_retirement_view(plan) -> dict:
+    """Recompute a (modified) plan through the firm workbook and return the
+    enriched retirement block — used by the suggestion engine to size delayed-
+    retirement / leaner-spend levers against the Excel numbers."""
+    _, outputs = compute_from_plan(plan)
+    return _enrich_retirement(outputs.get("scalars") or {})

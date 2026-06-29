@@ -33,10 +33,10 @@ from typing import Any, Optional
 
 from ..types import Goal, PlanState
 from .cfp import (
-    compute_cfp,
     compute_goal_block,
     _build_asset_pool,
 )
+from .excel_plan import excel_cfp, excel_retirement_view
 
 # ── Guardrails ─────────────────────────────────────────────────────────────
 LOCKED_TIME_GOALS: set[str] = {"child_education", "child_marriage"}
@@ -239,10 +239,11 @@ def _goal_levers(goal: Optional[Goal], block: dict, current_year: int,
 
 def _retire_required_sip(plan: PlanState, *, retirement_age: Optional[int] = None,
                          expense_cut: float = 0.0) -> dict:
-    """Re-run compute_cfp on a plan copy with a delayed retirement age and/or
-    a trimmed retirement living expense, returning the recomputed retirement
-    block. Reuses the exact CFP retirement wiring (spouse horizon, 8.75%
-    discount, 10.5% SIP funding, earmarked-asset FV)."""
+    """Recompute a plan copy with a delayed retirement age and/or a trimmed
+    retirement living expense through the firm's Excel workbook, returning the
+    recomputed retirement block. The firm's own Retirement Plan formulas do the
+    math (spouse horizon, real-return discount, earmarked-asset FV); a
+    LibreOffice recalc per lever variant is the accepted cost."""
     p2 = copy.deepcopy(plan)
     if retirement_age is not None:
         p2.personal_details.retirement_age_target = retirement_age
@@ -252,7 +253,7 @@ def _retire_required_sip(plan: PlanState, *, retirement_age: Optional[int] = Non
         # Trim current living expense → flows into the retirement expense (E18).
         if p2.freedom_score_inputs.monthly_expenses:
             p2.freedom_score_inputs.monthly_expenses *= (1 - expense_cut)
-    return compute_cfp(p2).retirement
+    return excel_retirement_view(p2)
 
 
 def _retirement_levers(plan: PlanState, ret: dict) -> list[dict]:
@@ -425,7 +426,7 @@ def compute_suggestions(plan: PlanState) -> dict:
     from .scenario import simulate_mutation  # local import avoids cycle
 
     current_year = datetime.now().year
-    cfp = compute_cfp(plan)
+    cfp = excel_cfp(plan)
     summary = cfp.summary
     surplus = float(summary.get("affordable_new_sip_monthly", 0) or 0)
 

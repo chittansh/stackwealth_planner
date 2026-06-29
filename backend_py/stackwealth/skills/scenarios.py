@@ -30,7 +30,7 @@ from typing import Optional
 
 from ..tracing import traced_calc
 from ..types import Goal, PlanState
-from .cfp import compute_cfp
+from .excel_plan import excel_cfp
 from .suggestions import (
     LOCKED_TIME_GOALS,
     SIP_STEPUP_PCT,
@@ -649,7 +649,7 @@ def compute_scenarios(plan: PlanState, overrides: Optional[dict] = None) -> dict
     from .scenario import simulate_mutation  # local import avoids cycle
 
     plan = _apply_overrides(plan, overrides)
-    cfp = compute_cfp(plan)
+    cfp = excel_cfp(plan)
     s = cfp.summary
     ret = cfp.retirement
     current_year = datetime.now().year
