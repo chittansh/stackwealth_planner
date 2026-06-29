@@ -247,6 +247,27 @@ def _check_suspect_values(plan: PlanState) -> list[dict[str, Any]]:
                 f"There's an event labelled '{ev.label}' — that looks like it came "
                 f"from the firm's sample template, not this client. Should I remove it?")
 
+        # 2d. Positive one-off INFLOW (deposit) — it boosts the projection, so the
+        # RM should confirm it's real and one-time. "Expected"/"bonus"/uncertain
+        # labels (e.g. a ₹4.6L "Bonus expected") are medium; concrete ones low.
+        # (FI maturities are already covered by 2a — don't double-flag those.)
+        label = (ev.label or "").lower()
+        if (amt is not None and amt > 0
+                and not any(k in label for k in _FI_MATURITY_KEYWORDS)):
+            uncertain = any(k in label for k in (
+                "expect", "anticipat", "bonus", "likely", "hope", "tentat",
+                "may ", "should ", "approx", "estimat"))
+            add("medium" if uncertain else "low", "lumpsum",
+                f"assumptions.lumpsum_events[{ev.year}]",
+                {"year": ev.year, "amount": ev.amount, "label": ev.label},
+                f"One-off inflow of ₹{int(amt):,} in {ev.year} ('{ev.label}') boosts the "
+                f"plan" + (" and reads as an EXPECTED/uncertain amount" if uncertain else "")
+                + " — confirm it's real and one-time.",
+                f"The plan banks a one-off ₹{int(amt):,} inflow in {ev.year} labelled "
+                f"'{ev.label}'. " + ("That looks like an EXPECTED figure — " if uncertain else "")
+                + "Is it confirmed and genuinely one-time (not recurring, and not money "
+                "already sitting in the portfolio)?")
+
     # 2d. Rate stored as a percent (7) instead of a fraction (0.07).
     if asn:
         rate_checks = [("assumptions.inflation", _num(asn.inflation))]
