@@ -1240,11 +1240,65 @@ def _build_html(plan: PlanState) -> str:
 # cell pulls from PlanState or from the CFP engine (Excel-faithful).
 
 
+def _excel_report_cfp(plan: PlanState):
+    """The CFPOutput-shaped object the report renders, sourced from the firm's
+    recalculated Excel snapshot (plan.computed.cfp + excel_outputs) — so the PDF
+    is single-source-of-truth with the canvas and the Computed-Excel tab, not the
+    Python compute_cfp mirror. Reads the CACHED snapshot (no recalc; kept fresh by
+    upload + chat edits). Falls back to compute_cfp only when no Excel snapshot
+    exists yet (e.g. a plan that was never computed)."""
+    from types import SimpleNamespace
+    snap = dict(plan.computed.cfp or {})
+    if snap.get("source") != "excel_engine":
+        return cfp_skill.compute_cfp(plan)
+    scal = (plan.computed.excel_outputs or {}).get("scalars") or {}
+
+    def f(k: str) -> float:
+        v = scal.get(k)
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+    # Retirement: Excel headline + the extra scalar fields the report reads.
+    ret = dict(snap.get("retirement") or {})
+    ret.setdefault("corpus_required", f("retirement_corpus_required"))
+    ret.setdefault("years_to_retire", f("years_to_retire"))
+    ret["required_monthly_sip"] = round(f("retirement_monthly_sip"))
+    ret["gross_monthly_sip"] = round(f("retirement_gross_monthly_sip"))
+    ret["corpus_recurring"] = round(f("retirement_corpus_recurring"))
+    ret["annual_expenses_at_retirement"] = round(f("annual_expense_at_retire"))
+    ret["retirement_annual_expense_today"] = round(f("annual_expense_today"))
+    su = f("retirement_stepup_start_annual")
+    ret["stepup_required_start_sip_monthly"] = round(su / 12) if su else round(f("retirement_gross_monthly_sip"))
+
+    # Goal blocks: add the per-goal SIP shortfall the report reads.
+    blocks = []
+    for b in (snap.get("goal_blocks") or []):
+        b = dict(b)
+        req = float(b.get("required_sip_monthly") or 0)
+        ex = float(b.get("existing_sip_monthly") or 0)
+        b.setdefault("sip_shortfall_monthly", round(max(0.0, req - ex)))
+        blocks.append(b)
+
+    # Summary: add the pre-SIP surplus the investable-surplus block reads.
+    summary = dict(snap.get("summary") or {})
+    inc = float(summary.get("monthly_income") or 0)
+    exp = float(summary.get("monthly_expenses") or 0)
+    emi = float(summary.get("monthly_emi") or 0)
+    summary.setdefault("monthly_surplus_pre_sip", round(inc - exp - emi, 2))
+
+    return SimpleNamespace(
+        summary=summary,
+        goal_blocks=blocks,
+        retirement=ret,
+        insurance=snap.get("insurance") or {},
+        yoy_cashflow=snap.get("yoy_cashflow") or [],
+    )
+
+
 def _build_sandeep_html(plan: PlanState) -> str:
     """Client-facing plan, structured to the v2 sample: Page 1 exec summary →
     1 Cash Flow → 2 Net Worth → 3 Risk → 4 Goal Planning →
     5 Retirement Planning → 6 Tax → Appendix."""
-    cfp = cfp_skill.compute_cfp(plan)
+    cfp = _excel_report_cfp(plan)
     try:
         scen = scenarios_skill.compute_scenarios(plan)
     except Exception:
