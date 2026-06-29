@@ -381,6 +381,185 @@ def _check_suspect_values(plan: PlanState) -> list[dict[str, Any]]:
     return out
 
 
+# ── 3. Cross-field consistency — abnormalities visible only by comparing ───
+#     fields against each other or against plausible bounds. ──────────────────
+
+
+def _check_consistency(plan: PlanState) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    yr = _current_year()
+
+    def add(severity, category, field, value, message, question):
+        out.append({"kind": "consistency", "severity": severity, "category": category,
+                    "field": field, "value": value, "message": message, "question": question})
+
+    fsi = plan.freedom_score_inputs
+    pd = plan.personal_details
+    p0 = _person0(plan)
+    income = (_num(fsi.monthly_income) if fsi else None) or 0.0
+    expenses = (_num(fsi.monthly_expenses) if fsi else None) or 0.0
+
+    dob = (pd.date_of_birth if pd else None) or (p0.date_of_birth if p0 else None)
+    cur_age = _age_from_dob(dob)
+    if cur_age is None and fsi:
+        cur_age = _num(fsi.age)
+    retire_age = _num((pd.retirement_age_target if pd else None)
+                      or (p0.retirement_age if p0 else None))
+
+    # A. Age implied by DOB outside a plausible client range.
+    if cur_age is not None and (cur_age < 18 or cur_age > 100):
+        add("high", "range", "personal_details.date_of_birth", cur_age,
+            f"Date of birth implies current age {int(cur_age)} — outside 18–100.",
+            f"The date of birth on file works out to age {int(cur_age)} today, which "
+            f"looks wrong. What's the correct date of birth?")
+
+    # B. Retirement age vs current age.
+    if cur_age is not None and retire_age is not None and 0 < retire_age < 110:
+        if retire_age <= cur_age:
+            add("high", "retirement", "personal_details.retirement_age_target", retire_age,
+                f"Retirement age {int(retire_age)} is at/below current age {int(cur_age)} "
+                f"— the client is already at/past retirement.",
+                f"Retirement age ({int(retire_age)}) is the same as or below the client's "
+                f"current age ({int(cur_age)}). Is the client already retired, or should "
+                f"the retirement age be later?")
+        elif retire_age - cur_age > 45:
+            add("medium", "retirement", "personal_details.retirement_age_target", retire_age,
+                f"Retirement is {int(retire_age - cur_age)} years away — unusually long.",
+                f"This plans for retirement {int(retire_age - cur_age)} years out (at age "
+                f"{int(retire_age)}). Is that right?")
+
+    # C. Income line items don't sum to the headline monthly income.
+    inc = plan.income_details
+    if inc and income > 0:
+        det = sum((_num(getattr(inc, f, None)) or 0) for f in (
+            "client_salary_in_hand", "spouse_salary_in_hand", "client_business_income",
+            "spouse_business_income", "client_rental_income", "spouse_rental_income",
+            "client_other_income", "spouse_other_income"))
+        if det > 0 and abs(det - income) > max(0.2 * income, 5000):
+            add("medium", "income", "income_details",
+                {"detail_total": round(det), "headline": round(income)},
+                f"Income line items sum to ₹{int(det):,}/mo but headline income is "
+                f"₹{int(income):,}/mo — they don't reconcile.",
+                f"The individual income lines add up to ₹{int(det):,}/mo, but household "
+                f"monthly income is recorded as ₹{int(income):,}/mo. Which is correct?")
+
+    # D. Implausibly high monthly income (annual entered as monthly?).
+    if income > 5_000_000:
+        add("low", "range", "freedom_score_inputs.monthly_income", income,
+            f"Monthly income ₹{int(income):,} is very high — confirm it's monthly.",
+            f"Monthly income reads ₹{int(income):,} — unusually high. Is that per month, "
+            f"or did an annual figure get entered as monthly?")
+
+    # E. Expenses dwarf income.
+    if income > 0 and expenses > 3 * income:
+        add("medium", "expense", "freedom_score_inputs.monthly_expenses", expenses,
+            f"Monthly expenses ₹{int(expenses):,} are >3× income ₹{int(income):,}.",
+            f"Monthly expenses (₹{int(expenses):,}) are more than three times income "
+            f"(₹{int(income):,}). Is the expense figure annual, or is income understated?")
+
+    # F. Loans — negative balances, missing EMI/balance, over-leverage.
+    loans = plan.loans_liabilities
+    total_emi = 0.0
+    if loans:
+        for key, label in (("home_loan", "Home loan"), ("car_loan", "Car loan"),
+                           ("personal_loan", "Personal loan"), ("credit_card_dues", "Credit card")):
+            blk = getattr(loans, key, None)
+            if not blk:
+                continue
+            out_amt = _num(getattr(blk, "outstanding_amount", None))
+            e = _num(getattr(blk, "emi", None))
+            if out_amt is not None and out_amt < 0:
+                add("high", "range", f"loans_liabilities.{key}.outstanding_amount", out_amt,
+                    f"{label} outstanding is negative (₹{int(out_amt):,}).",
+                    f"The {label.lower()} outstanding came through negative — sign error?")
+            if e:
+                total_emi += e
+            if out_amt and out_amt > 0 and not e:
+                add("medium", "data", f"loans_liabilities.{key}.emi", None,
+                    f"{label} has a balance (₹{int(out_amt):,}) but no EMI — its repayment "
+                    f"can't be modelled.",
+                    f"There's a {label.lower()} balance of ₹{int(out_amt):,} but no EMI on "
+                    f"file. What's the monthly EMI (and rough interest rate)?")
+            if e and e > 0 and not out_amt:
+                add("low", "data", f"loans_liabilities.{key}.outstanding_amount", None,
+                    f"{label} has an EMI (₹{int(e):,}) but no outstanding balance.",
+                    f"There's a {label.lower()} EMI of ₹{int(e):,}/mo but no outstanding "
+                    f"balance — roughly how much is still owed?")
+    if income > 0 and total_emi > 0.5 * income:
+        add("high", "debt", "freedom_score_inputs.monthly_emi", round(total_emi),
+            f"Total EMIs ₹{int(total_emi):,}/mo exceed 50% of income ₹{int(income):,}/mo.",
+            f"Loan EMIs total ₹{int(total_emi):,}/mo — over half of monthly income. That's "
+            f"a heavy debt load; is it right, or are some loans already closed?")
+
+    # G. No medical cover at all.
+    ins = plan.insurance_details
+    if ins and income > 0:
+        h = getattr(ins, "health_insurance", None)
+        f = getattr(ins, "family_floater", None)
+        h_cover = (_num(getattr(h, "cover_amount", None)) if h else 0) or 0
+        f_cover = (_num(getattr(f, "cover_amount", None)) if f else 0) or 0
+        if h_cover + f_cover <= 0:
+            add("medium", "insurance", "insurance_details.health_insurance", 0,
+                "No health / medical insurance cover captured.",
+                "I don't see any health or family-floater medical cover on file. Is there "
+                "a health policy I'm missing, or is the family uninsured medically?")
+
+    # H. Rate-like assumptions outside a plausible band.
+    asn = plan.assumptions
+    if asn:
+        rate_fields: list[tuple[str, Optional[float]]] = [("assumptions.inflation", _num(asn.inflation))]
+        for grp, names in (("growth", ("cash", "investment", "real_estate", "vehicle")),
+                           ("income_growth", ("employment", "business", "rental", "other"))):
+            obj = getattr(asn, grp, None)
+            if obj is not None:
+                for n in names:
+                    rate_fields.append((f"assumptions.{grp}.{n}", _num(getattr(obj, n, None))))
+        for field, rv in rate_fields:
+            if rv is not None and (rv > 0.5 or rv < -0.5):
+                add("medium", "range", field, rv,
+                    f"{field} = {rv} is outside a plausible annual rate (−0.50 to 0.50).",
+                    f"The assumption {field.split('.')[-1]} is {rv} ({rv*100:.0f}%/yr) — "
+                    f"outside the normal range. Is it entered correctly?")
+
+    # I. Existing SIPs exceed income.
+    mi = plan.monthly_investments
+    if mi and income > 0:
+        sip = sum((_num(getattr(mi, f, None)) or 0) for f in
+                  ("mutual_fund_sip", "nps", "ppf", "rd", "direct_equity", "insurance_premium", "other"))
+        if sip > income:
+            add("medium", "surplus", "monthly_investments", round(sip),
+                f"Monthly SIPs ₹{int(sip):,} exceed monthly income ₹{int(income):,}.",
+                f"Existing monthly SIPs add up to ₹{int(sip):,} — more than monthly income "
+                f"(₹{int(income):,}). Are these actually running, or aspirational?")
+
+    # J. Duplicate goals + goals beyond the client's projected lifetime.
+    life_year = None
+    if cur_age is not None:
+        le = (p0.life_expectancy if p0 else None) or 85
+        if le:
+            life_year = yr + int(le - cur_age)
+    seen: dict[str, int] = {}
+    for g in plan.financial_goals or []:
+        nm = (g.goal_name or "").strip().lower()
+        if nm:
+            seen[nm] = seen.get(nm, 0) + 1
+        ty = _num(getattr(g, "target_year", None))
+        if ty and life_year and ty > life_year + 1 and (g.kind or "").lower() != "retirement":
+            add("low", "range", f"financial_goals[{g.goal_name}].target_year", int(ty),
+                f"Goal '{g.goal_name}' is dated {int(ty)} — beyond the client's projected "
+                f"lifetime (~{life_year}).",
+                f"The goal '{g.goal_name}' targets {int(ty)}, past the client's expected "
+                f"lifetime (~{life_year}). Is the year right?")
+    for nm, cnt in seen.items():
+        if cnt > 1:
+            add("low", "data", f"financial_goals[{nm}]", cnt,
+                f"A goal named '{nm}' appears {cnt} times — possible duplicate.",
+                f"There are {cnt} goals named '{nm}'. Intentional (e.g. two children) or a "
+                f"duplicate to merge?")
+
+    return out
+
+
 # ── Public entry point ─────────────────────────────────────────────────────
 
 
@@ -392,9 +571,21 @@ def validate_plan(plan: PlanState) -> dict[str, Any]:
     narrate without a clarifying question first."""
     required = _check_required_inputs(plan)
     suspect = _check_suspect_values(plan)
+    consistency = _check_consistency(plan)
     anomalies = [{**a, "kind": "anomaly"} for a in detect_plan_anomalies(plan)]
 
-    findings = required + suspect + anomalies
+    # De-dupe findings that target the same (field, kind-of-issue) so the
+    # consistency pass and the anomaly pass don't double-report the same thing.
+    findings = required + suspect + consistency + anomalies
+    seen_keys: set[tuple] = set()
+    deduped: list[dict[str, Any]] = []
+    for f in findings:
+        key = (f.get("field"), f.get("category"), f.get("severity"))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(f)
+    findings = deduped
     order = {"high": 0, "medium": 1, "low": 2}
     findings.sort(key=lambda f: order.get(f.get("severity", "low"), 2))
 
@@ -409,6 +600,7 @@ def validate_plan(plan: PlanState) -> dict[str, Any]:
         "findings": findings,
         "required_missing": required,
         "suspect_values": suspect,
+        "consistency": consistency,
         "anomalies": anomalies,
     }
 
