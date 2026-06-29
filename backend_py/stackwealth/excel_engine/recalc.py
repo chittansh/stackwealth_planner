@@ -26,11 +26,20 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 from ..logging_config import get_logger
 
 _log = get_logger(__name__)
+
+# Process-wide recalc serializer. Each soffice/UNO instance is memory-heavy
+# (hundreds of MB); running several at once OOMs a small machine — which took
+# prod down on upload. This lock guarantees at most ONE recalc subprocess at a
+# time, keeping peak memory bounded. Recalcs already run off the event loop (via
+# asyncio.to_thread), so threads queueing on this lock don't block request
+# handling — they just wait their turn.
+_RECALC_LOCK = threading.Lock()
 
 # Resolved once. Override with STACKWEALTH_SOFFICE if installed somewhere odd.
 _CANDIDATES = [
@@ -200,6 +209,19 @@ def _recalc_via_convert(soffice: str, staged: str, work: str, env: dict, timeout
 
 
 def recalc_file(in_path: str, timeout: int = 180) -> str:
+    """Serialize recalcs process-wide (one soffice at a time — concurrent
+    instances OOM small machines), then run the recalc. Off-loop callers
+    (asyncio.to_thread) simply queue here; request handling stays responsive."""
+    waited_from = time.monotonic()
+    with _RECALC_LOCK:
+        waited = time.monotonic() - waited_from
+        if waited > 0.5:
+            _log.info("recalc.queued", extra={"waited_s": round(waited, 1),
+                                              "category": "excel"})
+        return _recalc_file_locked(in_path, timeout)
+
+
+def _recalc_file_locked(in_path: str, timeout: int = 180) -> str:
     """Recalculate ``in_path`` and return the path to a recalculated .xlsx
     (written into a fresh temp dir; caller owns cleanup of the dir).
 
