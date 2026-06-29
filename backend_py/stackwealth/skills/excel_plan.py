@@ -585,26 +585,29 @@ def _excel_trace(scal: dict[str, Any], cfp: dict) -> list[dict]:
 
 async def run_cfp(household_id: str) -> dict[str, Any]:
     """Excel-sourced Comprehensive Financial Plan for the agent's `cfp_plan`
-    tool. Recomputes the firm workbook from the CURRENT PlanState and returns
-    the snapshot assembled purely from the recalculated Excel — goal blocks,
-    retirement corpus/SIPs, insurance need, year-by-year cash flow, the tax-
-    regime comparison and the debt ratios. NO Python financial math: every
-    number is a cell the firm's formulas produced. Shaped like the old
+    tool. Returns the snapshot assembled purely from the recalculated Excel —
+    goal blocks, retirement corpus/SIPs, insurance need, year-by-year cash flow,
+    the tax-regime comparison and the debt ratios. NO Python financial math:
+    every number is a cell the firm's formulas produced. Shaped like the old
     CFPOutput so the agent renders it unchanged.
+
+    Uses the CACHED Excel snapshot (kept fresh by upload + chat-edit recomputes)
+    rather than forcing a recalc — a LibreOffice recalc is a 20-40s CPU-heavy
+    subprocess, so firing one on every cfp_plan call would starve the box.
     """
-    outputs = await recompute_excel(household_id)
     plan = await get_plan(household_id)
     if plan is None:
         return {"error": "household_not_found"}
-    if outputs is None:
-        # Fall back to whatever the last Excel compute persisted.
-        outputs = plan.computed.excel_outputs or {}
-        if not outputs:
-            return {
-                "error": "no_excel_outputs",
-                "message": "No computed workbook yet — upload the CFP input .xlsx "
-                           "or add income/goals so the engine can compute.",
-            }
+    outputs = (plan.computed.excel_outputs
+               or await get_or_compute_outputs(household_id)
+               or {})
+    if not outputs:
+        return {
+            "error": "no_excel_outputs",
+            "message": "No computed workbook yet — upload the CFP input .xlsx "
+                       "or add income/goals so the engine can compute.",
+        }
+    plan = await get_plan(household_id)
     scal = outputs.get("scalars") or {}
     cfp = dict(plan.computed.cfp or {})
     return {
