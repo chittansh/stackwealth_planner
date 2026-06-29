@@ -215,15 +215,46 @@ def extract_outputs(recalc_wb) -> dict[str, Any]:
 
 # Sheets surfaced in the in-app viewer, in display order. The computed result
 # tabs first, then the key input tabs for reference.
+# Preferred ordering for the in-app Computed-Excel viewer: the headline
+# output/computation tabs first, then everything else in the workbook's natural
+# order (see _default_view_sheets). Pure-internal scaffolding is excluded.
 VIEW_SHEETS: list[str] = [
     "10_Financial_Goals",
     "Retirement Plan",
     "YoY Cash Flow",
     "Insurance",
+    "Insurance Computation",
     "11. Inc Exp,Networth,Rec Invest",
+    "Assumptions & Computation",
+    "Tax Planning",
+    "Debt Mgt",
     "2_Income",
     "3_Expenses ",
 ]
+
+# Internal scaffolding the advisor never needs to see. Everything else in the
+# workbook is shown (empty sheets are auto-skipped by render_sheets).
+EXCLUDE_SHEETS: set[str] = {"Checks", "List of TABs"}
+
+# Bound the used-range scan: firm tabs hold data well within these, but some
+# input tabs (Loans, Recurring Investments) carry ~1000 stray formatted rows
+# that would otherwise be scanned needlessly.
+_ROW_SCAN_CAP = 300
+_COL_SCAN_CAP = 60
+
+
+def _default_view_sheets(wb) -> list[str]:
+    """All advisor-facing sheets: the curated VIEW_SHEETS first (those present),
+    then every remaining workbook sheet in natural order, minus EXCLUDE_SHEETS."""
+    names = wb.sheetnames
+    ordered = [s for s in VIEW_SHEETS if s in names]
+    seen = set(ordered)
+    for s in names:
+        if s in seen or s in EXCLUDE_SHEETS:
+            continue
+        ordered.append(s)
+        seen.add(s)
+    return ordered
 
 
 def _fmt_cell(value: Any, number_format: str | None) -> str:
@@ -269,7 +300,7 @@ def render_sheets(recalc_bytes: bytes, sheets: list[str] | None = None) -> list[
     """
     wb_v = openpyxl.load_workbook(io.BytesIO(recalc_bytes), data_only=True)
     wb_f = openpyxl.load_workbook(io.BytesIO(recalc_bytes), data_only=False)
-    want = sheets or VIEW_SHEETS
+    want = sheets or _default_view_sheets(wb_v)
     out: list[dict[str, Any]] = []
     for name in want:
         if name not in wb_v.sheetnames:
@@ -278,11 +309,14 @@ def render_sheets(recalc_bytes: bytes, sheets: list[str] | None = None) -> list[
         wsf = wb_f[name]
         # Trim to the USED range on every side — drop leading/trailing empty rows
         # and columns so the field columns line up under their headers (firm
-        # templates pad each tab with blank margin rows/cols).
+        # templates pad each tab with blank margin rows/cols). The scan is capped
+        # so the ~1000 stray formatted rows on some input tabs aren't walked.
         first_row = first_col = None
         last_row = last_col = 0
-        for r in range(1, wsv.max_row + 1):
-            for c in range(1, wsv.max_column + 1):
+        scan_rows = min(wsv.max_row, _ROW_SCAN_CAP)
+        scan_cols = min(wsv.max_column, _COL_SCAN_CAP)
+        for r in range(1, scan_rows + 1):
+            for c in range(1, scan_cols + 1):
                 if wsv.cell(r, c).value not in (None, ""):
                     last_row = max(last_row, r)
                     last_col = max(last_col, c)
