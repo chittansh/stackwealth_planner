@@ -361,6 +361,7 @@ def compute_from_upload(
             apply_dynamic_allocation,
             apply_loan_financing,
             apply_lumpsum_events,
+            write_assumption_overrides,
             write_insurance_sheet,
         )
 
@@ -369,6 +370,7 @@ def compute_from_upload(
         apply_house_to_nfa(master_wb)               # house -> NFA
         apply_loan_financing(master_wb, plan)       # down-payment + debt-netted NW
         write_insurance_sheet(master_wb, plan)      # platform-faithful Insurance tab
+        write_assumption_overrides(master_wb, plan) # chat-edited income growth / inflation
     else:
         apply_house_to_nfa(master_wb)
 
@@ -392,6 +394,7 @@ def compute_from_plan(
         apply_dynamic_allocation,
         apply_loan_financing,
         apply_lumpsum_events,
+        write_assumption_overrides,
         write_insurance_sheet,
         write_plan_to_master,
     )
@@ -408,6 +411,7 @@ def compute_from_plan(
     apply_house_to_nfa(master_wb)
     apply_loan_financing(master_wb, plan)
     write_insurance_sheet(master_wb, plan)     # platform-faithful Insurance tab
+    write_assumption_overrides(master_wb, plan)  # chat-edited income growth / inflation
 
     from .model_calcs import write_calc_blocks
     write_calc_blocks(master_wb, plan)         # tax-regime + debt ratios (Excel)

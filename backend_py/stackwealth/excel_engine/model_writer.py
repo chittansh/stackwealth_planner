@@ -49,6 +49,51 @@ def _set(ws, coord: str, value: Any) -> None:
     ws[coord] = value
 
 
+def write_assumption_overrides(master_wb, plan) -> int:
+    """Push the plan's editable assumptions into the firm's 'Assumptions &
+    Computation' tab so chat edits flow into the recalculated Excel.
+
+    That tab is otherwise FROZEN (cellmap.FROZEN_TABS) — the firm's standard
+    methodology — so without this a chat edit to income growth / inflation lands
+    in the PlanState but the Excel keeps the master defaults (the bug behind
+    "I changed it but the computed Excel still shows 5.6%"). We override only the
+    cells whose plan default MATCHES the master, so an unedited plan is a no-op
+    and only a real change moves the firm cell.
+
+    Mapped today: per-source income growth + general inflation. (growth.* and
+    taxes.* are baked into the tab's ROI/post-tax formulas — overriding them
+    needs formula surgery and is left for a follow-up.)
+    """
+    a = getattr(plan, "assumptions", None)
+    if a is None or "Assumptions & Computation" not in master_wb.sheetnames:
+        return 0
+    ws = master_wb["Assumptions & Computation"]
+    written = 0
+
+    # Income growth per source. The firm stores PRE-tax in col D and derives
+    # POST-tax (col E = D*0.7) for the YoY projection (YoY!E5 = E12, etc.). The
+    # PlanState stores POST-tax rates, so write the E cell directly (what the YoY
+    # reads) and set D = E/0.7 for a consistent pre-tax display.
+    ig = getattr(a, "income_growth", None)
+    if ig is not None:
+        for src, row in (("employment", 12), ("business", 13),
+                         ("rental", 14), ("other", 17)):
+            v = getattr(ig, src, None)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                ws[f"E{row}"] = float(v)
+                ws[f"D{row}"] = round(float(v) / 0.7, 4)
+                written += 2
+
+    # General household inflation (col D3). The per-type rows (education D4,
+    # medical D5, …) aren't modelled per-client, so they keep the master values.
+    infl = getattr(a, "inflation", None)
+    if isinstance(infl, (int, float)) and not isinstance(infl, bool):
+        ws["D3"] = float(infl)
+        written += 1
+
+    return written
+
+
 def write_plan_to_master(master_wb, plan) -> int:
     """Populate ``master_wb`` (a fresh master copy) from ``plan``. Returns the
     number of cells written. Formula cells are left untouched."""

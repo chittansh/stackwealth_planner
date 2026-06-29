@@ -655,6 +655,14 @@ async def _apply_assumption_locked(args: dict[str, Any]) -> dict[str, Any]:
     path = args["path"]
     if not path.startswith("assumptions."):
         path = f"assumptions.{path}"
+    # Map common agent mistakes (invented field names) onto the real schema
+    # fields so the edit actually lands instead of becoming a dead stray key.
+    _ALIASES = {
+        "assumptions.income_growth_rate": "assumptions.income_growth.employment",
+        "assumptions.income_growth": "assumptions.income_growth.employment",
+        "assumptions.employment_income_growth": "assumptions.income_growth.employment",
+    }
+    path = _ALIASES.get(path, path)
     ok = set_path(plan_d, path, args["value"])
     if not ok:
         return {

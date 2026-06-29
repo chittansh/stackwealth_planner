@@ -643,8 +643,16 @@ def make_tools() -> list[StructuredTool]:
         StructuredTool.from_function(
             name="plan_assumption",
             description=(
-                "Set an assumption value (per-person DOB / life expectancy / retirement age, "
-                "growth rates, taxes, inflation)."
+                "Set an assumption value, recompute through the firm Excel, and persist. "
+                "`path` is relative to plan.assumptions. VALID PATHS (use these exact names): "
+                "`income_growth.employment`, `income_growth.business`, `income_growth.rental`, "
+                "`income_growth.other` (per-source POST-TAX annual income growth — e.g. set "
+                "employment to 0.08 for 8%/yr; these drive the firm's YoY Cash Flow income "
+                "rows); `inflation` (general household inflation, e.g. 0.07); "
+                "`sip_annual_step_up_pct`; `persons.0.retirement_age`; `persons.0.life_expectancy`. "
+                "Income-growth and inflation edits flow into the Excel 'Assumptions & "
+                "Computation' tab and are reflected on the next recompute. Do NOT invent field "
+                "names like `income_growth_rate` — they are silently ignored."
             ),
             args_schema=PlanAssumptionArgs,
             coroutine=_plan_assumption,
