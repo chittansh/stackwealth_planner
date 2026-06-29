@@ -73,6 +73,11 @@ def test_roundtrip_fidelity():
 
     mismatches = []
     for k, ev in engine_out["scalars"].items():
+        # tax_* / debt_* are engine-INJECTED computations (model_calcs) the firm
+        # file doesn't carry, so there's no cached counterpart to round-trip
+        # against. Their correctness is checked separately against tax.py/debt.py.
+        if k.startswith(("tax_", "debt_")):
+            continue
         tv = truth["scalars"].get(k)
         if not _close(ev, tv):
             mismatches.append((k, ev, tv))

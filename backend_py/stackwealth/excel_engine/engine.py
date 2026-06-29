@@ -372,6 +372,9 @@ def compute_from_upload(
     else:
         apply_house_to_nfa(master_wb)
 
+    from .model_calcs import write_calc_blocks
+    write_calc_blocks(master_wb, plan)              # tax-regime + debt ratios (Excel)
+
     return _recalc_and_extract(master_wb, timeout)
 
 
@@ -405,6 +408,10 @@ def compute_from_plan(
     apply_house_to_nfa(master_wb)
     apply_loan_financing(master_wb, plan)
     write_insurance_sheet(master_wb, plan)     # platform-faithful Insurance tab
+
+    from .model_calcs import write_calc_blocks
+    write_calc_blocks(master_wb, plan)         # tax-regime + debt ratios (Excel)
+
     return _recalc_and_extract(master_wb, timeout)
 
 

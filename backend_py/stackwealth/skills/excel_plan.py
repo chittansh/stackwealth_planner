@@ -54,6 +54,264 @@ def _f(v: Any) -> float:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
 
 
+def _excel_goal_blocks(outputs: dict[str, Any], plan) -> list[dict]:
+    """Map the firm workbook's ``10_Financial_Goals`` rows into the goal-block
+    shape the canvas GoalsView reads (``plan.computed.cfp.goal_blocks``).
+
+    Every number — future value, required/existing SIP, gap, post-tax ROI —
+    comes straight from the recalculated sheet, so the "Excel-faithful" goal
+    cards show exactly what the Computed-Excel tab shows. We deliberately omit
+    the per-goal affordability fields (incremental / affordable SIP): the firm
+    sheet doesn't ration a goal's SIP against household surplus, so faking those
+    would make the UI assert an affordability check we didn't run.
+    """
+    rows = (outputs.get("tables") or {}).get("goals") or []
+    # Resolve each Excel goal name back to a PlanState goal id so the FE can
+    # match a block to its goal (it falls back to a name match when id is None).
+    id_by_name: dict[str, Any] = {}
+    for g in (getattr(plan, "financial_goals", None) or []):
+        nm = (getattr(g, "goal_name", None) or "").strip().lower()
+        if nm:
+            id_by_name.setdefault(nm, getattr(g, "id", None))
+
+    blocks: list[dict] = []
+    for r in rows:
+        name = r.get("goal")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        # Retirement is rendered from cfp.retirement (its own corpus engine),
+        # not as a regular goal row — skip it here to avoid a duplicate card.
+        if "retire" in name.lower():
+            continue
+        # Skip the template's blank placeholder rows (a named row the client
+        # never filled in — no cost and no future value), which would otherwise
+        # render as an empty goal card.
+        today_cost = _f(r.get("todays_cost"))
+        future_value = _f(r.get("future_value_needed"))
+        if today_cost <= 0 and future_value <= 0:
+            continue
+        required = _f(r.get("required_sip"))
+        existing = _f(r.get("existing_sip"))
+        # The "already running" column can be blank on the sheet; back it out of
+        # required − remaining so the Existing-SIP cell still reconciles.
+        if existing == 0 and required:
+            existing = max(0.0, required - _f(r.get("sip_shortfall")))
+        blocks.append({
+            "goal_name": name.strip(),
+            "goal_id": id_by_name.get(name.strip().lower()),
+            "target_year": int(_f(r.get("target_year"))) or None,
+            "years_to_go": int(round(_f(r.get("years_to_go")))) or None,
+            "today_cost": today_cost,
+            "inflation_used": _f(r.get("inflation")),
+            "future_value_needed": future_value,
+            "allocated_today_total": _f(r.get("current_allocated")),
+            "gap_today": _f(r.get("gap_today")),
+            "fv_gap": _f(r.get("future_value_of_gap")),
+            "effective_return": _f(r.get("effective_return")),
+            "required_sip_monthly": required,
+            "existing_sip_monthly": existing,
+        })
+    return blocks
+
+
+def _excel_insurance(scal: dict[str, Any]) -> dict:
+    """Map the workbook's Insurance Computation scalars into the InsuranceView
+    shape (``plan.computed.cfp.insurance``). Empty when the sheet had no cover
+    figures (e.g. a plan with no dependants), so the FE keeps its estimate."""
+    hlv = _f(scal.get("human_life_value"))
+    life_required = _f(scal.get("life_cover_required"))
+    life_existing = _f(scal.get("life_cover_existing"))
+    life_additional = _f(scal.get("life_cover_additional"))
+    health_required = _f(scal.get("health_cover_required"))
+    health_existing = _f(scal.get("health_cover_existing"))
+    health_additional = _f(scal.get("health_cover_additional"))
+    if not (life_required or health_required or hlv):
+        return {}
+    return {
+        "human_life_value": hlv,
+        "total_need_including_loans": life_required,
+        "existing_cover": life_existing,
+        # F38 (additional) already nets disposable assets against the need; back
+        # those assets out so the FE's covered-vs-need bar reconciles.
+        "investable_assets": max(0.0, life_required - life_existing - life_additional),
+        "additional_cover_required": life_additional,
+        "health": {
+            "required": health_required,
+            "existing_cover": health_existing,
+            "additional_cover_required": health_additional,
+        },
+    }
+
+
+def _excel_retirement(scal: dict[str, Any]) -> dict:
+    """Map the Retirement Plan scalars into the retirement-block shape the
+    GoalsView retirement card reads. The 3-case glide (RetirementGlideView's
+    ``cases``) is a Python construct the firm sheet doesn't expose, so it is
+    left to the Python layer; here we only supply the authoritative headline
+    corpus + SIPs and a funded-% derived from ongoing-vs-required SIP."""
+    corpus = _f(scal.get("retirement_corpus_required"))
+    if corpus <= 0:
+        return {}
+    gross = _f(scal.get("retirement_gross_monthly_sip"))
+    ongoing = _f(scal.get("retirement_ongoing_monthly_sip"))
+    out = {
+        "corpus_required": corpus,
+        "years_to_retire": _f(scal.get("years_to_retire")),
+        "retirement_annual_expense_today": _f(scal.get("annual_expense_today")),
+        "gross_monthly_sip": gross,
+        "ongoing_retirement_sip_monthly": ongoing,
+    }
+    if gross > 0:
+        out["stepup_funded_pct"] = min(100.0, max(0.0, ongoing / gross * 100.0))
+    return out
+
+
+def _excel_tax_regime(scal: dict[str, Any]) -> dict:
+    """Map the engine-injected Tax-regime block into the cfp.tax_regime shape
+    (old-vs-new comparison). Every number is computed by the Excel formulas in
+    model_calcs — Python only labels the result. Empty when the workbook had no
+    income to tax."""
+    gross = _f(scal.get("tax_gross_income"))
+    if gross <= 0:
+        return {}
+    old_total = round(_f(scal.get("tax_old_total")))
+    new_total = round(_f(scal.get("tax_new_total")))
+    recommended = scal.get("tax_recommended_regime")
+    if recommended not in ("old", "new"):
+        recommended = "new" if new_total <= old_total else "old"
+    savings = round(_f(scal.get("tax_annual_savings")))
+    if recommended == "old":
+        rationale = f"Old regime saves ₹{savings:,} via 80C/80D/24(b) deductions"
+    else:
+        rationale = (
+            f"New regime saves ₹{savings:,} — current deductions don't outweigh "
+            "the wider slabs"
+        )
+    return {
+        "fy": "2025-26",
+        "annual_gross_income": round(gross),
+        "old_regime": {
+            "standard_deduction": 50_000,
+            "deductions": {
+                "80C": round(_f(scal.get("tax_ded_80c"))),
+                "80CCD_1B": round(_f(scal.get("tax_ded_80ccd1b"))),
+                "80D": round(_f(scal.get("tax_ded_80d"))),
+                "24b": round(_f(scal.get("tax_ded_24b"))),
+                "HRA": round(_f(scal.get("tax_ded_hra"))),
+                "total": round(_f(scal.get("tax_ded_total"))),
+            },
+            "taxable_income": round(_f(scal.get("tax_old_taxable"))),
+            "tax_before_cess": round(_f(scal.get("tax_old_before_cess"))),
+            "cess": round(_f(scal.get("tax_old_cess"))),
+            "total_tax": old_total,
+            "effective_rate": round(_f(scal.get("tax_old_effective_rate")), 4),
+        },
+        "new_regime": {
+            "standard_deduction": 75_000,
+            "taxable_income": round(_f(scal.get("tax_new_taxable"))),
+            "tax_before_cess": round(_f(scal.get("tax_new_before_cess"))),
+            "cess": round(_f(scal.get("tax_new_cess"))),
+            "total_tax": new_total,
+            "effective_rate": round(_f(scal.get("tax_new_effective_rate")), 4),
+        },
+        "recommended_regime": recommended,
+        "annual_savings_with_recommended": savings,
+        "rationale": rationale,
+    }
+
+
+# Debt-ratio judgement bands (presentational labels derived from the Excel
+# ratio — the ratio itself is computed in the workbook). Mirrors debt.py.
+_DEBT_DEFAULT_RATES_PCT = {
+    "home_loan": 8.5, "car_loan": 9.5, "personal_loan": 12.0, "credit_card_dues": 24.0,
+}
+_DEBT_LABELS = {
+    "home_loan": "Home Loan", "car_loan": "Car Loan",
+    "personal_loan": "Personal Loan", "credit_card_dues": "Credit Card",
+}
+
+
+def _dscr_status(x: Optional[float]) -> str:
+    if x is None:
+        return "n/a"
+    return "healthy" if x >= 1.25 else "watch" if x >= 1.0 else "reduce debt"
+
+
+def _dti_status(x: Optional[float]) -> str:
+    if x is None:
+        return "n/a"
+    return "healthy" if x <= 0.35 else "watch" if x <= 0.50 else "high"
+
+
+def _dni_status(x: Optional[float]) -> str:
+    if x is None:
+        return "n/a"
+    return "healthy" if x <= 0.20 else "watch" if x <= 0.30 else "high"
+
+
+def _excel_debt(scal: dict[str, Any], plan) -> dict:
+    """Map the engine-injected Debt block into cfp.debt (ratios + repayment
+    strategies). The ratios are Excel formulas (DSCR/DTI/DNI); a blank cell
+    means an undefined denominator → None (a real ratio may be negative when
+    expenses exceed income, so only blanks — not negatives — map to None). The
+    repayment ORDERING is a sequence (not a financial calc) built from the
+    plan's loans, mirroring debt.py."""
+    def _ratio(key: str) -> Optional[float]:
+        v = scal.get(key)
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            return None
+        return round(float(v), 3)
+
+    total_debt = _f(scal.get("debt_total_outstanding"))
+    if total_debt <= 0 and not (getattr(plan, "loans_liabilities", None)):
+        return {}
+
+    dscr, dti, dni = _ratio("debt_dscr"), _ratio("debt_dti"), _ratio("debt_dni")
+
+    # Build the loan rows from the plan (labels + outstanding + rate) for the
+    # avalanche/snowball/blizzard ORDER — sequencing, not money math.
+    rows: list[dict] = []
+    loans = getattr(plan, "loans_liabilities", None)
+    if loans:
+        for kind in ("home_loan", "car_loan", "personal_loan", "credit_card_dues"):
+            blk = getattr(loans, kind, None)
+            if not blk:
+                continue
+            out = _f(getattr(blk, "outstanding_amount", 0))
+            if out <= 0:
+                continue
+            rate = getattr(blk, "interest_rate", None)
+            rate = float(rate) if isinstance(rate, (int, float)) and not isinstance(rate, bool) else _DEBT_DEFAULT_RATES_PCT[kind]
+            rows.append({
+                "kind": kind, "label": _DEBT_LABELS[kind],
+                "outstanding": round(out), "emi": round(_f(getattr(blk, "emi", 0))),
+                "rate_pct": rate,
+            })
+    avalanche = [r["kind"] for r in sorted(rows, key=lambda r: -r["rate_pct"])]
+    snowball = [r["kind"] for r in sorted(rows, key=lambda r: r["outstanding"])]
+    snow_rows = sorted(rows, key=lambda r: r["outstanding"])
+    blizzard = ([snow_rows[0]["kind"]] +
+                [r["kind"] for r in sorted(snow_rows[1:], key=lambda r: -r["rate_pct"])]) if snow_rows else []
+
+    return {
+        "ratios": {
+            "dscr": dscr, "dscr_status": _dscr_status(dscr),
+            "dti": dti, "dti_status": _dti_status(dti),
+            "dni": dni, "dni_status": _dni_status(dni),
+            "total_debt_outstanding": round(total_debt),
+            "annual_income": round(_f(scal.get("debt_annual_income"))),
+            "annual_emi": round(_f(scal.get("debt_annual_emi"))),
+            "income_available_for_debt_service": round(_f(scal.get("debt_income_for_service"))),
+        },
+        "loans": rows,
+        "avalanche_order": avalanche,
+        "snowball_order": snowball,
+        "blizzard_order": blizzard,
+        "default_strategy": "avalanche",
+        "rationale": "Avalanche minimises total interest paid (clear the highest-rate loan first).",
+    }
+
+
 def _apply_excel_to_computed(plan, outputs: dict[str, Any]) -> None:
     """Make the Excel engine the source of truth for the plan's deterministic
     views: the year-by-year cash-flow table, the net-worth series and the
@@ -109,6 +367,56 @@ def _apply_excel_to_computed(plan, outputs: dict[str, Any]) -> None:
         plan.computed.headline_amount_at_horizon = target.total_net_worth
         plan.computed.horizon_years = max(1, target.year - rows[0].year)
 
+    # Build the Excel-authoritative CFP snapshot the canvas tabs AND the agent's
+    # cfp_plan tool read. Structure matches what the frontend (GoalsView /
+    # InsuranceView / TaxView / DebtPaydownView / cash-flow cards) expects; every
+    # number is straight from the recalculated firm workbook so the tabs and the
+    # Computed-Excel tab agree. Only the genuinely-heuristic detail that the firm
+    # sheet doesn't model (the retirement 3-case stretch search) is preserved by
+    # merging rather than replacing the whole cfp dict.
+    cfp = dict(plan.computed.cfp or {})
+    cfp["source"] = "excel_engine"
+
+    goal_blocks = _excel_goal_blocks(outputs, plan)
+    if goal_blocks:
+        cfp["goal_blocks"] = goal_blocks
+    insurance = _excel_insurance(scal)
+    if insurance:
+        cfp["insurance"] = insurance
+    retirement = _excel_retirement(scal)
+    if retirement:
+        # Keep any Python-built retirement detail (the 3-case glide the firm
+        # sheet doesn't expose) but override its headline corpus / SIP numbers
+        # with the workbook's authoritative values.
+        cfp["retirement"] = {**(cfp.get("retirement") or {}), **retirement}
+    tax_regime = _excel_tax_regime(scal)
+    if tax_regime:
+        cfp["tax_regime"] = tax_regime
+    debt = _excel_debt(scal, plan)
+    if debt:
+        cfp["debt"] = debt
+
+    # Headline summary — all from Excel scalars so the cfp_plan tool and the
+    # summary card report exactly the workbook's numbers.
+    headline = {
+        "current_age": _f(scal.get("current_age")),
+        "retirement_age": _f(scal.get("retire_age")),
+        "years_to_retire": _f(scal.get("years_to_retire")),
+        "retirement_corpus_required": _f(scal.get("retirement_corpus_required")),
+        "retirement_gross_sip_monthly": _f(scal.get("retirement_gross_monthly_sip")),
+        "retirement_ongoing_sip_monthly": _f(scal.get("retirement_ongoing_monthly_sip")),
+        "additional_insurance_cover_required": _f(scal.get("life_cover_additional")),
+        "net_worth": _f(scal.get("net_worth")),
+        "total_assets": _f(scal.get("total_assets")),
+        "total_loans": _f(scal.get("total_loans")),
+        "recommended_tax_regime": (cfp.get("tax_regime") or {}).get("recommended_regime"),
+        "annual_tax_savings_with_recommended": (cfp.get("tax_regime") or {}).get("annual_savings_with_recommended"),
+        "dscr": (cfp.get("debt") or {}).get("ratios", {}).get("dscr"),
+        "dti": (cfp.get("debt") or {}).get("ratios", {}).get("dti"),
+        "dni": (cfp.get("debt") or {}).get("ratios", {}).get("dni"),
+    }
+    cfp["summary"] = {**(cfp.get("summary") or {}), **headline}
+
     # Monthly cash-flow summary card reads computed.cfp.summary — feed it the
     # firm workbook's year-0 monthly figures so it tallies with the Excel.
     if yoy:
@@ -119,9 +427,7 @@ def _apply_excel_to_computed(plan, outputs: dict[str, Any]) -> None:
             "monthly_emi": round(_f(y0.get("loan_repayment")) / 12, 2),
             "monthly_existing_sip": _f(scal.get("monthly_investments_ongoing")),
         }
-        cfp = dict(plan.computed.cfp or {})
         cfp["summary"] = {**(cfp.get("summary") or {}), **summary}
-        cfp["source"] = "excel_engine"
         # Feed the canvas's "Excel" year-by-year table directly from the firm
         # workbook so it shows the same numbers as the Computed Excel tab
         # (field names match the frontend's YoyRow shape).
@@ -153,7 +459,8 @@ def _apply_excel_to_computed(plan, outputs: dict[str, Any]) -> None:
             for r in yoy
             if int(_f(r.get("year"))) > 0
         ]
-        plan.computed.cfp = cfp
+
+    plan.computed.cfp = cfp
 
 
 async def run_excel_plan(household_id: str) -> dict[str, Any]:
@@ -246,3 +553,69 @@ async def get_or_compute_outputs(household_id: str) -> Optional[dict[str, Any]]:
         return await run_excel_plan(household_id)
     except NoWorkbookError:
         return None
+
+
+def _excel_trace(scal: dict[str, Any], cfp: dict) -> list[dict]:
+    """A computation trace built from the firm workbook's own values, so the
+    cfp_plan tool can still show 'the math' — but every figure is the Excel
+    result, not a Python re-derivation. Each step names the firm formula."""
+    tr = (cfp.get("tax_regime") or {})
+    steps = [
+        {"step": "Retirement corpus required",
+         "formula": "Retirement Plan!E30 = PV(real return, years in retirement, -annual need) + one-time spends FV",
+         "result": _f(scal.get("retirement_corpus_required")), "unit": "INR"},
+        {"step": "Retirement SIP needed (gross / ongoing)",
+         "formula": "Retirement Plan!E41 (gross) vs E43 (ongoing) → E44 additional",
+         "result": _f(scal.get("retirement_gross_monthly_sip")), "unit": "INR/mo"},
+        {"step": "Additional life cover required",
+         "formula": "Insurance Computation!F38 = required cover − existing − disposable assets",
+         "result": _f(scal.get("life_cover_additional")), "unit": "INR"},
+        {"step": "Net worth",
+         "formula": "11. Inc Exp,Networth,Rec Invest!I53 = total assets − total loans",
+         "result": _f(scal.get("net_worth")), "unit": "INR"},
+    ]
+    if tr:
+        steps.append({
+            "step": "Income-tax regime choice",
+            "formula": "Tax Planning (engine block): old vs new slab tax + 87A + 4% cess → lower wins",
+            "result": f"{tr.get('recommended_regime')} (saves ₹{tr.get('annual_savings_with_recommended', 0):,})",
+            "unit": "regime"})
+    return steps
+
+
+async def run_cfp(household_id: str) -> dict[str, Any]:
+    """Excel-sourced Comprehensive Financial Plan for the agent's `cfp_plan`
+    tool. Recomputes the firm workbook from the CURRENT PlanState and returns
+    the snapshot assembled purely from the recalculated Excel — goal blocks,
+    retirement corpus/SIPs, insurance need, year-by-year cash flow, the tax-
+    regime comparison and the debt ratios. NO Python financial math: every
+    number is a cell the firm's formulas produced. Shaped like the old
+    CFPOutput so the agent renders it unchanged.
+    """
+    outputs = await recompute_excel(household_id)
+    plan = await get_plan(household_id)
+    if plan is None:
+        return {"error": "household_not_found"}
+    if outputs is None:
+        # Fall back to whatever the last Excel compute persisted.
+        outputs = plan.computed.excel_outputs or {}
+        if not outputs:
+            return {
+                "error": "no_excel_outputs",
+                "message": "No computed workbook yet — upload the CFP input .xlsx "
+                           "or add income/goals so the engine can compute.",
+            }
+    scal = outputs.get("scalars") or {}
+    cfp = dict(plan.computed.cfp or {})
+    return {
+        "source": "excel_engine",
+        "summary": cfp.get("summary") or {},
+        "goal_blocks": cfp.get("goal_blocks") or [],
+        "retirement": cfp.get("retirement") or {},
+        "insurance": cfp.get("insurance") or {},
+        "tax_regime": cfp.get("tax_regime") or {},
+        "debt": cfp.get("debt") or {},
+        "yoy_cashflow": cfp.get("yoy_cashflow") or [],
+        "scalars": scal,
+        "computation_trace": _excel_trace(scal, cfp),
+    }

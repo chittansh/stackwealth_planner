@@ -17,6 +17,7 @@ from ..skills import allocate as allocate_skill
 from ..skills import cashflow as cashflow_skill
 from ..skills import cfp as cfp_skill
 from ..skills import debt as debt_skill
+from ..skills import excel_plan as excel_plan_skill
 from ..skills import freedom as freedom_skill
 from ..skills import intake as intake_skill
 from ..skills import knowledge as knowledge_skill
@@ -272,13 +273,13 @@ async def _validate_inputs(**kwargs: Any) -> Any:
 
 
 async def _cfp_plan(**kwargs: Any) -> Any:
-    """The Excel-faithful Comprehensive Financial Plan engine. Returns the
-    full goal-by-goal breakdown, year-by-year cashflow, retirement corpus,
-    insurance need, AND a `computation_trace` array so the agent can render
-    the math inline in the tool-call response — every step labelled with
-    its formula and the inputs that went into it."""
+    """The Comprehensive Financial Plan, sourced entirely from the firm's
+    recalculated Excel workbook (NOT a Python re-implementation). Recomputes the
+    workbook from the current PlanState and returns the goal-by-goal breakdown,
+    year-by-year cashflow, retirement corpus, insurance need, tax-regime choice,
+    debt ratios, and a `computation_trace` whose every figure is a workbook cell."""
     kwargs = _coerce_kwargs(kwargs)
-    return await cfp_skill.run_cfp(kwargs["household_id"])
+    return await excel_plan_skill.run_cfp(kwargs["household_id"])
 
 
 async def _suggest_optimizations(**kwargs: Any) -> Any:
@@ -711,16 +712,16 @@ def make_tools() -> list[StructuredTool]:
         StructuredTool.from_function(
             name="cfp_plan",
             description=(
-                "Excel-faithful Comprehensive Financial Plan engine — mirrors the firm's "
-                "`Format for inputs for CFP_ng_080626.xlsx` cell-for-cell. Returns per-goal "
-                "FV/gap/SIP via the documented inflation table (Education 10%, Wedding 9%, "
-                "Medical 12%, etc.) and glide-path effective return; the year-by-year cashflow "
-                "with each asset class compounding at its own post-tax return; the retirement "
-                "corpus via PV(real_return, post_retire_years, -annual_need); and Human Life "
-                "Value + Needs-based insurance averaged. Every step is included in "
-                "`computation_trace` so the user can see the math, not just the answer. Use "
-                "this for the comprehensive financial-plan view; use `cashflow_project` for "
-                "the simpler in-platform projection."
+                "Comprehensive Financial Plan, computed by the firm's actual Excel workbook "
+                "(recalculated headlessly) — NOT a Python re-implementation, so it is the "
+                "single source of truth. Recomputes from the current PlanState and returns "
+                "per-goal FV/gap/SIP (from 10_Financial_Goals), the year-by-year cashflow "
+                "(YoY Cash Flow tab), the retirement corpus + SIPs (Retirement Plan tab), the "
+                "Human-Life-Value insurance need (Insurance Computation tab), the income-tax "
+                "regime choice (old vs new slabs) and the debt ratios (DSCR/DTI/DNI). Every "
+                "figure in `computation_trace` is a workbook cell. Use this for the "
+                "comprehensive financial-plan view; use `cashflow_project` for the simpler "
+                "in-platform projection."
             ),
             args_schema=HouseholdOnlyArgs,
             coroutine=_cfp_plan,

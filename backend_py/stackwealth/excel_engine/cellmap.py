@@ -117,6 +117,34 @@ SCALAR_OUTPUTS: dict[str, tuple[str, str]] = {
     "total_loans": ("11. Inc Exp,Networth,Rec Invest", "I51"),
     "net_worth": ("11. Inc Exp,Networth,Rec Invest", "I53"),
     "monthly_investments_ongoing": ("11. Inc Exp,Networth,Rec Invest", "F13"),
+    # --- Tax regime (engine-injected block on Tax Planning; see model_calcs) ---
+    "tax_gross_income": ("Tax Planning", "J15"),
+    "tax_ded_80c": ("Tax Planning", "J21"),
+    "tax_ded_80ccd1b": ("Tax Planning", "J22"),
+    "tax_ded_80d": ("Tax Planning", "J23"),
+    "tax_ded_24b": ("Tax Planning", "J24"),
+    "tax_ded_hra": ("Tax Planning", "J25"),
+    "tax_ded_total": ("Tax Planning", "J26"),
+    "tax_old_taxable": ("Tax Planning", "J28"),
+    "tax_old_before_cess": ("Tax Planning", "J30"),
+    "tax_old_cess": ("Tax Planning", "J31"),
+    "tax_old_total": ("Tax Planning", "J32"),
+    "tax_old_effective_rate": ("Tax Planning", "J33"),
+    "tax_new_taxable": ("Tax Planning", "J35"),
+    "tax_new_before_cess": ("Tax Planning", "J37"),
+    "tax_new_cess": ("Tax Planning", "J38"),
+    "tax_new_total": ("Tax Planning", "J39"),
+    "tax_new_effective_rate": ("Tax Planning", "J40"),
+    "tax_recommended_regime": ("Tax Planning", "J42"),
+    "tax_annual_savings": ("Tax Planning", "J43"),
+    # --- Debt ratios (engine-injected block on Debt Mgt; see model_calcs) ---
+    "debt_annual_income": ("Debt Mgt", "I2"),
+    "debt_annual_emi": ("Debt Mgt", "I4"),
+    "debt_total_outstanding": ("Debt Mgt", "I5"),
+    "debt_income_for_service": ("Debt Mgt", "I7"),
+    "debt_dscr": ("Debt Mgt", "I8"),
+    "debt_dti": ("Debt Mgt", "I9"),
+    "debt_dni": ("Debt Mgt", "I10"),
 }
 
 # Output TABLES — variable-length result regions. Each entry describes a sheet,
@@ -139,8 +167,10 @@ TABLE_OUTPUTS: dict[str, dict] = {
             "current_allocated": "X",
             "gap_today": "Y",
             "future_value_of_gap": "Z",
-            "required_sip": "AB",
-            "sip_shortfall": "AD",
+            "effective_return": "AA",   # ROI (Post Tax) on planned investments
+            "required_sip": "AB",       # Monthly Investments Needed
+            "existing_sip": "AC",       # Monthly investments already running
+            "sip_shortfall": "AD",      # Remaining Monthly investment
         },
     },
     "yoy_cashflow": {
