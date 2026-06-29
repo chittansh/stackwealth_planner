@@ -28,6 +28,39 @@ from ..logging_config import get_logger
 
 _log = get_logger(__name__)
 
+# Character budget for the document text shipped to the extraction LLM. The
+# intake model (Haiku 4.5) has a 200K-token context, so ~200K chars (~50K
+# tokens) leaves ample room and means realistic workbooks are never truncated.
+# The old 80K cut silently dropped trailing sheets on large/atypical files.
+_LLM_DOC_CHAR_BUDGET = 200_000
+
+
+def _assemble_sheets_within_budget(sheet_blocks: list[tuple[str, list[str]]], budget: int) -> str:
+    """Join per-sheet row-blocks into one document, fairly budgeted so a single
+    oversized sheet can never starve (or fully drop) the others. Every sheet is
+    always represented; oversized sheets are row-trimmed with an explicit marker
+    rather than silently cut. Keeps extraction agnostic to how many tabs a
+    workbook has and how rows are distributed across them."""
+    if not sheet_blocks:
+        return ""
+    full = "\n".join(f"## Sheet: {sn}\n" + "\n".join(lines) for sn, lines in sheet_blocks)
+    if len(full) <= budget:
+        return full
+    per = max(2_000, budget // len(sheet_blocks))
+    parts: list[str] = []
+    for sn, lines in sheet_blocks:
+        kept, size = [], 0
+        for ln in lines:
+            if size + len(ln) + 1 > per:
+                break
+            kept.append(ln)
+            size += len(ln) + 1
+        omitted = len(lines) - len(kept)
+        if omitted:
+            kept.append(f"... [{omitted} more rows omitted to fit budget]")
+        parts.append(f"## Sheet: {sn}\n" + "\n".join(kept))
+    return "\n".join(parts)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -184,6 +217,7 @@ ANALYTICAL APPROACH — before emitting any value, REASON about it:
     * "Plan reverse mortgage of 20 lakh in retirement 2045" → `{year: 2045, amount: 2000000, label: "Reverse mortgage"}`
     * Sign convention: POSITIVE = cash INFLOW (deposit), NEGATIVE = cash OUTFLOW (one-off expense).
     * **Bonus expected for investment** — if `6_Liquid_Capital` (or similar) has a row labelled "Bonus Expected for Investment" with a non-empty amount, emit a lumpsum_event for the CURRENT year with that amount and label "Bonus expected for investment". If the amount is empty/blank, OMIT the event.
+    * **CRITICAL — one-offs are NEVER recurring income.** `income_details.*` holds STEADY monthly streams ONLY. A one-off bonus, expected windfall, sale proceeds, maturity, or ANY amount whose label says "one time" / "one-off" / "expected" / "bonus" is a lumpsum_event — NOT income — EVEN IF it appears in (or beside) the income sheet. Concretely: an income-sheet remark like "bonus + cash : one time" or "Bonus expected - one time earlier covered in other income moved here" means that amount must go to `assumptions.lumpsum_events[]` (current year), and `client_other_income` / `spouse_other_income` must NOT include it. Do not double-count: emit it once, as a lumpsum.
     * **Do NOT** emit lumpsum_events for fixed-income instrument maturities (FD/Bond/NSC/PPF/EPF/NPS rows in `4C_Fixed_Income`). Those are already inside the FA portfolio and compound there — never re-inject them as lumpsums (it double-counts money the opening balance already holds). Do NOT set `fixed_income[].maturity_date` for the purpose of generating a lumpsum either.
     * **RM-entered manual lumpsums in a `YoY Cash Flow` tab**: if the workbook has a year-by-year cash-flow sheet with a manual "Lumpsum Further deposit / (Withdrawal)" column carrying labelled one-off entries (e.g. "Bonus Expected", "Reverse Mortgage", "Balance sale consideration", "Knee Surgery"), emit a lumpsum_event for EACH: `{year (from that row's year), amount (POSITIVE for a deposit/inflow, NEGATIVE for a one-off expense), label (the remark text)}`. **CRITICAL — do NOT capture the goal-withdrawal column** (negative values that equal a financial goal's future value, mirroring `10_Financial_Goals`): those are already modelled from the goals list and capturing them here double-counts.
   Don't confuse these with goals (those have target_year + target_amount + kind), regular monthly expenses (those go in monthly_expenses), or income (steady streams go in income_details).
@@ -298,7 +332,7 @@ async def _llm_extract(
             # RM's session: 50–90% faster prefill.
             user_blocks: list[dict] = []
             if text:
-                user_blocks.append({"type": "text", "text": f"# Document\n\n{text[:80_000]}"})
+                user_blocks.append({"type": "text", "text": f"# Document\n\n{text[:_LLM_DOC_CHAR_BUDGET]}"})
             if pdf_bytes:
                 user_blocks.append(
                     {
@@ -374,7 +408,7 @@ async def _llm_extract(
             try:
                 content: list[dict] = [{"type": "text", "text": EXTRACTION_INSTRUCTIONS}]
                 if text:
-                    content.append({"type": "text", "text": f"\n\n# Document\n\n{text[:80_000]}"})
+                    content.append({"type": "text", "text": f"\n\n# Document\n\n{text[:_LLM_DOC_CHAR_BUDGET]}"})
                 if image_bytes:
                     b64 = base64.b64encode(image_bytes).decode()
                     content.append(
@@ -528,7 +562,11 @@ def _parse_goals_sheet(wb) -> list[dict]:
         if not isinstance(name, str):
             continue
         name = name.strip()
-        if not name or name.lower() in ("total", "goal", "goals"):
+        nl = name.lower()
+        # Skip header/footer/note rows that aren't real goals (e.g. a
+        # "Note - Total cost in Per Annum" trailer under the goal list).
+        if (not name or nl in ("total", "goal", "goals")
+                or nl.startswith("note") or "total cost" in nl or "per annum" in nl):
             continue
         goal: dict[str, Any] = {"goal_name": name, "kind": _goal_kind_from_name(name)}
         yr = row[col["year"]] if col.get("year") is not None and col["year"] < len(row) else None
@@ -722,13 +760,33 @@ def _parse_retirement_inputs(wb) -> dict[str, Any]:
     return out
 
 
+# Labels that mark the end of the holdings list, not a holding. The firm's
+# templates append a grand-total row plus a "Summary by Tag" block, and some
+# RM-prepared sheets (e.g. Dhruv's) restate the same total as a
+# re-classification ("Considered for playing in Equity" + "Available for sale")
+# — counting those rows double-counts the portfolio. Once a row's name matches,
+# everything below it is ignored.
+_EQUITY_STOP_LABELS = (
+    "total", "subtotal", "grand total", "summary", "by tag",
+    "considered for playing", "available for sale",
+)
+
+
 def _parse_equity_stocks(wb) -> list[dict] | None:
-    """Deterministically read the firm '4B_Equity_Stocks' tab. Its columns are
-    mislabelled — the 'Current Price' column actually holds each holding's TOTAL
-    current value, and the 'Current Value' column holds the strength tag — so the
-    LLM intermittently computes Quantity × 'Current Price' and inflates equity
-    100×. Read the value column directly (the numeric one among Current
-    Value / Current Price) and never multiply by quantity."""
+    """Deterministically read the firm '4B_Equity_Stocks' tab. Column layouts
+    vary across the firm's templates, so the value column is mislabelled in two
+    different ways:
+      • some templates shift the headers, so the 'Current Price' column actually
+        holds each holding's TOTAL current value while 'Current Value' holds the
+        strength tag;
+      • others label the per-share price 'Current Price' and the total
+        'Current Value'.
+    The LLM intermittently computes Quantity × per-share price and inflates
+    equity 100×. We read the value column directly — preferring the
+    'Current Value' header when its data is numeric, else 'Current Price' — and
+    never multiply by quantity. We also stop at the grand-total / summary /
+    re-classification rows below the holdings (see _EQUITY_STOP_LABELS) so a
+    restated total isn't summed on top of the holdings."""
     ws = None
     for sn in wb.sheetnames:
         s = sn.lower()
@@ -739,7 +797,7 @@ def _parse_equity_stocks(wb) -> list[dict] | None:
         return None
     max_c = ws.max_column
     hdr = None
-    name_c = val_candidates = None
+    name_c = value_c = price_c = None
     cand: list[int] = []
     for r in range(1, min(8, ws.max_row) + 1):
         vals = [ws.cell(row=r, column=c).value for c in range(1, max_c + 1)]
@@ -750,20 +808,30 @@ def _parse_equity_stocks(wb) -> list[dict] | None:
                 t = str(v or "").lower().strip()
                 if "stock name" in t or t == "stock name":
                     name_c = c
-                if "current value" in t or "current price" in t:
+                if "current value" in t:
+                    value_c = value_c or c
+                    cand.append(c)
+                elif "current price" in t:
+                    price_c = price_c or c
                     cand.append(c)
             break
     if not hdr or not name_c or not cand:
         return None
-    # Pick the candidate value column whose data rows are numeric.
-    val_c = None
-    for c in cand:
+
+    def _col_is_numeric(c: int) -> bool:
         for rr in range(hdr + 1, min(hdr + 6, ws.max_row) + 1):
             v = ws.cell(row=rr, column=c).value
             if isinstance(v, (int, float)) and v > 0:
-                val_c = c
-                break
-        if val_c:
+                return True
+        return False
+
+    # Prefer the 'Current Value' column; fall back to 'Current Price' (which on
+    # shifted-header templates is the real total). Last resort: any numeric
+    # candidate, left to right.
+    val_c = None
+    for c in (value_c, price_c, *cand):
+        if c and _col_is_numeric(c):
+            val_c = c
             break
     if not val_c:
         return None
@@ -771,8 +839,24 @@ def _parse_equity_stocks(wb) -> list[dict] | None:
     for r in range(hdr + 1, ws.max_row + 1):
         name = ws.cell(row=r, column=name_c).value
         val = ws.cell(row=r, column=val_c).value
-        if isinstance(name, str) and name.strip() and isinstance(val, (int, float)) and val > 0:
+        # An unlabelled numeric row is the column's grand total — holdings end
+        # here (everything below is a total / summary / re-classification block).
+        if not (isinstance(name, str) and name.strip()):
+            if isinstance(val, (int, float)) and val > 0:
+                break
+            continue
+        nl = name.strip().lower()
+        if any(lbl in nl for lbl in _EQUITY_STOP_LABELS):
+            break
+        if isinstance(val, (int, float)) and val > 0:
             out.append({"stock_name": name.strip(), "current_value": float(val)})
+    if out:
+        _log.info(
+            "intake.equity.parsed",
+            extra={"holdings": len(out),
+                   "total_value": round(sum(h["current_value"] for h in out)),
+                   "value_col": val_c, "category": "intake"},
+        )
     return out or None
 
 
@@ -897,7 +981,7 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
             goal_rows = _parse_goals_sheet(wb)
         except Exception:
             goal_rows = []
-        chunks: list[str] = []
+        sheet_blocks: list[tuple[str, list[str]]] = []
         for sn in wb.sheetnames:
             # Skip COMPUTED / projection tabs — they hold derived figures
             # (future balances, corpus, FV, networth roll-forwards) that the LLM
@@ -936,9 +1020,14 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
                             expense_footer_total = float(max(nums))
             if not sheet_lines:
                 continue
-            chunks.append(f"## Sheet: {sn}")
-            chunks.extend(sheet_lines)
-        text = "\n".join(chunks)
+            sheet_blocks.append((sn, sheet_lines))
+        text = _assemble_sheets_within_budget(sheet_blocks, _LLM_DOC_CHAR_BUDGET)
+        _log.info(
+            "intake.xlsx.dump",
+            extra={"sheets": len(sheet_blocks), "chars": len(text),
+                   "budget": _LLM_DOC_CHAR_BUDGET,
+                   "trimmed": len(text) >= _LLM_DOC_CHAR_BUDGET, "category": "intake"},
+        )
     except Exception as e:
         return {**_empty_result("xlsx:failed"), "missing": [str(e)]}
     result = await _llm_extract(

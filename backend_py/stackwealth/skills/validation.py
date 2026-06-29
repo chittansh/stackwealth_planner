@@ -307,6 +307,23 @@ def _check_suspect_values(plan: PlanState) -> list[dict[str, Any]]:
                 f"Goal '{goal.goal_name}' targets {goal.target_year}, already past.",
                 f"The goal '{goal.goal_name}' is dated {goal.target_year}, which is in "
                 f"the past. Has it already happened, or is the year wrong?")
+        # Goal with NO cost — neither today's cost nor a target amount. The firm
+        # model sizes its future value off today's cost (E column), so a costless
+        # goal computes to ₹0 and is silently dropped from funding. Retirement is
+        # excluded — its corpus is sized from expenses, not a goal target.
+        today_c = _num(getattr(goal, "today_cost", None))
+        target_c = _num(getattr(goal, "target_amount", None))
+        is_retirement = (getattr(goal, "kind", "") or "").lower() == "retirement"
+        has_cost = (today_c and today_c > 0) or (target_c and target_c > 0)
+        if not is_retirement and not has_cost:
+            add("medium", "completeness", f"financial_goals[{goal.goal_name}].today_cost",
+                None,
+                f"Goal '{goal.goal_name}' has no cost (no today's cost and no target "
+                f"amount) — the firm model sizes it to ₹0, so it's silently dropped "
+                f"from funding.",
+                f"The goal '{goal.goal_name}' came through with no cost attached. What "
+                f"does it cost in today's rupees? Without a figure I can't size or fund "
+                f"it — right now it's being ignored entirely.")
         if any(s in (goal.goal_name or "").lower() for s in _SAMPLE_SENTINELS):
             add("medium", "sample", f"financial_goals[{goal.goal_name}].goal_name",
                 goal.goal_name,
@@ -340,6 +357,26 @@ def _check_suspect_values(plan: PlanState) -> list[dict[str, Any]]:
                 f"The same round figure ₹{int(val):,} shows up across "
                 f"{len(fields)} different fields — that sometimes means a default was "
                 f"entered everywhere. Can you confirm these are the real numbers?")
+
+    # 2i. One-off windfall mis-routed to RECURRING income. A bonus / expected
+    # windfall / sale captured as "other income" inflates EVERY month's income
+    # (and the whole projection) — it belongs in assumptions.lumpsum_events. We
+    # flag "other income" that is as large as, or larger than, salary.
+    inc = plan.income_details
+    if inc:
+        salary = (_num(getattr(inc, "client_salary_in_hand", None)) or 0) + \
+                 (_num(getattr(inc, "spouse_salary_in_hand", None)) or 0)
+        for fld in ("client_other_income", "spouse_other_income"):
+            oth = _num(getattr(inc, fld, None))
+            if oth and oth > 0 and oth >= max(salary, 100_000):
+                add("medium", "income", f"income_details.{fld}", oth,
+                    f"{fld} is ₹{int(oth):,}/mo — as large as or larger than salary. "
+                    f"A one-off bonus / expected windfall / sale captured here inflates "
+                    f"every month's income; it should be a one-time lumpsum event.",
+                    f"There's ₹{int(oth):,}/mo logged as '{fld.replace('_', ' ')}'. Is "
+                    f"that a steady recurring stream, or a one-off (bonus / expected "
+                    f"windfall / sale) that should be a single lumpsum event in a given "
+                    f"year rather than monthly income?")
 
     return out
 
