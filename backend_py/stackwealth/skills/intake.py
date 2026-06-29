@@ -700,9 +700,16 @@ def _parse_expenses_sheet(wb) -> dict | None:
 
 def _apply_expense_parse(partial_state: dict, parsed: dict) -> None:
     """Make the deterministic expense parse authoritative: replace the (often
-    incomplete) LLM monthly_expenses, set the living-expense + EMI headline
-    figures, and keep the EMI out of living expenses to stop the double-count."""
-    partial_state["monthly_expenses"] = parsed["monthly_expenses"]
+    incomplete) LLM monthly_expenses with the reconciled living-expense
+    breakdown, and park any EMI rows in `other_emis`. The FSI sync derives
+    `monthly_emi` from `other_emis`, and the Excel writer ignores `other_emis`
+    whenever structured loans exist — so the EMI lands in the freedom-score
+    surplus without double-counting the loan's own EMI in the projection, and it
+    stays OUT of living expenses (which was the bug: a loan EMI counted as rent)."""
+    me = dict(parsed["monthly_expenses"])
+    if parsed["emi"] > 0:
+        me["other_emis"] = parsed["emi"]
+    partial_state["monthly_expenses"] = me
     fsi = partial_state.setdefault("freedom_score_inputs", {})
     fsi["monthly_expenses"] = parsed["living"]
     if parsed["emi"] > 0:
