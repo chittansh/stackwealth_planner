@@ -21,9 +21,10 @@ primary_region = "bom"
     path = "/health"
 
 [[vm]]
-  cpu_kind = "shared"
-  cpus = 1
-  # LibreOffice headless recalc (soffice) peaks at several hundred MB; with the
-  # app + openpyxl loading the recalced workbook, 1 GB OOM'd the machine on
-  # upload. 2 GB gives a single (serialized) recalc enough headroom.
-  memory_mb = 2048
+  # 2 DEDICATED vCPUs so a CPU-heavy LibreOffice recalc (soffice, 20-40s) runs on
+  # one core while the web server keeps serving on the other — on shared-1x the
+  # recalc starved the app and requests crawled. 4 GB gives the (serialized)
+  # recalc + app + openpyxl workbook load comfortable headroom.
+  cpu_kind = "performance"
+  cpus = 2
+  memory_mb = 4096
