@@ -957,6 +957,11 @@ _EQUITY_STOP_LABELS = (
     "considered for playing", "available for sale",
 )
 
+# Foreign holdings (US stocks etc.) are quoted in their own currency; convert to
+# INR so a 95,200-USD position isn't read as ₹95,200. Approximate spot rate.
+_USD_INR = 86.0
+_FOREIGN_CCY = ("usd", "us$", "dollar", "eur", "gbp", "$")
+
 
 def _parse_equity_stocks(wb) -> list[dict] | None:
     """Deterministically read the firm '4B_Equity_Stocks' tab. Column layouts
@@ -983,23 +988,30 @@ def _parse_equity_stocks(wb) -> list[dict] | None:
         return None
     max_c = ws.max_column
     hdr = None
-    name_c = value_c = price_c = None
+    name_c = value_c = price_c = total_c = currency_c = None
     cand: list[int] = []
     for r in range(1, min(8, ws.max_row) + 1):
         vals = [ws.cell(row=r, column=c).value for c in range(1, max_c + 1)]
         joined = " ".join(str(v).lower() for v in vals if v)
-        if "stock name" in joined or ("stock" in joined and ("current value" in joined or "current price" in joined)):
+        if "stock name" in joined or ("stock" in joined and ("current value" in joined or "current price" in joined or "total value" in joined)):
             hdr = r
             for c, v in enumerate(vals, start=1):
                 t = str(v or "").lower().strip()
                 if "stock name" in t or t == "stock name":
                     name_c = c
-                if "current value" in t:
+                # 'Total Value' / 'Total Current Value' / 'Market Value' is the
+                # holding's value; prefer it over 'Current Value' (which on some
+                # templates is the PER-SHARE price).
+                if "total value" in t or "total current value" in t or "market value" in t:
+                    total_c = total_c or c
+                elif "current value" in t:
                     value_c = value_c or c
                     cand.append(c)
-                elif "current price" in t:
+                elif "current price" in t or t == "price" or t == "ltp":
                     price_c = price_c or c
                     cand.append(c)
+                if "currency" in t or t == "ccy":
+                    currency_c = c
             break
     if not hdr or not name_c or not cand:
         return None
@@ -1011,11 +1023,10 @@ def _parse_equity_stocks(wb) -> list[dict] | None:
                 return True
         return False
 
-    # Prefer the 'Current Value' column; fall back to 'Current Price' (which on
-    # shifted-header templates is the real total). Last resort: any numeric
-    # candidate, left to right.
+    # Holding value column: prefer an explicit 'Total Value', then 'Current
+    # Value', then 'Current Price'. Never multiply by quantity.
     val_c = None
-    for c in (value_c, price_c, *cand):
+    for c in (total_c, value_c, price_c, *cand):
         if c and _col_is_numeric(c):
             val_c = c
             break
@@ -1025,17 +1036,26 @@ def _parse_equity_stocks(wb) -> list[dict] | None:
     for r in range(hdr + 1, ws.max_row + 1):
         name = ws.cell(row=r, column=name_c).value
         val = ws.cell(row=r, column=val_c).value
-        # An unlabelled numeric row is the column's grand total — holdings end
-        # here (everything below is a total / summary / re-classification block).
+        # SKIP unlabelled numeric rows (mid-list subtotals like the Indian-stocks
+        # total sitting above a 'US Stock' section) rather than stopping — else
+        # the foreign holdings below get dropped. A grand total has no name, so
+        # it's skipped here too (never summed). Explicit labelled totals/summary
+        # rows still stop the scan via _EQUITY_STOP_LABELS below.
         if not (isinstance(name, str) and name.strip()):
-            if isinstance(val, (int, float)) and val > 0:
-                break
             continue
         nl = name.strip().lower()
         if any(lbl in nl for lbl in _EQUITY_STOP_LABELS):
             break
+        # Section dividers like "US Stock" carry no value — skip, don't stop.
+        if nl in ("us stock", "us stocks", "indian stocks", "foreign stocks"):
+            continue
         if isinstance(val, (int, float)) and val > 0:
-            out.append({"stock_name": name.strip(), "current_value": float(val)})
+            v = float(val)
+            if currency_c:
+                ccy = str(ws.cell(row=r, column=currency_c).value or "").lower()
+                if any(f in ccy for f in _FOREIGN_CCY):
+                    v *= _USD_INR
+            out.append({"stock_name": name.strip(), "current_value": v})
     if out:
         _log.info(
             "intake.equity.parsed",
@@ -1043,6 +1063,71 @@ def _parse_equity_stocks(wb) -> list[dict] | None:
                    "total_value": round(sum(h["current_value"] for h in out)),
                    "value_col": val_c, "category": "intake"},
         )
+    return out or None
+
+
+def _parse_mutual_funds(wb) -> list[dict] | None:
+    """Deterministically read the '4A_Mutual_Funds' tab. The LLM drops or
+    mis-reads MFs because the layout puts a huge FOLIO number right next to the
+    holding value (e.g. folio 17,353,550 beside a ₹2.65L value) — it can grab the
+    folio as the value, inflating the portfolio to crores, or drop the row. We
+    map columns dynamically by HEADER: the value is the 'Current Value' column
+    (never 'Folio'), plus the 'SIP Amount' column and any 'Currency' for foreign
+    funds. Stops at total/summary rows."""
+    ws = None
+    for sn in wb.sheetnames:
+        s = sn.lower()
+        if "mutual" in s or s.strip().startswith("4a"):
+            ws = wb[sn]
+            break
+    if ws is None:
+        return None
+    max_c = ws.max_column
+    hdr = name_c = value_c = sip_c = currency_c = None
+    for r in range(1, min(8, ws.max_row) + 1):
+        vals = [ws.cell(row=r, column=c).value for c in range(1, max_c + 1)]
+        joined = " ".join(str(v).lower() for v in vals if v)
+        if "fund name" in joined or ("fund" in joined and "current value" in joined) or "scheme" in joined:
+            hdr = r
+            for c, v in enumerate(vals, start=1):
+                t = str(v or "").lower().strip()
+                if name_c is None and ("fund name" in t or "scheme" in t or t == "fund" or ("name" in t and "value" not in t)):
+                    name_c = c
+                elif "current value" in t or "market value" in t or t == "value" or "value (inr)" in t:
+                    value_c = value_c or c
+                if ("sip" in t) or ("monthly" in t and ("amount" in t or "invest" in t)):
+                    sip_c = sip_c or c
+                if "currency" in t or t == "ccy":
+                    currency_c = c
+            break
+    if not hdr or not name_c or not value_c:
+        return None
+    out: list[dict] = []
+    for r in range(hdr + 1, ws.max_row + 1):
+        name = ws.cell(row=r, column=name_c).value
+        if not (isinstance(name, str) and name.strip()):
+            continue
+        nl = name.strip().lower()
+        if any(lbl in nl for lbl in _EQUITY_STOP_LABELS):
+            break
+        val = _parse_inr_amount(ws.cell(row=r, column=value_c).value)
+        if not val or val <= 0:
+            continue
+        if currency_c:
+            ccy = str(ws.cell(row=r, column=currency_c).value or "").lower()
+            if any(f in ccy for f in _FOREIGN_CCY):
+                val *= _USD_INR
+        rec: dict[str, Any] = {"fund_name": name.strip(), "current_value": float(val)}
+        if sip_c:
+            sip = _parse_inr_amount(ws.cell(row=r, column=sip_c).value)
+            if sip and sip > 0:
+                rec["sip_amount"] = float(sip)
+        out.append(rec)
+    if out:
+        _log.info("intake.mf.parsed", extra={
+            "holdings": len(out),
+            "total_value": round(sum(h["current_value"] for h in out)),
+            "category": "intake"})
     return out or None
 
 
@@ -1156,6 +1241,10 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
         except Exception:
             equity_rows = None
         try:
+            mf_rows = _parse_mutual_funds(wb)
+        except Exception:
+            mf_rows = None
+        try:
             retirement_inputs = _parse_retirement_inputs(wb)
         except Exception:
             retirement_inputs = {}
@@ -1235,6 +1324,11 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
     # Deterministic equity holdings override the LLM (mislabelled-column safety).
     if equity_rows and result.get("partial_state") is not None:
         result["partial_state"]["equity_stocks"] = equity_rows
+
+    # Deterministic mutual funds override the LLM (which drops them or reads the
+    # folio number as the value). Value from 'Current Value', SIP from 'SIP'.
+    if mf_rows and result.get("partial_state") is not None:
+        result["partial_state"]["mutual_funds"] = mf_rows
 
     # Deterministic recurring investments — no monthly contribution dropped, and
     # NPS/VPF/EPF/PPF correctly tagged retirement so they feed the retirement SIP.
