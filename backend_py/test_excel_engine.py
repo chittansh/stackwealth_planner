@@ -276,7 +276,9 @@ def test_dynamic_allocation():
     )
     wb = openpyxl.load_workbook(MASTER_PATH, data_only=False)
     g = wb["10_Financial_Goals"]
-    assert g["M3"].value == "=839368", "expected the sample hardcode in the master"
+    # The master is now cleaned of sample client data — M3's old "=839368"
+    # hardcode has been removed at the template level (not just at runtime).
+    assert g["M3"].value in (None, ""), "master should carry no sample asset hardcode"
     apply_dynamic_allocation(wb, plan)
     # value cells: K,M,O,Q,S,U,W (cols 11,13,15,17,19,21,23)
     vals = {}
