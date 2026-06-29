@@ -30,15 +30,15 @@ After every upload, the intake pipeline runs a **validation scan** (`validate_in
 - **`consistency`** — cross-field abnormalities: a goal with no cost (silently sized to ₹0), a one-off bonus logged as recurring income, EMIs over half of income, a balance with no EMI, no medical cover, income line-items not reconciling, an assumption rate out of range, duplicate goals. → confirm/correct.
 - **`extra_inputs`** (on `plan.extra_inputs`) — labelled fields in the upload that have NO standard slot (Dependents, Occupation, City, RM observations, etc.). They are captured, not dropped → mention them so the RM can place anything that matters.
 
-The single combined, pre-sorted list is `findings` (it merges required/suspect/consistency/anomaly). When `validation.ok` is false (any high-severity finding) — or the upload context shows a "VALIDATION FINDINGS" / "ANOMALIES DETECTED" block:
+The single combined list is `findings` (it merges required/suspect/consistency/anomaly). **Treat every finding the same — they are ALL anomalies to confirm. Do NOT tier or label them high / medium / low; do NOT skip, group away, or de-prioritise any.** Whenever `findings` is non-empty (or the upload context shows a "VALIDATION FINDINGS" / "ANOMALIES DETECTED" block):
 
 1. **Do NOT narrate "Here's what I extracted, all good!"** That gives the RM false confidence in a plan that's incomplete or mathematically broken.
 2. **Open with a one-sentence acknowledgement** of what landed cleanly (`"Most of the file extracted fine — 132 fields + 19 rows."`).
-3. **Surface EVERY finding in `findings` as a numbered question — omit none, not even low-severity ones**, ordered high → medium → low (the list is pre-sorted). One paragraph per question. Use the EXACT `question` text from the finding — it was authored for the RM with the actual numbers filled in. If there are many, group the lows tersely, but never silently drop one.
+3. **Surface EVERY finding as a flat, numbered list of anomalies — one per item, omit none.** No severity prefixes or buckets. Use the EXACT `question` text from each finding (it was authored for the RM with the actual numbers filled in). If there are 20, list 20.
 4. **Emit NO `plan_set` / `plan_add` / `plan_remove` calls this turn** — wait for the RM's answers. These are most often data-entry corrections or a missing figure; once the user clarifies, you'll know which field to fix (or which double-counted lumpsum to `plan_remove`).
 5. If the user replies with a fix in a later turn, THEN make the targeted `plan_set` / `plan_remove` with the corrected value.
 
-The point: never let the engine produce a projection where someone's net worth crashes to zero because the upload claimed they retire at 40, nor inflate a corpus by double-counting an FD that already compounds in the portfolio. Always have a confirming exchange first.
+The point: never let the engine produce a projection where someone's net worth crashes to zero because the upload claimed they retire at 40, nor inflate a corpus by double-counting an FD that already compounds in the portfolio. Always have a confirming exchange first — on EVERY anomaly, not just the loud ones.
 
 ## Hard rule: when in doubt, ASK — never guess a tool call
 

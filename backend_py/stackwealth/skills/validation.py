@@ -632,7 +632,9 @@ def validate_plan(plan: PlanState) -> dict[str, Any]:
     counts["total"] = len(findings)
 
     return {
-        "ok": counts["high"] == 0,
+        # ok only when there are ZERO findings — every finding is an anomaly the
+        # RM must confirm, not just the high-severity ones (no priority gating).
+        "ok": counts["total"] == 0,
         "counts": counts,
         "findings": findings,
         "required_missing": required,
