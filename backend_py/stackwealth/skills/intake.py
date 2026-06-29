@@ -586,6 +586,129 @@ def _parse_goals_sheet(wb) -> list[dict]:
     return out
 
 
+# Living-expense category → monthly_expenses field. Insurance is checked BEFORE
+# medical so "Insurance Premium (health & LIC)" routes to insurance, not medical.
+_EXPENSE_FIELD_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
+    ("groceries", ("grocer", "food", "ration", "kitchen")),
+    ("utilities", ("utilit", "electric", "mobile", "internet", "phone", "water", "gas", "broadband", "wifi")),
+    ("school_fees", ("school", "tuition", "education fee", "college fee", "tuition fee")),
+    ("insurance_premium", ("insurance", "premium", "lic")),
+    ("medical", ("medical", "health", "doctor", "hospital", "pharma")),
+    ("travel_or_lifestyle", ("travel", "lifestyle", "vacation", "entertain", "leisure", "shopping")),
+    ("rent_or_emi", ("rent", "maintenance", "society")),
+]
+
+
+def _classify_expense(category: str, detail: str) -> tuple[str, str | None]:
+    """Classify an expense-sheet line as living expense / EMI / SIP. EMI and SIP
+    are matched on WORD boundaries so 'premium' (pr-emi-um) isn't read as an EMI
+    and category labels disambiguate via the detail column ('Personal loan EMI')."""
+    t = f"{category} {detail}".lower()
+    if re.search(r"\b(sip|mutual fund|investment)s?\b", t):
+        return ("sip", None)
+    if re.search(r"\b(emi|loan)s?\b", t):
+        return ("emi", None)
+    for field, kws in _EXPENSE_FIELD_KEYWORDS:
+        if any(k in t for k in kws):
+            return ("expense", field)
+    return ("expense", "household_expenses")
+
+
+def _parse_expenses_sheet(wb) -> dict | None:
+    """Deterministically parse the monthly-expenses sheet — capture EVERY line
+    item (the LLM intermittently drops the biggest residual), route EMI and SIP
+    rows OUT of living expenses (so a 'Rent / EMI' = personal-loan-EMI row isn't
+    double-counted as both a living expense and a loan), and reconcile to the
+    stated total. Authoritative over the LLM when a category+amount table is
+    found. Returns {monthly_expenses, living, emi, sip, stated_total} or None."""
+    sheet = None
+    for sn in wb.sheetnames:
+        l = sn.lower()
+        if (l.startswith("3_") or "expense" in l) and "computation" not in l:
+            sheet = wb[sn]
+            break
+    if sheet is None:
+        return None
+    rows = list(sheet.iter_rows(values_only=True))
+
+    # Locate every (category, monthly-amount, optional detail) table on the sheet.
+    tables: list[tuple[int, int, int, int | None]] = []
+    for i, row in enumerate(rows):
+        low = [str(c).lower().strip() if c is not None else "" for c in row]
+        amt_col = cat_col = det_col = None
+        for j, c in enumerate(low):
+            if amt_col is None and "monthly" in c and ("amount" in c or "spend" in c):
+                amt_col = j
+            elif cat_col is None and ("category" in c or "type of expense" in c):
+                cat_col = j
+            elif det_col is None and "detail" in c:
+                det_col = j
+        if amt_col is not None and cat_col is not None:
+            tables.append((i, cat_col, amt_col, det_col))
+    if not tables:
+        return None
+
+    # Detail map (category → 'Expense Details') from any table that has one, used
+    # to disambiguate EMI/SIP rows whose category label is ambiguous.
+    detail_by: dict[str, str] = {}
+    for (s, cc, ac, dc) in tables:
+        if dc is None:
+            continue
+        for row in rows[s + 1:]:
+            cat = row[cc] if cc < len(row) else None
+            det = row[dc] if dc < len(row) else None
+            if isinstance(cat, str) and isinstance(det, str) and cat.strip():
+                detail_by[cat.strip().lower()] = det.strip()
+
+    me: dict[str, float] = {}
+    emi = sip = 0.0
+    stated_total = None
+    seen: set[str] = set()
+    s, cc, ac, dc = tables[0]
+    for row in rows[s + 1:]:
+        cat = row[cc] if cc < len(row) else None
+        amt = _parse_inr_amount(row[ac]) if ac < len(row) else None
+        if not isinstance(cat, str) or not cat.strip():
+            continue
+        cl = cat.strip().lower()
+        if "total" in cl and ("expens" in cl or "expend" in cl):
+            if amt:
+                stated_total = amt
+            break
+        if cl in seen:
+            continue
+        seen.add(cl)
+        amt = amt or 0.0
+        kind, field = _classify_expense(cat, detail_by.get(cl, ""))
+        if kind == "sip":
+            sip += amt
+        elif kind == "emi":
+            emi += amt
+        else:
+            me[field] = me.get(field, 0.0) + amt
+
+    if len(me) < 2 and emi == 0:
+        return None  # not a real expense table
+    return {
+        "monthly_expenses": {k: round(v) for k, v in me.items()},
+        "living": round(sum(me.values())),
+        "emi": round(emi),
+        "sip": round(sip),
+        "stated_total": round(stated_total) if stated_total else None,
+    }
+
+
+def _apply_expense_parse(partial_state: dict, parsed: dict) -> None:
+    """Make the deterministic expense parse authoritative: replace the (often
+    incomplete) LLM monthly_expenses, set the living-expense + EMI headline
+    figures, and keep the EMI out of living expenses to stop the double-count."""
+    partial_state["monthly_expenses"] = parsed["monthly_expenses"]
+    fsi = partial_state.setdefault("freedom_score_inputs", {})
+    fsi["monthly_expenses"] = parsed["living"]
+    if parsed["emi"] > 0:
+        fsi["monthly_emi"] = parsed["emi"]
+
+
 def _merge_goal_rows(partial_state: dict, goal_rows: list[dict]) -> None:
     """Append any named goal the deterministic sheet parse found that the LLM
     didn't already extract (matched case-insensitively by name). Never drops or
@@ -981,6 +1104,10 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
             goal_rows = _parse_goals_sheet(wb)
         except Exception:
             goal_rows = []
+        try:
+            expense_parse = _parse_expenses_sheet(wb)
+        except Exception:
+            expense_parse = None
         sheet_blocks: list[tuple[str, list[str]]] = []
         for sn in wb.sheetnames:
             # Skip COMPUTED / projection tabs — they hold derived figures
@@ -1057,6 +1184,16 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
     # goals the LLM missed; never overwrites an LLM-parsed goal.
     if goal_rows and result.get("partial_state") is not None:
         _merge_goal_rows(result["partial_state"], goal_rows)
+
+    # Deterministic expenses — capture EVERY line item, route EMI/SIP out of
+    # living expenses, reconcile to the stated total. Authoritative over the LLM
+    # (which dropped the biggest residual and double-counted the loan EMI).
+    if expense_parse and result.get("partial_state") is not None:
+        _apply_expense_parse(result["partial_state"], expense_parse)
+        _log.info("intake.expenses.parsed", extra={
+            "living": expense_parse["living"], "emi": expense_parse["emi"],
+            "sip": expense_parse["sip"], "stated_total": expense_parse["stated_total"],
+            "category": "intake"})
 
     if yoy_manual and result.get("partial_state") is not None:
         ps = result["partial_state"]
