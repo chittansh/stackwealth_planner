@@ -1042,68 +1042,28 @@ def recompute(plan_d: dict) -> dict:
             )
     plan_d["computed"]["milestone_pins"] = pins
 
-    # ── Single source of truth: the firm's recalculated Excel workbook ──────
-    # Route the CFP snapshot AND the net-worth trajectory through the Excel
-    # engine so every scenario path, suggestion projection and canvas pin shows
-    # the firm workbook's own numbers — not the Python mirror. A LibreOffice
-    # recalc per recompute is the accepted cost of Excel-as-source-of-truth; the
-    # compute_cashflow / compute_cfp Python pair is kept ONLY as the fallback for
-    # when the recalc can't run (no inputs, or a LibreOffice hiccup).
-    if not _excel_recompute(plan_obj, plan_d):
-        try:
-            cfp_out = compute_cfp(plan_obj)
-            plan_d["computed"]["cfp"] = {
-                "summary": cfp_out.summary,
-                "goal_blocks": cfp_out.goal_blocks,
-                "retirement": cfp_out.retirement,
-                "insurance": cfp_out.insurance,
-                "yoy_cashflow": cfp_out.yoy_cashflow,
-                "debt": cfp_out.debt,
-                "tax_regime": cfp_out.tax_regime,
-                "constants_used": cfp_out.constants_used,
-            }
-        except Exception:
-            plan_d["computed"]["cfp"] = None
+    # ── CFP snapshot (fast, in-process) ─────────────────────────────────────
+    # recompute() runs on the request's event loop and is called on EVERY canvas
+    # edit / pin / scenario path, so it MUST stay non-blocking. The firm's Excel
+    # workbook is the source of truth, but a LibreOffice recalc here (a multi-
+    # second subprocess) would freeze the single-threaded async server — it took
+    # prod down. The authoritative Excel snapshot is produced off the event loop
+    # on upload (run_excel_plan) and after chat edits (recompute_excel), both via
+    # asyncio.to_thread; this in-process pass keeps the interactive canvas snappy.
+    try:
+        cfp_out = compute_cfp(plan_obj)
+        plan_d["computed"]["cfp"] = {
+            "summary": cfp_out.summary,
+            "goal_blocks": cfp_out.goal_blocks,
+            "retirement": cfp_out.retirement,
+            "insurance": cfp_out.insurance,
+            "yoy_cashflow": cfp_out.yoy_cashflow,
+            "debt": cfp_out.debt,
+            "tax_regime": cfp_out.tax_regime,
+            "constants_used": cfp_out.constants_used,
+        }
+    except Exception:
+        plan_d["computed"]["cfp"] = None
 
     plan_d["last_updated_at"] = datetime.now(timezone.utc).isoformat()
     return plan_d
-
-
-def _excel_recompute(plan_obj: PlanState, plan_d: dict) -> bool:
-    """Recompute the CFP snapshot + net-worth trajectory through the firm's Excel
-    workbook and write them into ``plan_d['computed']``. Returns True on success,
-    False if there's nothing to compute or the recalc failed (caller falls back
-    to the Python engines). Overrides the Python net_worth_series / cash_flow_
-    table / headline set above so the displayed trajectory is the Excel one."""
-    # Nothing to recalc from an input-less plan — let the Python fallback (which
-    # degrades to zeros cleanly) handle it and skip a pointless subprocess.
-    if not (plan_obj.income_details or plan_obj.financial_goals
-            or plan_obj.assumptions.persons):
-        return False
-    try:
-        from ..excel_engine.engine import compute_from_plan
-        from .excel_plan import _apply_excel_to_computed
-
-        _, outputs = compute_from_plan(plan_obj)
-        plan_obj.computed.excel_outputs = outputs
-        _apply_excel_to_computed(plan_obj, outputs)
-    except Exception:
-        _log.warning("scenario.recompute.excel_failed — using Python fallback",
-                     exc_info=True)
-        return False
-
-    c = plan_obj.computed
-    if not c.cfp:
-        return False
-    plan_d["computed"]["excel_outputs"] = outputs
-    plan_d["computed"]["cfp"] = c.cfp
-    if c.net_worth_series:
-        plan_d["computed"]["net_worth_series"] = [
-            {"year": p.year, "value": p.value} for p in c.net_worth_series
-        ]
-        plan_d["computed"]["cash_flow_table"] = [
-            r.model_dump(mode="python") for r in c.cash_flow_table
-        ]
-        plan_d["computed"]["headline_amount_at_horizon"] = c.headline_amount_at_horizon
-        plan_d["computed"]["horizon_years"] = c.horizon_years
-    return True
