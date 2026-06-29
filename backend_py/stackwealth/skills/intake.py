@@ -716,6 +716,62 @@ def _apply_expense_parse(partial_state: dict, parsed: dict) -> None:
         fsi["monthly_emi"] = parsed["emi"]
 
 
+# Personal-detail labels that DO map to standard schema fields (skip these when
+# harvesting unmapped extras).
+_PERSONAL_MAPPED_LABELS = {
+    "full name", "name", "client name", "date of birth", "dob", "age", "current age",
+    "marital status", "retirement age", "retirement age target", "life expectancy",
+    "spouse name", "spouse name & age", "spouse name and age", "gender", "email", "phone",
+}
+_EXTRA_SKIP_LABELS = {
+    "questions", "details to be filled by client", "s.no", "observations", "observation",
+    "expense category", "goal", "monthly amount", "type of expense",
+}
+
+
+def _parse_extra_inputs(wb) -> list[dict]:
+    """Capture labelled input fields that have NO standard slot in the schema /
+    firm Excel (Dependents, Occupation, City, Number of Children, RM
+    observations, …) so nothing labelled is silently dropped. Scans the
+    personal-details Q&A sheet and any observations/notes sheet, taking the label
+    and the data 'by its side' (the next non-empty cell). Returns a capped list
+    of {label, value, sheet}."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for sn in wb.sheetnames:
+        l = sn.lower()
+        is_personal = "personal" in l or l.startswith("1_")
+        is_notes = "observ" in l or "note" in l
+        if not (is_personal or is_notes):
+            continue
+        ws = wb[sn]
+        for row in ws.iter_rows(values_only=True):
+            label = next((str(c).strip() for c in row if isinstance(c, str) and str(c).strip()), None)
+            if not label:
+                continue
+            nl = label.lower().strip().rstrip(":").strip()
+            if nl in _EXTRA_SKIP_LABELS:
+                continue
+            if is_personal and nl in _PERSONAL_MAPPED_LABELS:
+                continue
+            # Value = the first non-empty cell AFTER the label cell ('by its side').
+            idx = next((i for i, c in enumerate(row)
+                        if isinstance(c, str) and c.strip() == label), 0)
+            value = next((c for c in row[idx + 1:] if c not in (None, "")), None)
+            key = label.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "label": label[:160],
+                "value": ("" if value is None else str(value).strip())[:200],
+                "sheet": sn,
+            })
+            if len(out) >= 40:
+                return out
+    return out
+
+
 def _merge_goal_rows(partial_state: dict, goal_rows: list[dict]) -> None:
     """Append any named goal the deterministic sheet parse found that the LLM
     didn't already extract (matched case-insensitively by name). Never drops or
@@ -1115,6 +1171,10 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
             expense_parse = _parse_expenses_sheet(wb)
         except Exception:
             expense_parse = None
+        try:
+            extra_inputs = _parse_extra_inputs(wb)
+        except Exception:
+            extra_inputs = []
         sheet_blocks: list[tuple[str, list[str]]] = []
         for sn in wb.sheetnames:
             # Skip COMPUTED / projection tabs — they hold derived figures
@@ -1201,6 +1261,13 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
             "living": expense_parse["living"], "emi": expense_parse["emi"],
             "sip": expense_parse["sip"], "stated_total": expense_parse["stated_total"],
             "category": "intake"})
+
+    # Capture labelled fields with no standard slot (Dependents, Occupation, RM
+    # observations, …) so nothing labelled is silently dropped.
+    if extra_inputs and result.get("partial_state") is not None:
+        result["partial_state"]["extra_inputs"] = extra_inputs
+        _log.info("intake.extra_inputs.captured",
+                  extra={"count": len(extra_inputs), "category": "intake"})
 
     if yoy_manual and result.get("partial_state") is not None:
         ps = result["partial_state"]

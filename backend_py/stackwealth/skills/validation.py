@@ -557,6 +557,19 @@ def _check_consistency(plan: PlanState) -> list[dict[str, Any]]:
                 f"There are {cnt} goals named '{nm}'. Intentional (e.g. two children) or a "
                 f"duplicate to merge?")
 
+    # K. Labelled input fields with no standard slot — captured so nothing is
+    # dropped; surface them so the RM can place anything that matters.
+    extras = getattr(plan, "extra_inputs", None) or []
+    if extras:
+        labels = ", ".join(str(e.get("label", "")).strip()
+                           for e in extras[:6] if isinstance(e, dict) and e.get("label"))
+        add("low", "completeness", "extra_inputs", len(extras),
+            f"{len(extras)} labelled field(s) in the upload have no standard plan slot "
+            f"and were captured separately: {labels}.",
+            f"The upload had {len(extras)} field(s) that don't map to the plan ({labels}). "
+            f"Do any of these matter for the plan — e.g. dependents to provide for, a second "
+            f"income, a one-off note — so I can place them?")
+
     return out
 
 
@@ -574,13 +587,16 @@ def validate_plan(plan: PlanState) -> dict[str, Any]:
     consistency = _check_consistency(plan)
     anomalies = [{**a, "kind": "anomaly"} for a in detect_plan_anomalies(plan)]
 
-    # De-dupe findings that target the same (field, kind-of-issue) so the
-    # consistency pass and the anomaly pass don't double-report the same thing.
+    # De-dupe only EXACT duplicates (same field AND same message) so the
+    # consistency and anomaly passes don't print the identical line twice. A
+    # coarser key would suppress genuinely distinct findings — e.g. two lumpsums
+    # in the same year, or a goal flagged for both "no cost" and "past year" —
+    # which is the opposite of what a validation layer should do.
     findings = required + suspect + consistency + anomalies
     seen_keys: set[tuple] = set()
     deduped: list[dict[str, Any]] = []
     for f in findings:
-        key = (f.get("field"), f.get("category"), f.get("severity"))
+        key = (f.get("field"), f.get("message"))
         if key in seen_keys:
             continue
         seen_keys.add(key)

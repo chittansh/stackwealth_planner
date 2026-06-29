@@ -708,6 +708,11 @@ class PlanState(StrictModel):
     computed: ComputedSnapshot = Field(default_factory=ComputedSnapshot)
     evidence: list[EvidenceRow] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
+    # Labelled input fields that have NO standard slot in the schema / firm Excel
+    # (e.g. Dependents, Occupation, City of Residence, RM observations). Captured
+    # verbatim from the upload so nothing labelled is silently dropped; surfaced
+    # to the RM to place anything that matters. Each: {label, value, sheet}.
+    extra_inputs: list[dict] = Field(default_factory=list)
     last_updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
