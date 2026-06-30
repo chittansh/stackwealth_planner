@@ -676,42 +676,39 @@ def _parse_retirement_inputs(wb) -> dict[str, Any]:
 # fully replace the LLM's; dict/nested sections deep-merge with deterministic
 # leaves winning while preserving LLM-only fields the parser doesn't cover.
 _DET_LIST_SECTIONS = ("mutual_funds", "equity_stocks", "fixed_income", "real_estate", "gold")
-_DET_DICT_SECTIONS = ("personal_details", "income_details", "liquid_capital", "emergency_fund")
-_DET_NESTED_SECTIONS = ("loans_liabilities", "insurance_details")
+# The deterministic parser reads each of these sheets COMPLETELY, so it REPLACES
+# the LLM's version of the section outright — a field the parser didn't set is
+# genuinely blank in the input, and the LLM's value for it must NOT survive.
+# (Merging is what let a hallucinated 'Idle Cash 460k' sit next to the real
+# 'Bonus 460k' and double-count liquid capital.)
+_DET_REPLACE_SECTIONS = ("income_details", "liquid_capital", "emergency_fund",
+                         "loans_liabilities", "insurance_details")
+# Personal details carry diverse fields (pan/email/city_type/marital/…) the
+# structured parser may not cover, so the LLM is allowed to fill gaps there.
+_DET_MERGE_SECTIONS = ("personal_details",)
 
 
 def _apply_det_state(partial: dict[str, Any], det: dict[str, Any]) -> None:
     """Overlay the deterministic per-tab parse onto the LLM partial_state.
-    Deterministic values are authoritative for the sections they cover; the LLM
-    is kept only for fields/sections the deterministic parser left empty."""
+    Deterministic values are authoritative for every section they cover; the LLM
+    survives only for personal-detail gaps and sections the parser returned empty."""
     if not det:
         return
     for key in _DET_LIST_SECTIONS:
         rows = det.get(key)
         if rows:
             partial[key] = rows
-    for key in _DET_DICT_SECTIONS:
+    for key in _DET_REPLACE_SECTIONS:
+        d = det.get(key)
+        if d:
+            partial[key] = d
+    for key in _DET_MERGE_SECTIONS:
         d = det.get(key)
         if not d:
             continue
         base = partial.get(key) if isinstance(partial.get(key), dict) else {}
         merged = dict(base)
         merged.update({k: v for k, v in d.items() if v not in (None, "")})
-        partial[key] = merged
-    for key in _DET_NESTED_SECTIONS:
-        d = det.get(key)
-        if not d:
-            continue
-        base = partial.get(key) if isinstance(partial.get(key), dict) else {}
-        merged = dict(base)
-        for sub, blk in d.items():
-            if isinstance(blk, dict):
-                sub_base = merged.get(sub) if isinstance(merged.get(sub), dict) else {}
-                sb = dict(sub_base)
-                sb.update({k: v for k, v in blk.items() if v not in (None, "")})
-                merged[sub] = sb
-            else:
-                merged[sub] = blk
         partial[key] = merged
     # Goals MERGE with the LLM's (never drop an LLM goal — only add the ones the
     # deterministic sheet parse found that the LLM missed).
