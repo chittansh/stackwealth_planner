@@ -122,6 +122,23 @@ def _is_total_label(label: str) -> bool:
     return any(w.strip() in nl for w in _TOTAL_WORDS)
 
 
+# Rows that look like holdings but are actually a re-classification / summary block
+# the firm appends BELOW a holdings list (restating the SAME portfolio by tag or
+# liquidity). Counting them double-counts the portfolio (e.g. equity sheets append
+# "Considered for playing in Equity" + "Available for sale" = the same total again).
+# Once a row's name matches, the list has ended — stop reading.
+_STOP_LABEL_KW = (
+    "considered for playing", "available for sale", "by tag", "summary",
+    "classification", "bifurcation", "break up", "breakup", "break-up",
+    "as per risk",
+)
+
+
+def _is_stop_label(label: str) -> bool:
+    nl = _norm(label)
+    return _is_total_label(label) or any(w in nl for w in _STOP_LABEL_KW)
+
+
 def _find_sheet(wb, keywords, exclude=()):
     for sn in wb.sheetnames:
         l = sn.lower()
@@ -233,7 +250,10 @@ def _parse_holding_list(ws, name_field: str, *, with_sip=False) -> list[dict]:
         nm = row[name_c] if name_c < len(row) else None
         if not (isinstance(nm, str) and nm.strip()):
             continue
-        if _is_total_label(nm):
+        # Stop at a Total OR a re-classification/summary block ("Considered for
+        # playing in Equity", "Available for sale", "By Tag" …) — those restate the
+        # SAME portfolio and would double-count it.
+        if _is_stop_label(nm):
             break
         val = _amt(row[val_c]) if val_c is not None and val_c < len(row) else None
         if val is None or val <= 0:
@@ -296,7 +316,7 @@ def parse_fixed_income(wb) -> list[dict]:
         nm = row[name_c] if name_c < len(row) else None
         if not (isinstance(nm, str) and nm.strip()):
             continue
-        if _is_total_label(nm):
+        if _is_stop_label(nm):
             break
         cv = _amt(row[val_c]) if val_c is not None and val_c < len(row) else None
         iv = _amt(row[inv_c]) if inv_c is not None and inv_c < len(row) else None
@@ -338,7 +358,7 @@ def parse_real_estate(wb) -> list[dict]:
         nm = row[name_c] if name_c < len(row) else None
         if not (isinstance(nm, str) and nm.strip()):
             continue
-        if _is_total_label(nm):
+        if _is_stop_label(nm):
             break
         val = _amt(row[val_c]) if val_c is not None and val_c < len(row) else None
         if val is None or val <= 0:
@@ -361,7 +381,7 @@ def parse_gold(wb) -> list[dict]:
         nm = row[name_c] if name_c < len(row) else None
         if not (isinstance(nm, str) and nm.strip()):
             continue
-        if _is_total_label(nm):
+        if _is_stop_label(nm):
             break
         val = _amt(row[val_c]) if val_c is not None and val_c < len(row) else None
         if val is None or val <= 0:
