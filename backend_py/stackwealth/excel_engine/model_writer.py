@@ -15,6 +15,7 @@ written stays blank).
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -92,6 +93,65 @@ def write_assumption_overrides(master_wb, plan) -> int:
         written += 1
 
     return written
+
+
+# The firm template ships sample person names baked into header cells and
+# descriptive labels (e.g. "Mr. M" / "Mrs. Y" column headers, "Life Expectancy of
+# Mr M"). These are replaced with the ACTUAL client/spouse names from the input so
+# the computed Excel never shows placeholder names. Client tokens vs spouse tokens
+# are disjoint substrings; spouse (Mrs…) is substituted first.
+_SPOUSE_NAME_TOKENS = ("Mrs. M", "Mrs M", "Mrs. Y", "Mrs Y")
+_CLIENT_NAME_TOKENS = ("Mr. M", "Mr M", "Mr. X", "Mr X")
+# Tabs the client actually sees where the sample names appear. Assumptions &
+# Computation is frozen/internal and intentionally left untouched.
+_NAME_TABS = (
+    "1_Personal_Details", "2_Income", "3_Expenses ",
+    "11. Inc Exp,Networth,Rec Invest", "Retirement Plan",
+)
+
+
+def _strip_age(name: str) -> str:
+    """'Priya (35)' / 'Priya 32' / 'Mrs M - 40' → 'Priya' (drop a trailing age)."""
+    if not name:
+        return ""
+    return re.split(r"[(\d]", str(name), 1)[0].strip(" -,").strip()
+
+
+def write_person_names(master_wb, plan) -> int:
+    """Replace the firm template's placeholder person names ('Mr. M' / 'Mrs. Y' …)
+    with the real client and spouse names from the plan, across every cell on the
+    client-facing tabs (headers AND descriptive labels). No-op without a plan or a
+    client name. Returns the number of cells rewritten."""
+    if plan is None:
+        return 0
+    pd = getattr(plan, "personal_details", None)
+    persons = (plan.assumptions.persons if getattr(plan, "assumptions", None) else None) or []
+    client = _strip_age(getattr(pd, "full_name", "") or "") or (
+        _strip_age(getattr(persons[0], "name", "")) if persons else "")
+    spouse = _strip_age(getattr(pd, "spouse_name_and_age", "") or "") or (
+        _strip_age(getattr(persons[1], "name", "")) if len(persons) > 1 else "")
+    if not client:
+        return 0
+    spouse = spouse or "Spouse"
+    n = 0
+    for tab in _NAME_TABS:
+        if tab not in master_wb.sheetnames:
+            continue
+        ws = master_wb[tab]
+        for row in ws.iter_rows():
+            for c in row:
+                v = c.value
+                if not isinstance(v, str) or v.startswith("="):
+                    continue
+                new = v
+                for tok in _SPOUSE_NAME_TOKENS:
+                    new = re.sub(re.escape(tok), spouse, new, flags=re.I)
+                for tok in _CLIENT_NAME_TOKENS:
+                    new = re.sub(re.escape(tok), client, new, flags=re.I)
+                if new != v:
+                    c.value = new
+                    n += 1
+    return n
 
 
 def write_plan_to_master(master_wb, plan) -> int:

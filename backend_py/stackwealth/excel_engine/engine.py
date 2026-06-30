@@ -397,6 +397,7 @@ def compute_from_upload(
             apply_lumpsum_events,
             write_assumption_overrides,
             write_insurance_sheet,
+            write_person_names,
         )
 
         apply_lumpsum_events(master_wb, plan)       # clear sample lumpsums/remarks
@@ -405,6 +406,7 @@ def compute_from_upload(
         apply_loan_financing(master_wb, plan)       # down-payment + debt-netted NW
         write_insurance_sheet(master_wb, plan)      # platform-faithful Insurance tab
         write_assumption_overrides(master_wb, plan) # chat-edited income growth / inflation
+        write_person_names(master_wb, plan)         # real client/spouse names, not 'Mr. M'
     else:
         apply_house_to_nfa(master_wb)
 
@@ -430,6 +432,7 @@ def compute_from_plan(
         apply_lumpsum_events,
         write_assumption_overrides,
         write_insurance_sheet,
+        write_person_names,
         write_plan_to_master,
     )
 
@@ -440,6 +443,7 @@ def compute_from_plan(
         )
     master_wb = openpyxl.load_workbook(master_path, data_only=False)
     write_plan_to_master(master_wb, plan)
+    write_person_names(master_wb, plan)        # real client/spouse names, not 'Mr. M'
     apply_lumpsum_events(master_wb, plan)      # clear sample lumpsums/remarks
     apply_dynamic_allocation(master_wb, plan)  # categorise real assets → goals
     apply_house_to_nfa(master_wb)
