@@ -23,6 +23,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from . import intake_sheets
 from .. import config
 from ..logging_config import get_logger
 
@@ -1223,6 +1224,49 @@ def _parse_recurring_investments(wb) -> list[dict] | None:
     return out or None
 
 
+# Section keys parsed deterministically by intake_sheets.parse_workbook. Lists
+# fully replace the LLM's; dict/nested sections deep-merge with deterministic
+# leaves winning while preserving LLM-only fields the parser doesn't cover.
+_DET_LIST_SECTIONS = ("mutual_funds", "equity_stocks", "fixed_income", "real_estate", "gold")
+_DET_DICT_SECTIONS = ("personal_details", "income_details", "liquid_capital", "emergency_fund")
+_DET_NESTED_SECTIONS = ("loans_liabilities", "insurance_details")
+
+
+def _apply_det_state(partial: dict[str, Any], det: dict[str, Any]) -> None:
+    """Overlay the deterministic per-tab parse onto the LLM partial_state.
+    Deterministic values are authoritative for the sections they cover; the LLM
+    is kept only for fields/sections the deterministic parser left empty."""
+    if not det:
+        return
+    for key in _DET_LIST_SECTIONS:
+        rows = det.get(key)
+        if rows:
+            partial[key] = rows
+    for key in _DET_DICT_SECTIONS:
+        d = det.get(key)
+        if not d:
+            continue
+        base = partial.get(key) if isinstance(partial.get(key), dict) else {}
+        merged = dict(base)
+        merged.update({k: v for k, v in d.items() if v not in (None, "")})
+        partial[key] = merged
+    for key in _DET_NESTED_SECTIONS:
+        d = det.get(key)
+        if not d:
+            continue
+        base = partial.get(key) if isinstance(partial.get(key), dict) else {}
+        merged = dict(base)
+        for sub, blk in d.items():
+            if isinstance(blk, dict):
+                sub_base = merged.get(sub) if isinstance(merged.get(sub), dict) else {}
+                sb = dict(sub_base)
+                sb.update({k: v for k, v in blk.items() if v not in (None, "")})
+                merged[sub] = sb
+            else:
+                merged[sub] = blk
+        partial[key] = merged
+
+
 async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
     expense_footer_total: float | None = None
     try:
@@ -1236,14 +1280,15 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
             yoy_manual = _parse_yoy_manual_inputs(wb)
         except Exception:
             yoy_manual = {}
+        # Comprehensive, instrument-/field-agnostic deterministic parse of EVERY
+        # input tab (personal, income, MF, equity, fixed income, real estate,
+        # gold, liquid, emergency, loans, insurance). Authoritative over the LLM
+        # for these sections — see _apply_det_state below. Never raises.
         try:
-            equity_rows = _parse_equity_stocks(wb)
+            det_state = intake_sheets.parse_workbook(wb)
         except Exception:
-            equity_rows = None
-        try:
-            mf_rows = _parse_mutual_funds(wb)
-        except Exception:
-            mf_rows = None
+            _log.error("intake.det_parse.failed", extra={"category": "intake"}, exc_info=True)
+            det_state = {}
         try:
             retirement_inputs = _parse_retirement_inputs(wb)
         except Exception:
@@ -1317,18 +1362,15 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
         text=text, source_type="xlsx", filename=filename, parser_label="xlsx:llm"
     )
 
-    # Deterministic capture of the YoY tab's RM-manual columns — authoritative
-    # over the LLM (which extracts these unreliably). Reverse mortgages / asset
-    # sales / bonuses go to assumptions.lumpsum_events; the business-income
-    # cut-off age to personal_details.business_retirement_age.
-    # Deterministic equity holdings override the LLM (mislabelled-column safety).
-    if equity_rows and result.get("partial_state") is not None:
-        result["partial_state"]["equity_stocks"] = equity_rows
-
-    # Deterministic mutual funds override the LLM (which drops them or reads the
-    # folio number as the value). Value from 'Current Value', SIP from 'SIP'.
-    if mf_rows and result.get("partial_state") is not None:
-        result["partial_state"]["mutual_funds"] = mf_rows
+    # Comprehensive deterministic sections are AUTHORITATIVE over the LLM for the
+    # input tabs they cover (assets, income, liquid, emergency, loans, insurance,
+    # personal). The LLM only fills gaps the deterministic parser left empty.
+    if result.get("partial_state") is not None:
+        _apply_det_state(result["partial_state"], det_state)
+        if det_state:
+            _log.info("intake.det_parse.applied", extra={
+                "sections": [k for k in det_state if not k.startswith("_")],
+                "category": "intake"})
 
     # Deterministic recurring investments — no monthly contribution dropped, and
     # NPS/VPF/EPF/PPF correctly tagged retirement so they feed the retirement SIP.
@@ -1357,11 +1399,23 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
             "category": "intake"})
 
     # Capture labelled fields with no standard slot (Dependents, Occupation, RM
-    # observations, …) so nothing labelled is silently dropped.
-    if extra_inputs and result.get("partial_state") is not None:
-        result["partial_state"]["extra_inputs"] = extra_inputs
+    # observations, family members from the firm-template personal table, …) so
+    # nothing labelled is silently dropped. Combines the observations-sheet scan
+    # with the deterministic personal-table extras, deduped by (label, value).
+    combined_extras = list(extra_inputs or [])
+    combined_extras.extend(det_state.get("_personal_extras") or [])
+    if combined_extras and result.get("partial_state") is not None:
+        seen: set[tuple] = set()
+        deduped = []
+        for e in combined_extras:
+            sig = (str(e.get("label", "")).strip().lower(), str(e.get("value", "")).strip().lower())
+            if sig in seen:
+                continue
+            seen.add(sig)
+            deduped.append(e)
+        result["partial_state"]["extra_inputs"] = deduped
         _log.info("intake.extra_inputs.captured",
-                  extra={"count": len(extra_inputs), "category": "intake"})
+                  extra={"count": len(deduped), "category": "intake"})
 
     if yoy_manual and result.get("partial_state") is not None:
         ps = result["partial_state"]
