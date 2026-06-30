@@ -30,8 +30,16 @@ OUT_PATH = os.path.join(_HERE, "master", "cfp_master.xlsx")
 def _looks_like_label(coord_row: int, coord_col: int, value) -> bool:
     if not isinstance(value, str):
         return False
-    # keep header band (rows 1-2) and the left label column (A) text
-    return coord_row <= 2 or coord_col == 1
+    # Keep any non-numeric TEXT label, wherever it sits — the firm's category
+    # labels live in column E (and elsewhere), not just rows 1-2 / column A.
+    # A string that parses as a number/currency is sample DATA, so clear it; a
+    # plain text label ("Gross Salary per month", "EMI - Home Loan") is kept so
+    # the blank template renders with labels on every path.
+    from ..skills.intake_sheets import _amt
+
+    if coord_row <= 2 or coord_col == 1:
+        return True
+    return _amt(value) is None
 
 
 def build(source: str) -> str:

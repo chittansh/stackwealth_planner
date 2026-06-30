@@ -39,6 +39,13 @@ _VALUE_EXCLUDE = (
     "qty", "rate", "interest", "loan", "rental", "monthly", "premium", "emi",
     "price", "nav", "ltp", "tenure", "date", "year", "age",
 )
+# Headers that UNAMBIGUOUSLY aren't the holding value — safe to exclude even in
+# the header-agnostic magnitude fallback (unlike price/cost/value, which can be
+# the real value column under a shifted firm header).
+_SAFE_NONVALUE_KW = (
+    "folio", "quantity", "units", "qty", "isin", "tenure", "date", "year", "age",
+    "rate", "roi", "%",
+)
 
 
 def _find_value_col(header_low: list[str]) -> Optional[int]:
@@ -214,7 +221,13 @@ def _parse_holding_list(ws, name_field: str, *, with_sip=False) -> list[dict]:
     # numbers across the data rows, re-pick by data (largest-magnitude numeric
     # column, which is the value — not quantity/price-per-share).
     if val_c is None or not any(_amt(r[val_c]) for r in data if val_c < len(r)):
-        val_c = _best_numeric_col(data, exclude={name_c, sip_c, cur_c})
+        # Exclude only columns whose header UNAMBIGUOUSLY isn't a value (folio /
+        # quantity / units / dates / rates). NOT price/cost/value — on a shifted
+        # firm header the real amounts can sit under a "Current Price" label, and
+        # the whole point of this data-driven pick is to survive that.
+        non_value = {j for j, c in enumerate(low)
+                     if c and any(k in c for k in _SAFE_NONVALUE_KW)}
+        val_c = _best_numeric_col(data, exclude={name_c, sip_c, cur_c} | non_value)
     out: list[dict] = []
     for row in rows[hdr + 1:]:
         nm = row[name_c] if name_c < len(row) else None
@@ -363,14 +376,28 @@ _INCOME_ROW_MAP = [
     (("salary", "in hand", "in-hand", "take home", "employment"), "salary_in_hand"),
     (("business", "profession", "self emp"), "business_income"),
     (("rental", "rent income", "house property"), "rental_income"),
-    (("other", "misc", "dividend", "interest income"), "other_income"),
+    (("other", "misc", "dividend", "interest income", "investment"), "other_income"),
 ]
+# Deduction rows in the firm's 2_Income "Deductions (Mandatory Cash Outflow)"
+# section — captured so true NET income can be computed (gross − deductions).
+_INCOME_DEDUCTION_MAP = [
+    (("tax",), "taxes"),
+    (("provident", "epf", " pf", "vpf"), "provident_fund"),
+]
+# Labels that mark the start of the deductions section / the net subtotal.
+_DEDUCTION_MARKERS = ("deduction", "mandatory cash outflow")
+_NET_MARKERS = ("net income", "net salary", "net monthly", "take home", "iii.")
 
 
 def parse_income(wb) -> dict:
-    """Income sheet: 'Income Source | Client | Spouse | Total' (multi-column) or
-    'Source | Amount'. Maps each row-label to client_/spouse_ × salary/business/
-    rental/other. Picks the Client and Spouse columns by header."""
+    """Income sheet, instrument-agnostic. Handles three shapes:
+      • multi-column 'Particulars | Client | Spouse | Others | Total' (header
+        keywords OR proper names like 'Mr Naga'/'Mrs Shweta' → positional)
+      • single 'Source | Amount'
+      • firm-template 'label | value' inflow list
+    Walks the Income section, then the Deductions section (taxes / PF), and stops
+    at the Net subtotal — so a 'Taxes from Salary' row can never be mistaken for
+    salary income."""
     ws = _find_sheet(wb, ("income", "2_"))
     if ws is None:
         return {}
@@ -382,47 +409,97 @@ def parse_income(wb) -> dict:
         "amount": ("amount", "monthly", "total", "value"),
     }, require=("name",))
     if hdr is None:
-        # Firm template: a 'label | value' inflow list (Gross Salary / Business /
-        # Rental / Other) with a Deductions section below that we must NOT read as
-        # income. Walk kv pairs, stop at the first deductions/outflow boundary.
-        out: dict[str, float] = {}
-        for label, value in _kv_pairs(ws, max_rows=40):
-            nl = _norm(label)
-            if any(b in nl for b in ("deduction", "outflow", "net income", "net salary",
-                                     "take home", "surplus", "expense", "tax from", "taxes from")):
-                break
-            if _is_total_label(label):
-                continue
+        return _parse_income_kv(ws)
+
+    name_c = cols["name"]
+    header = [_norm(c) for c in rows[hdr]]
+    total_c = next((j for j, h in enumerate(header) if h and "total" in h), None)
+    client_c, spouse_c = cols.get("client"), cols.get("spouse")
+    extra_cols: list[int] = []
+    if client_c is None and spouse_c is None:
+        # Person columns weren't named 'client'/'spouse' (e.g. 'Mr Naga' / 'Mrs
+        # Shweta' / 'Others/Family'). Detect positionally: labelled columns after
+        # the name column that actually carry numeric data, excluding the Total.
+        persons = [j for j in range(name_c + 1, len(header))
+                   if header[j] and j != total_c
+                   and not any(k in header[j] for k in ("total", "sr", "note", "remark"))
+                   and any(_amt(r[j]) for r in rows[hdr + 1:hdr + 14] if j < len(r))]
+        if persons:
+            client_c = persons[0]
+            spouse_c = persons[1] if len(persons) > 1 else None
+            extra_cols = persons[2:]            # 'Others/Family' etc. → fold into client
+        else:
+            client_c = total_c                  # no split — use the single amount/Total
+
+    def _split(row):
+        cv = _amt(row[client_c]) if client_c is not None and client_c < len(row) else None
+        sv = _amt(row[spouse_c]) if spouse_c is not None and spouse_c < len(row) else None
+        extra = sum((_amt(row[j]) or 0) for j in extra_cols if j < len(row))
+        return (round((cv or 0) + extra, 2) if (cv or extra) else 0,
+                round(sv, 2) if sv and sv > 0 else 0)
+
+    out: dict[str, float] = {}
+    section = "income"
+    for row in rows[hdr + 1:]:
+        # Section dividers ("I. Gross Income", "II. Deductions", "III. Net
+        # Income") often sit in column A, not the name column — scan the whole row.
+        row_text = _norm(" ".join(str(c) for c in row if isinstance(c, str)))
+        if section == "income" and any(m in row_text for m in _DEDUCTION_MARKERS):
+            section = "deduction"
+            continue
+        if section == "deduction" and any(m in row_text for m in _NET_MARKERS):
+            break
+        nm = row[name_c] if name_c < len(row) else None
+        if not (isinstance(nm, str) and nm.strip()):
+            continue
+        nl = _norm(nm)
+        if _is_total_label(nm):
+            continue
+        cval, sval = _split(row)
+        if section == "income":
             field = next((f for kws, f in _INCOME_ROW_MAP if any(k in nl for k in kws)), None)
             if not field:
                 continue
-            a = _amt(value)
-            if a is not None and a > 0:
-                out.setdefault(f"client_{field}", round(a, 2))
-        return out
-    client_c = cols.get("client")
-    spouse_c = cols.get("spouse")
-    # No explicit client/spouse split → use the single amount column.
-    amount_c = cols.get("amount")
+            if cval > 0:
+                out[f"client_{field}"] = cval
+            if sval > 0:
+                out[f"spouse_{field}"] = sval
+        else:  # deduction
+            dfield = next((f for kws, f in _INCOME_DEDUCTION_MAP if any(k in nl for k in kws)), None)
+            if not dfield:
+                continue
+            if cval > 0:
+                out[f"client_{dfield}"] = cval
+            if sval > 0:
+                out[f"spouse_{dfield}"] = sval
+    return out
+
+
+def _parse_income_kv(ws) -> dict:
+    """Firm-template 'label | value' inflow list: Gross Salary / Business /
+    Rental / Other, then a Deductions section (taxes / PF), stopping at Net."""
     out: dict[str, float] = {}
-    for row in rows[hdr + 1:]:
-        nm = row[cols["name"]] if cols["name"] < len(row) else None
-        if not (isinstance(nm, str) and nm.strip()) or _is_total_label(nm):
+    section = "income"
+    for label, value in _kv_pairs(ws, max_rows=40):
+        nl = _norm(label)
+        if section == "income" and any(m in nl for m in _DEDUCTION_MARKERS):
+            section = "deduction"
             continue
-        field = next((f for kws, f in _INCOME_ROW_MAP if any(k in _norm(nm) for k in kws)), None)
-        if not field:
+        if section == "deduction" and any(m in nl for m in _NET_MARKERS):
+            break
+        if _is_total_label(label):
             continue
-        if client_c is not None or spouse_c is not None:
-            cv = _amt(row[client_c]) if client_c is not None and client_c < len(row) else None
-            sv = _amt(row[spouse_c]) if spouse_c is not None and spouse_c < len(row) else None
-            if cv and cv > 0:
-                out[f"client_{field}"] = round(cv, 2)
-            if sv and sv > 0:
-                out[f"spouse_{field}"] = round(sv, 2)
-        elif amount_c is not None and amount_c < len(row):
-            av = _amt(row[amount_c])
-            if av and av > 0:
-                out[f"client_{field}"] = round(av, 2)
+        a = _amt(value)
+        if a is None or a <= 0:
+            continue
+        if section == "income":
+            field = next((f for kws, f in _INCOME_ROW_MAP if any(k in nl for k in kws)), None)
+            if field:
+                out.setdefault(f"client_{field}", round(a, 2))
+        else:
+            dfield = next((f for kws, f in _INCOME_DEDUCTION_MAP if any(k in nl for k in kws)), None)
+            if dfield:
+                out.setdefault(f"client_{dfield}", round(a, 2))
     return out
 
 
@@ -663,6 +740,342 @@ def parse_personal(wb) -> tuple[dict, list[dict]]:
     return pd, extras
 
 
+# ── Goals ───────────────────────────────────────────────────────────────────
+
+def _goal_kind(name: str) -> str:
+    n = (name or "").lower()
+    if any(k in n for k in ("education", "college", "school", "tuition", "study")):
+        return "child_education"
+    if any(k in n for k in ("marriage", "wedding")):
+        return "child_marriage"
+    if any(k in n for k in ("retire", "fire", "pension")):
+        return "retirement"
+    if any(k in n for k in ("house", "home", "property", "flat", "apartment", "villa", "plot", "real estate")):
+        return "house_purchase"
+    if any(k in n for k in ("travel", "foreign", "vacation", "trip", "holiday", "tour")):
+        return "foreign_travel"
+    return "other"
+
+
+def parse_goals(wb) -> list[dict]:
+    """Capture EVERY named goal row — including name-only rows that carry no
+    amount/year (so a goal the RM has only named still reaches the canvas). kind
+    inferred from the name; target_amount taken from Today's Cost (today-money) or
+    Future Value; inflation/priority/frequency captured when present."""
+    ws = _find_sheet(wb, ("goal", "10_"))
+    if ws is None:
+        return []
+    rows = _rows(ws)
+    hdr, cols = _find_header(rows, {
+        "name": ("goal",),
+        "priority": ("importance", "priority"),
+        "year": ("target year", "year"),
+        "today": ("today", "current cost", "present cost", "cost"),
+        "fv": ("future value", "future cost", "fv"),
+        "inflation": ("inflation",),
+        "frequency": ("nature", "frequency", "type"),
+    }, require=("name",))
+    if hdr is None:
+        return []
+    out: list[dict] = []
+    for row in rows[hdr + 1:]:
+        nm = row[cols["name"]] if cols["name"] < len(row) else None
+        if not (isinstance(nm, str) and nm.strip()):
+            continue
+        name = nm.strip()
+        nl = _norm(name)
+        # The notes/assumptions block ends the real goal list — stop there.
+        if nl.startswith("note") or "assumption" in nl:
+            break
+        # Skip bullets, sentences and total/footer rows.
+        if (nl in ("goal", "goals") or _is_total_label(name) or name[0] in "•-*"
+                or "total cost" in nl or "per annum" in nl or ":" in name or len(name.split()) > 6):
+            continue
+        pr = _txt(row[cols["priority"]]) if cols.get("priority") is not None and cols["priority"] < len(row) else ""
+        yr = _amt(row[cols["year"]]) if cols.get("year") is not None and cols["year"] < len(row) else None
+        today = _amt(row[cols["today"]]) if cols.get("today") is not None and cols["today"] < len(row) else None
+        fv = _amt(row[cols["fv"]]) if cols.get("fv") is not None and cols["fv"] < len(row) else None
+        # A real goal carries at least an importance, a target year, or an amount —
+        # this filters section headers ("POST RETIREMENT REGULAR EXPENSES").
+        if not (pr or (yr and 2000 <= yr <= 2100) or today or fv):
+            continue
+        goal: dict[str, Any] = {"goal_name": name, "kind": _goal_kind(name)}
+        if yr and 2000 <= yr <= 2100:
+            goal["target_year"] = int(yr)
+        if today and today > 0:
+            goal["target_amount"] = round(today, 2)
+            goal["is_target_in_today_money"] = True
+        elif fv and fv > 0:
+            goal["target_amount"] = round(fv, 2)
+            goal["is_target_in_today_money"] = False
+        infl = _amt(row[cols["inflation"]]) if cols.get("inflation") is not None and cols["inflation"] < len(row) else None
+        if infl and infl > 0:
+            goal["inflation_assumed"] = round(infl / 100, 4) if infl > 1 else round(infl, 4)
+        if cols.get("frequency") is not None and cols["frequency"] < len(row):
+            freq = _txt(row[cols["frequency"]]).lower()
+            if "annual" in freq or "year" in freq or "one" in freq:
+                goal["contribution_frequency"] = "annual"
+            elif "month" in freq:
+                goal["contribution_frequency"] = "monthly"
+        pl = pr.lower()
+        if "essential" in pl or "must" in pl or "high" in pl:
+            goal["priority"] = "essential"
+        elif "important" in pl or "medium" in pl:
+            goal["priority"] = "important"
+        elif any(k in pl for k in ("desir", "aspiration", "nice", "want", "low", "optional")):
+            goal["priority"] = "aspirational"
+        out.append(goal)
+    return out
+
+
+# ── Expenses ────────────────────────────────────────────────────────────────
+# Living-expense category → monthly_expenses field. Insurance is checked BEFORE
+# medical so "Insurance Premium (health & LIC)" routes to insurance, not medical.
+_EXPENSE_FIELD_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
+    ("school_fees", ("school", "tuition", "education fee", "college fee", "children expense", "child")),
+    ("transport", ("transport", "commute", "petrol", "fuel", "car running", "conveyance")),
+    ("utilities", ("utilit", "electric", "mobile", "internet", "phone", "water", "gas", "broadband", "wifi")),
+    ("groceries", ("grocer", "food", "ration", "kitchen", "milk", "living expense")),
+    ("insurance_premium", ("insurance", "premium", "lic")),
+    ("medical", ("medical", "health", "doctor", "hospital", "pharma")),
+    ("discretionary", ("entertain", "lifestyle", "leisure", "shopping", "restaurant", "gym", "dining", "discretionary")),
+    ("travel_or_lifestyle", ("travel", "vacation", "holiday")),
+    ("rent_or_emi", ("rent", "maintenance", "society")),
+    ("other_expenses", ("other expense", "property tax", "donation", "misc")),
+]
+
+
+def _classify_expense(category: str, detail: str) -> tuple[str, Optional[str]]:
+    """Classify a line as living expense / EMI / SIP. EMI and SIP match on WORD
+    boundaries so 'premium' isn't read as an EMI; the detail column disambiguates."""
+    t = f"{category} {detail}".lower()
+    if re.search(r"\b(sip|mutual fund|investment)s?\b", t):
+        return ("sip", None)
+    if re.search(r"\b(emi|loan)s?\b", t):
+        return ("emi", None)
+    for field, kws in _EXPENSE_FIELD_KEYWORDS:
+        if any(k in t for k in kws):
+            return ("expense", field)
+    return ("expense", "household_expenses")
+
+
+_EXPENSE_LABEL_KW = ("category", "type of expense", "particular", "details", "head", "expense detail")
+
+
+def parse_expenses(wb) -> Optional[dict]:
+    """Parse the monthly-expenses sheet — capture EVERY line item, route EMI/SIP
+    OUT of living expenses, reconcile to the stated total. Handles BOTH the
+    'Category | Monthly Amount' layout and the firm 'Details | <persons> | Total'
+    layout (section dividers + subtotals skipped, the grand 'Total Expenditure'
+    stops the scan, Loan Repayments rows → EMI). Instrument-agnostic: any label is
+    classified; unmapped rows fall to household_expenses so nothing is dropped.
+    Returns {monthly_expenses, living, emi, sip, stated_total} or None."""
+    ws = _find_sheet(wb, ("expense", "3_"), exclude=("computation",))
+    if ws is None:
+        return None
+    rows = _rows(ws)
+    # Locate the header: a label column + a value column (explicit monthly amount,
+    # else a Total column, else summed person columns).
+    hdr = label_c = val_c = det_c = None
+    person_cols: list[int] = []
+    for i, row in enumerate(rows[:20]):
+        low = [_norm(c) for c in row]
+        lc = next((j for j, c in enumerate(low) if c and any(k in c for k in _EXPENSE_LABEL_KW)), None)
+        if lc is None:
+            continue
+        vc = next((j for j, c in enumerate(low) if c and "monthly" in c and ("amount" in c or "spend" in c)), None)
+        if vc is None:
+            vc = next((j for j, c in enumerate(low) if c and "total" in c), None)
+        pcs = [j for j, c in enumerate(low) if c and j > lc and j != vc
+               and not any(k in c for k in ("total", "remark", "detail", "note"))]
+        if vc is None and not pcs:
+            continue
+        hdr, label_c, val_c, person_cols = i, lc, vc, pcs
+        det_c = next((j for j, c in enumerate(low) if c and j != label_c and ("remark" in c or ("detail" in c and j != label_c))), None)
+        break
+    if hdr is None:
+        return None
+
+    def _row_amount(row):
+        if val_c is not None and val_c < len(row):
+            a = _amt(row[val_c])
+            if a is not None:
+                return a
+        # No Total column → sum the person value columns.
+        s = sum((_amt(row[j]) or 0) for j in person_cols if j < len(row))
+        return s or None
+
+    me: dict[str, float] = {}
+    emi = sip = 0.0
+    stated_total = None
+    seen: set[str] = set()
+    for row in rows[hdr + 1:]:
+        cat = row[label_c] if label_c < len(row) else None
+        if not isinstance(cat, str) or not cat.strip():
+            continue
+        cl = cat.strip().lower()
+        # Grand total ends the scan; section subtotals/dividers are skipped.
+        if ("total" in cl and ("expens" in cl or "expend" in cl or "monthly" in cl)) or cl.startswith("grand total"):
+            amt = _row_amount(row)
+            if amt:
+                stated_total = amt
+            break
+        if "subtotal" in cl or _is_total_label(cat):
+            continue
+        amt = _row_amount(row)
+        if amt is None:                 # section divider ("Essential Spends") — no value
+            continue
+        if cl in seen:
+            continue
+        seen.add(cl)
+        det = _txt(row[det_c]) if det_c is not None and det_c < len(row) else ""
+        kind, field = _classify_expense(cat, det)
+        if kind == "sip":
+            sip += amt
+        elif kind == "emi":
+            emi += amt
+        else:
+            me[field] = me.get(field, 0.0) + amt
+
+    if len(me) < 2 and emi == 0:
+        return None
+    return {
+        "monthly_expenses": {k: round(v) for k, v in me.items()},
+        "living": round(sum(me.values())),
+        "emi": round(emi),
+        "sip": round(sip),
+        "stated_total": round(stated_total) if stated_total else None,
+    }
+
+
+# ── Recurring investments ─────────────────────────────────────────────────────
+
+def parse_recurring(wb) -> Optional[list[dict]]:
+    """Read the recurring-investments tab so no monthly contribution is dropped;
+    tag purpose so retirement instruments (NPS/VPF/EPF/PPF/pension) feed the
+    retirement SIP and MF/RD/equity feed goals. Also recovers EPF/PF from the
+    income deductions section (a monthly retirement contribution)."""
+    ws = _find_sheet(wb, ("recurring", "5_"))
+    if ws is None:
+        return None
+    rows = _rows(ws)
+    hdr, cols = _find_header(rows, {
+        "type": ("investment", "type", "instrument", "particular"),
+        "amount": ("monthly amount", "amount", "monthly", "sip"),
+        "remarks": ("remark", "comment", "purpose", "note"),
+    }, require=("type", "amount"))
+    if hdr is None:
+        return None
+    type_c, amt_c, rem_c = cols["type"], cols["amount"], cols.get("remarks")
+    retire_kw = ("nps", "vpf", "epf", "ppf", "provident", "pension", "sukanya", "superannuation")
+    goal_kw = ("house", "education", "college", "car", "travel", "vacation", "marriage", "wedding", "child", "goal")
+    out: list[dict] = []
+    for row in rows[hdr + 1:]:
+        name = row[type_c] if type_c < len(row) else None
+        if not (isinstance(name, str) and name.strip()):
+            continue
+        nlow = name.strip().lower()
+        if _is_total_label(name) or "insurance" in nlow:
+            continue
+        amt = _amt(row[amt_c]) if amt_c < len(row) else None
+        if not amt or amt <= 0:
+            continue
+        rem = _txt(row[rem_c]) if rem_c is not None and rem_c < len(row) else ""
+        rl = rem.lower()
+        if "retire" in rl:
+            purpose = "retirement"
+        elif any(k in rl for k in goal_kw):
+            purpose = "goal"
+        elif any(k in nlow for k in retire_kw):
+            purpose = "retirement"
+        elif any(k in nlow for k in ("mutual", "mf", "sip", "equity", "rd", "stock")):
+            purpose = "goal"
+        else:
+            purpose = "general"
+        out.append({"investment_type": name.strip(), "monthly_amount": round(amt, 2),
+                    "purpose": purpose, "remarks": rem or None})
+
+    have_pf = any("provident" in (r["investment_type"] or "").lower()
+                  or (r["investment_type"] or "").lower().strip() == "epf" for r in out)
+    if not have_pf:
+        iws = _find_sheet(wb, ("income", "2_"))
+        if iws is not None:
+            for row in _rows(iws):
+                for c, cell in enumerate(row):
+                    if isinstance(cell, str) and ("provident fund" in cell.lower()
+                                                  or cell.strip().lower() in ("epf", "vpf")):
+                        amt = max((a for a in (_amt(v) for v in row[c + 1:]) if a and a > 0), default=0)
+                        if amt > 0:
+                            out.append({"investment_type": "EPF / Provident Fund",
+                                        "monthly_amount": round(amt, 2), "purpose": "retirement",
+                                        "remarks": "Provident Fund contribution (salary deduction)"})
+                        break
+                else:
+                    continue
+                break
+    return out or None
+
+
+# ── Universal unmapped catch-all ──────────────────────────────────────────────
+# Labels already represented by a structured field — skip when harvesting extras.
+_MAPPED_LABEL_KW: tuple[str, ...] = (
+    "name", "date of birth", "dob", "age", "marital", "spouse", "children", "kids",
+    "dependent", "occupation", "profession", "city", "residence", "retirement age",
+    "salary", "business income", "rental", "other income", "gross", "net", "tax",
+    "provident", "deduction", "savings", "idle cash", "fd ", "bonus", "emergency",
+    "loan", "emi", "insurance", "premium", "cover", "sum assured", "sum insured",
+    "term plan", "health", "floater", "ulip",
+)
+# Every KNOWN sheet — section-parsed (handled by a dedicated parser, so their rows
+# must not be re-reported) or compute/frozen/index (no client input). The catch-all
+# scans only what's left: observations, notes, risk and any NEW/custom tab, so
+# nothing labelled on an unrecognized page is ever dropped.
+_CATCHALL_SKIP_SHEETS: tuple[str, ...] = (
+    "personal", "1_", "income", "2_", "expense", "3_", "mutual", "4a", "equity", "4b",
+    "stock", "fixed", "4c", "real estate", "real_estate", "4d", "gold", "4e", "bullion",
+    "recurring", "5_", "monthly_inv", "investment", "liquid", "6_", "emergency", "7_",
+    "loan", "8_", "liabil", "insurance", "9_", "goal", "10_", "index", "checks",
+    "list of tab", "asset return", "asset_return", "assumption", "yoy", "cash flow",
+    "retirement", "debt mgt", "tax planning", "networth", "inc exp", "case study",
+)
+_EXTRA_SKIP_LABELS: tuple[str, ...] = (
+    "questions", "question", "answer", "details to be filled by client", "s.no", "sno",
+    "expense category", "goal", "monthly amount", "type of expense", "category", "amount",
+    "particular", "particulars", "field", "details", "sr no", "#", "remarks", "name",
+)
+
+
+def parse_extra_inputs(wb) -> list[dict]:
+    """Universal catch-all: walk EVERY non-holding tab and harvest any labelled
+    value that has no standard schema slot (Risk appetite, investment experience,
+    notes, custom firm fields on new tabs, …) into {label, value, sheet}. Holding/
+    income/expense/goal tabs are handled by their own parsers and skipped here so
+    their rows aren't re-reported. Nothing labelled on an UNKNOWN tab is dropped."""
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for sn in wb.sheetnames:
+        sl = sn.lower()
+        if any(k in sl for k in _CATCHALL_SKIP_SHEETS):
+            continue
+        ws = wb[sn]
+        for label, value in _kv_pairs(ws, max_rows=120):
+            if value in (None, ""):
+                continue
+            nl = _norm(label).rstrip(":").strip()
+            if not nl or nl in _EXTRA_SKIP_LABELS or _is_total_label(label):
+                continue
+            if any(k in nl for k in _MAPPED_LABEL_KW):
+                continue
+            sig = (nl, str(value).strip().lower())
+            if sig in seen:
+                continue
+            seen.add(sig)
+            out.append({"label": label.strip()[:160], "value": _txt(value)[:200], "sheet": sn})
+            if len(out) >= 80:
+                return out
+    return out
+
+
 # ── Orchestrator ────────────────────────────────────────────────────────────
 
 def parse_workbook(wb) -> dict[str, Any]:
@@ -696,6 +1109,21 @@ def parse_workbook(wb) -> dict[str, Any]:
         if v:
             state[key] = v
 
-    if pd_extras:
-        state["_personal_extras"] = pd_extras
+    goals = parse_goals(wb)
+    if goals:
+        state["financial_goals"] = goals
+
+    # Universal catch-all + the personal-table family extras, deduped — so no
+    # labelled field on any tab (mapped or not, known sheet or new) is dropped.
+    extras = list(pd_extras or []) + parse_extra_inputs(wb)
+    if extras:
+        seen: set[tuple] = set()
+        deduped = []
+        for e in extras:
+            sig = (str(e.get("label", "")).strip().lower(), str(e.get("value", "")).strip().lower())
+            if sig in seen:
+                continue
+            seen.add(sig)
+            deduped.append(e)
+        state["extra_inputs"] = deduped
     return state

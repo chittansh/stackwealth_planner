@@ -472,231 +472,6 @@ async def _parse_pdf(buf: bytes, filename: str) -> dict[str, Any]:
     )
 
 
-def _goal_kind_from_name(name: str) -> str:
-    """Map a free-text goal label to a canonical GoalKind."""
-    n = (name or "").lower()
-    if any(k in n for k in ("education", "college", "school", "tuition", "study")):
-        return "child_education"
-    if any(k in n for k in ("marriage", "wedding")):
-        return "child_marriage"
-    if any(k in n for k in ("retire", "fire", "pension")):
-        return "retirement"
-    if any(k in n for k in ("house", "home", "property", "flat", "apartment", "villa", "plot", "real estate")):
-        return "house_purchase"
-    if any(k in n for k in ("travel", "foreign", "vacation", "trip", "holiday", "tour")):
-        return "foreign_travel"
-    return "other"
-
-
-_INR_AMT_RE = re.compile(r"([0-9][0-9,]*\.?[0-9]*)\s*(cr|crore|crores|l|lac|lakh|lakhs|k|thousand)?", re.I)
-
-
-def _parse_inr_amount(v: Any) -> Optional[float]:
-    """Parse an INR amount cell — number, or a string like '2 Crore', '50L',
-    '₹6 Crore', '1,50,000'. Returns None for blank/zero/unparseable."""
-    if isinstance(v, bool):
-        return None
-    if isinstance(v, (int, float)):
-        return float(v) if v else None
-    if not isinstance(v, str):
-        return None
-    s = v.strip().lower().replace("₹", "").replace("rs.", "").replace("rs", "").strip()
-    if not s:
-        return None
-    m = _INR_AMT_RE.search(s)
-    if not m:
-        return None
-    try:
-        num = float(m.group(1).replace(",", ""))
-    except ValueError:
-        return None
-    unit = (m.group(2) or "").lower()
-    if unit in ("cr", "crore", "crores"):
-        num *= 1e7
-    elif unit in ("l", "lac", "lakh", "lakhs"):
-        num *= 1e5
-    elif unit in ("k", "thousand"):
-        num *= 1e3
-    return num if num > 0 else None
-
-
-def _parse_goals_sheet(wb) -> list[dict]:
-    """Deterministically capture EVERY named goal row from the financial-goals
-    sheet — INCLUDING name-only rows the LLM drops because they carry no amount
-    or year. Each row becomes a goal with `kind` inferred from the name;
-    target_year and target_amount are filled when present and left null
-    otherwise, so a goal the RM has only named (e.g. 'House Purchase') still
-    appears on the canvas for them to quantify, instead of silently vanishing."""
-    sheet = None
-    for sn in wb.sheetnames:
-        if "goal" in sn.lower():
-            sheet = wb[sn]
-            break
-    if sheet is None:
-        return []
-    rows = list(sheet.iter_rows(values_only=True))
-    hdr_idx = None
-    col: dict[str, int] = {}
-    for i, row in enumerate(rows):
-        low = [str(c).lower().strip() if c is not None else "" for c in row]
-        has_goal = any(c == "goal" or c.startswith("goal") for c in low)
-        has_field = any(("year" in c) or ("future value" in c) or ("cost" in c) for c in low)
-        if has_goal and has_field:
-            hdr_idx = i
-            for j, c in enumerate(low):
-                if c.startswith("goal") and "name" not in col:
-                    col["name"] = j
-                elif ("target year" in c) or c == "year":
-                    col["year"] = j
-                elif ("today" in c and "cost" in c) or c == "cost":
-                    col["today"] = j
-                elif "future value" in c:
-                    col["fv"] = j
-            break
-    if hdr_idx is None or "name" not in col:
-        return []
-
-    out: list[dict] = []
-    for row in rows[hdr_idx + 1:]:
-        ni = col["name"]
-        name = row[ni] if ni < len(row) else None
-        if not isinstance(name, str):
-            continue
-        name = name.strip()
-        nl = name.lower()
-        # Skip header/footer/note rows that aren't real goals (e.g. a
-        # "Note - Total cost in Per Annum" trailer under the goal list).
-        if (not name or nl in ("total", "goal", "goals")
-                or nl.startswith("note") or "total cost" in nl or "per annum" in nl):
-            continue
-        goal: dict[str, Any] = {"goal_name": name, "kind": _goal_kind_from_name(name)}
-        yr = row[col["year"]] if col.get("year") is not None and col["year"] < len(row) else None
-        if isinstance(yr, (int, float)) and not isinstance(yr, bool) and 2000 <= yr <= 2100:
-            goal["target_year"] = int(yr)
-        today = row[col["today"]] if col.get("today") is not None and col["today"] < len(row) else None
-        fv = row[col["fv"]] if col.get("fv") is not None and col["fv"] < len(row) else None
-        amt_today = _parse_inr_amount(today)
-        amt_fv = _parse_inr_amount(fv)
-        if amt_today:
-            goal["target_amount"] = amt_today
-            goal["is_target_in_today_money"] = True
-        elif amt_fv:
-            goal["target_amount"] = amt_fv
-            goal["is_target_in_today_money"] = False
-        out.append(goal)
-    return out
-
-
-# Living-expense category → monthly_expenses field. Insurance is checked BEFORE
-# medical so "Insurance Premium (health & LIC)" routes to insurance, not medical.
-_EXPENSE_FIELD_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
-    ("groceries", ("grocer", "food", "ration", "kitchen")),
-    ("utilities", ("utilit", "electric", "mobile", "internet", "phone", "water", "gas", "broadband", "wifi")),
-    ("school_fees", ("school", "tuition", "education fee", "college fee", "tuition fee")),
-    ("insurance_premium", ("insurance", "premium", "lic")),
-    ("medical", ("medical", "health", "doctor", "hospital", "pharma")),
-    ("travel_or_lifestyle", ("travel", "lifestyle", "vacation", "entertain", "leisure", "shopping")),
-    ("rent_or_emi", ("rent", "maintenance", "society")),
-]
-
-
-def _classify_expense(category: str, detail: str) -> tuple[str, str | None]:
-    """Classify an expense-sheet line as living expense / EMI / SIP. EMI and SIP
-    are matched on WORD boundaries so 'premium' (pr-emi-um) isn't read as an EMI
-    and category labels disambiguate via the detail column ('Personal loan EMI')."""
-    t = f"{category} {detail}".lower()
-    if re.search(r"\b(sip|mutual fund|investment)s?\b", t):
-        return ("sip", None)
-    if re.search(r"\b(emi|loan)s?\b", t):
-        return ("emi", None)
-    for field, kws in _EXPENSE_FIELD_KEYWORDS:
-        if any(k in t for k in kws):
-            return ("expense", field)
-    return ("expense", "household_expenses")
-
-
-def _parse_expenses_sheet(wb) -> dict | None:
-    """Deterministically parse the monthly-expenses sheet — capture EVERY line
-    item (the LLM intermittently drops the biggest residual), route EMI and SIP
-    rows OUT of living expenses (so a 'Rent / EMI' = personal-loan-EMI row isn't
-    double-counted as both a living expense and a loan), and reconcile to the
-    stated total. Authoritative over the LLM when a category+amount table is
-    found. Returns {monthly_expenses, living, emi, sip, stated_total} or None."""
-    sheet = None
-    for sn in wb.sheetnames:
-        l = sn.lower()
-        if (l.startswith("3_") or "expense" in l) and "computation" not in l:
-            sheet = wb[sn]
-            break
-    if sheet is None:
-        return None
-    rows = list(sheet.iter_rows(values_only=True))
-
-    # Locate every (category, monthly-amount, optional detail) table on the sheet.
-    tables: list[tuple[int, int, int, int | None]] = []
-    for i, row in enumerate(rows):
-        low = [str(c).lower().strip() if c is not None else "" for c in row]
-        amt_col = cat_col = det_col = None
-        for j, c in enumerate(low):
-            if amt_col is None and "monthly" in c and ("amount" in c or "spend" in c):
-                amt_col = j
-            elif cat_col is None and ("category" in c or "type of expense" in c):
-                cat_col = j
-            elif det_col is None and "detail" in c:
-                det_col = j
-        if amt_col is not None and cat_col is not None:
-            tables.append((i, cat_col, amt_col, det_col))
-    if not tables:
-        return None
-
-    # Detail map (category → 'Expense Details') from any table that has one, used
-    # to disambiguate EMI/SIP rows whose category label is ambiguous.
-    detail_by: dict[str, str] = {}
-    for (s, cc, ac, dc) in tables:
-        if dc is None:
-            continue
-        for row in rows[s + 1:]:
-            cat = row[cc] if cc < len(row) else None
-            det = row[dc] if dc < len(row) else None
-            if isinstance(cat, str) and isinstance(det, str) and cat.strip():
-                detail_by[cat.strip().lower()] = det.strip()
-
-    me: dict[str, float] = {}
-    emi = sip = 0.0
-    stated_total = None
-    seen: set[str] = set()
-    s, cc, ac, dc = tables[0]
-    for row in rows[s + 1:]:
-        cat = row[cc] if cc < len(row) else None
-        amt = _parse_inr_amount(row[ac]) if ac < len(row) else None
-        if not isinstance(cat, str) or not cat.strip():
-            continue
-        cl = cat.strip().lower()
-        if "total" in cl and ("expens" in cl or "expend" in cl):
-            if amt:
-                stated_total = amt
-            break
-        if cl in seen:
-            continue
-        seen.add(cl)
-        amt = amt or 0.0
-        kind, field = _classify_expense(cat, detail_by.get(cl, ""))
-        if kind == "sip":
-            sip += amt
-        elif kind == "emi":
-            emi += amt
-        else:
-            me[field] = me.get(field, 0.0) + amt
-
-    if len(me) < 2 and emi == 0:
-        return None  # not a real expense table
-    return {
-        "monthly_expenses": {k: round(v) for k, v in me.items()},
-        "living": round(sum(me.values())),
-        "emi": round(emi),
-        "sip": round(sip),
-        "stated_total": round(stated_total) if stated_total else None,
-    }
 
 
 def _apply_expense_parse(partial_state: dict, parsed: dict) -> None:
@@ -717,60 +492,6 @@ def _apply_expense_parse(partial_state: dict, parsed: dict) -> None:
         fsi["monthly_emi"] = parsed["emi"]
 
 
-# Personal-detail labels that DO map to standard schema fields (skip these when
-# harvesting unmapped extras).
-_PERSONAL_MAPPED_LABELS = {
-    "full name", "name", "client name", "date of birth", "dob", "age", "current age",
-    "marital status", "retirement age", "retirement age target", "life expectancy",
-    "spouse name", "spouse name & age", "spouse name and age", "gender", "email", "phone",
-}
-_EXTRA_SKIP_LABELS = {
-    "questions", "details to be filled by client", "s.no", "observations", "observation",
-    "expense category", "goal", "monthly amount", "type of expense",
-}
-
-
-def _parse_extra_inputs(wb) -> list[dict]:
-    """Capture labelled input fields that have NO standard slot in the schema /
-    firm Excel (Dependents, Occupation, City, Number of Children, RM
-    observations, …) so nothing labelled is silently dropped. Scans the
-    personal-details Q&A sheet and any observations/notes sheet, taking the label
-    and the data 'by its side' (the next non-empty cell). Returns a capped list
-    of {label, value, sheet}."""
-    out: list[dict] = []
-    seen: set[str] = set()
-    for sn in wb.sheetnames:
-        l = sn.lower()
-        is_personal = "personal" in l or l.startswith("1_")
-        is_notes = "observ" in l or "note" in l
-        if not (is_personal or is_notes):
-            continue
-        ws = wb[sn]
-        for row in ws.iter_rows(values_only=True):
-            label = next((str(c).strip() for c in row if isinstance(c, str) and str(c).strip()), None)
-            if not label:
-                continue
-            nl = label.lower().strip().rstrip(":").strip()
-            if nl in _EXTRA_SKIP_LABELS:
-                continue
-            if is_personal and nl in _PERSONAL_MAPPED_LABELS:
-                continue
-            # Value = the first non-empty cell AFTER the label cell ('by its side').
-            idx = next((i for i, c in enumerate(row)
-                        if isinstance(c, str) and c.strip() == label), 0)
-            value = next((c for c in row[idx + 1:] if c not in (None, "")), None)
-            key = label.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append({
-                "label": label[:160],
-                "value": ("" if value is None else str(value).strip())[:200],
-                "sheet": sn,
-            })
-            if len(out) >= 40:
-                return out
-    return out
 
 
 def _merge_goal_rows(partial_state: dict, goal_rows: list[dict]) -> None:
@@ -947,281 +668,8 @@ def _parse_retirement_inputs(wb) -> dict[str, Any]:
     return out
 
 
-# Labels that mark the end of the holdings list, not a holding. The firm's
-# templates append a grand-total row plus a "Summary by Tag" block, and some
-# RM-prepared sheets (e.g. Dhruv's) restate the same total as a
-# re-classification ("Considered for playing in Equity" + "Available for sale")
-# — counting those rows double-counts the portfolio. Once a row's name matches,
-# everything below it is ignored.
-_EQUITY_STOP_LABELS = (
-    "total", "subtotal", "grand total", "summary", "by tag",
-    "considered for playing", "available for sale",
-)
-
-# Foreign holdings (US stocks etc.) are quoted in their own currency; convert to
-# INR so a 95,200-USD position isn't read as ₹95,200. Approximate spot rate.
-_USD_INR = 86.0
-_FOREIGN_CCY = ("usd", "us$", "dollar", "eur", "gbp", "$")
 
 
-def _parse_equity_stocks(wb) -> list[dict] | None:
-    """Deterministically read the firm '4B_Equity_Stocks' tab. Column layouts
-    vary across the firm's templates, so the value column is mislabelled in two
-    different ways:
-      • some templates shift the headers, so the 'Current Price' column actually
-        holds each holding's TOTAL current value while 'Current Value' holds the
-        strength tag;
-      • others label the per-share price 'Current Price' and the total
-        'Current Value'.
-    The LLM intermittently computes Quantity × per-share price and inflates
-    equity 100×. We read the value column directly — preferring the
-    'Current Value' header when its data is numeric, else 'Current Price' — and
-    never multiply by quantity. We also stop at the grand-total / summary /
-    re-classification rows below the holdings (see _EQUITY_STOP_LABELS) so a
-    restated total isn't summed on top of the holdings."""
-    ws = None
-    for sn in wb.sheetnames:
-        s = sn.lower()
-        if "equity" in s or s.strip().startswith("4b"):
-            ws = wb[sn]
-            break
-    if ws is None:
-        return None
-    max_c = ws.max_column
-    hdr = None
-    name_c = value_c = price_c = total_c = currency_c = None
-    cand: list[int] = []
-    for r in range(1, min(8, ws.max_row) + 1):
-        vals = [ws.cell(row=r, column=c).value for c in range(1, max_c + 1)]
-        joined = " ".join(str(v).lower() for v in vals if v)
-        if "stock name" in joined or ("stock" in joined and ("current value" in joined or "current price" in joined or "total value" in joined)):
-            hdr = r
-            for c, v in enumerate(vals, start=1):
-                t = str(v or "").lower().strip()
-                if "stock name" in t or t == "stock name":
-                    name_c = c
-                # 'Total Value' / 'Total Current Value' / 'Market Value' is the
-                # holding's value; prefer it over 'Current Value' (which on some
-                # templates is the PER-SHARE price).
-                if "total value" in t or "total current value" in t or "market value" in t:
-                    total_c = total_c or c
-                elif "current value" in t:
-                    value_c = value_c or c
-                    cand.append(c)
-                elif "current price" in t or t == "price" or t == "ltp":
-                    price_c = price_c or c
-                    cand.append(c)
-                if "currency" in t or t == "ccy":
-                    currency_c = c
-            break
-    if not hdr or not name_c or not cand:
-        return None
-
-    def _col_is_numeric(c: int) -> bool:
-        for rr in range(hdr + 1, min(hdr + 6, ws.max_row) + 1):
-            v = ws.cell(row=rr, column=c).value
-            if isinstance(v, (int, float)) and v > 0:
-                return True
-        return False
-
-    # Holding value column: prefer an explicit 'Total Value', then 'Current
-    # Value', then 'Current Price'. Never multiply by quantity.
-    val_c = None
-    for c in (total_c, value_c, price_c, *cand):
-        if c and _col_is_numeric(c):
-            val_c = c
-            break
-    if not val_c:
-        return None
-    out: list[dict] = []
-    for r in range(hdr + 1, ws.max_row + 1):
-        name = ws.cell(row=r, column=name_c).value
-        val = ws.cell(row=r, column=val_c).value
-        # SKIP unlabelled numeric rows (mid-list subtotals like the Indian-stocks
-        # total sitting above a 'US Stock' section) rather than stopping — else
-        # the foreign holdings below get dropped. A grand total has no name, so
-        # it's skipped here too (never summed). Explicit labelled totals/summary
-        # rows still stop the scan via _EQUITY_STOP_LABELS below.
-        if not (isinstance(name, str) and name.strip()):
-            continue
-        nl = name.strip().lower()
-        if any(lbl in nl for lbl in _EQUITY_STOP_LABELS):
-            break
-        # Section dividers like "US Stock" carry no value — skip, don't stop.
-        if nl in ("us stock", "us stocks", "indian stocks", "foreign stocks"):
-            continue
-        if isinstance(val, (int, float)) and val > 0:
-            v = float(val)
-            if currency_c:
-                ccy = str(ws.cell(row=r, column=currency_c).value or "").lower()
-                if any(f in ccy for f in _FOREIGN_CCY):
-                    v *= _USD_INR
-            out.append({"stock_name": name.strip(), "current_value": v})
-    if out:
-        _log.info(
-            "intake.equity.parsed",
-            extra={"holdings": len(out),
-                   "total_value": round(sum(h["current_value"] for h in out)),
-                   "value_col": val_c, "category": "intake"},
-        )
-    return out or None
-
-
-def _parse_mutual_funds(wb) -> list[dict] | None:
-    """Deterministically read the '4A_Mutual_Funds' tab. The LLM drops or
-    mis-reads MFs because the layout puts a huge FOLIO number right next to the
-    holding value (e.g. folio 17,353,550 beside a ₹2.65L value) — it can grab the
-    folio as the value, inflating the portfolio to crores, or drop the row. We
-    map columns dynamically by HEADER: the value is the 'Current Value' column
-    (never 'Folio'), plus the 'SIP Amount' column and any 'Currency' for foreign
-    funds. Stops at total/summary rows."""
-    ws = None
-    for sn in wb.sheetnames:
-        s = sn.lower()
-        if "mutual" in s or s.strip().startswith("4a"):
-            ws = wb[sn]
-            break
-    if ws is None:
-        return None
-    max_c = ws.max_column
-    hdr = name_c = value_c = sip_c = currency_c = None
-    for r in range(1, min(8, ws.max_row) + 1):
-        vals = [ws.cell(row=r, column=c).value for c in range(1, max_c + 1)]
-        joined = " ".join(str(v).lower() for v in vals if v)
-        if "fund name" in joined or ("fund" in joined and "current value" in joined) or "scheme" in joined:
-            hdr = r
-            for c, v in enumerate(vals, start=1):
-                t = str(v or "").lower().strip()
-                if name_c is None and ("fund name" in t or "scheme" in t or t == "fund" or ("name" in t and "value" not in t)):
-                    name_c = c
-                elif "current value" in t or "market value" in t or t == "value" or "value (inr)" in t:
-                    value_c = value_c or c
-                if ("sip" in t) or ("monthly" in t and ("amount" in t or "invest" in t)):
-                    sip_c = sip_c or c
-                if "currency" in t or t == "ccy":
-                    currency_c = c
-            break
-    if not hdr or not name_c or not value_c:
-        return None
-    out: list[dict] = []
-    for r in range(hdr + 1, ws.max_row + 1):
-        name = ws.cell(row=r, column=name_c).value
-        if not (isinstance(name, str) and name.strip()):
-            continue
-        nl = name.strip().lower()
-        if any(lbl in nl for lbl in _EQUITY_STOP_LABELS):
-            break
-        val = _parse_inr_amount(ws.cell(row=r, column=value_c).value)
-        if not val or val <= 0:
-            continue
-        if currency_c:
-            ccy = str(ws.cell(row=r, column=currency_c).value or "").lower()
-            if any(f in ccy for f in _FOREIGN_CCY):
-                val *= _USD_INR
-        rec: dict[str, Any] = {"fund_name": name.strip(), "current_value": float(val)}
-        if sip_c:
-            sip = _parse_inr_amount(ws.cell(row=r, column=sip_c).value)
-            if sip and sip > 0:
-                rec["sip_amount"] = float(sip)
-        out.append(rec)
-    if out:
-        _log.info("intake.mf.parsed", extra={
-            "holdings": len(out),
-            "total_value": round(sum(h["current_value"] for h in out)),
-            "category": "intake"})
-    return out or None
-
-
-def _parse_recurring_investments(wb) -> list[dict] | None:
-    """Deterministically read the firm '5_Recurring_Investments' tab so no
-    monthly contribution is dropped (the LLM intermittently misses rows like
-    EPF/VPF). Tags purpose so retirement instruments (NPS, VPF, EPF, PPF,
-    provident/pension) feed the retirement SIP; MF/RD/direct-equity feed goals.
-    The 'For Retirement' / 'For <goal>' remark wins when present."""
-    ws = None
-    for sn in wb.sheetnames:
-        if "recurring" in sn.lower() or sn.strip().startswith("5_"):
-            ws = wb[sn]
-            break
-    if ws is None:
-        return None
-    # Header row: find columns for type / amount / remarks.
-    hdr = type_c = amt_c = rem_c = None
-    for r in range(1, min(8, ws.max_row) + 1):
-        vals = [str(ws.cell(row=r, column=c).value or "").lower() for c in range(1, ws.max_column + 1)]
-        joined = " ".join(vals)
-        if ("investment" in joined or "type" in joined) and ("amount" in joined or "monthly" in joined):
-            hdr = r
-            for c, v in enumerate(vals, start=1):
-                if "type" in v or "investment" in v:
-                    type_c = type_c or c
-                elif "amount" in v or "monthly" in v:
-                    amt_c = c
-                elif "remark" in v or "comment" in v:
-                    rem_c = c
-            break
-    if not hdr or not type_c or not amt_c:
-        return None
-
-    retire_kw = ("nps", "vpf", "epf", "ppf", "provident", "pension", "sukanya", "superannuation")
-    goal_kw = ("house", "education", "college", "car", "travel", "vacation", "marriage", "wedding", "child", "goal")
-    out: list[dict] = []
-    for r in range(hdr + 1, ws.max_row + 1):
-        name = ws.cell(row=r, column=type_c).value
-        amt = ws.cell(row=r, column=amt_c).value
-        if not isinstance(name, str) or not name.strip():
-            continue
-        nlow = name.strip().lower()
-        if "total" in nlow or "insurance" in nlow:
-            continue
-        if not isinstance(amt, (int, float)) or amt <= 0:
-            continue
-        rem = str((ws.cell(row=r, column=rem_c).value if rem_c else "") or "")
-        rl = rem.lower()
-        if "retire" in rl:
-            purpose = "retirement"
-        elif any(k in rl for k in goal_kw):
-            purpose = "goal"
-        elif any(k in nlow for k in retire_kw):
-            purpose = "retirement"
-        elif any(k in nlow for k in ("mutual", "mf", "sip", "equity", "rd", "stock")):
-            purpose = "goal"
-        else:
-            purpose = "general"
-        out.append({"investment_type": name.strip(), "monthly_amount": float(amt),
-                    "purpose": purpose, "remarks": rem or None})
-
-    # Provident Fund / EPF contribution often sits in the INCOME tab as a
-    # mandatory salary deduction (it reduces net pay) — but it's a monthly
-    # contribution to a retirement instrument, so it must count toward the
-    # retirement SIP. Capture it from the income sheet's deductions section.
-    # Only skip if the MANDATORY EPF / Provident Fund is already a row — VPF
-    # (voluntary PF) is a separate contribution and must not suppress it.
-    have_pf = any("provident" in (r["investment_type"] or "").lower()
-                  or (r["investment_type"] or "").lower().strip() == "epf"
-                  for r in out)
-    if not have_pf:
-        for sn in wb.sheetnames:
-            s = sn.lower()
-            if not ("income" in s or s.strip().startswith("2_")):
-                continue
-            iws = wb[sn]
-            for r in range(1, iws.max_row + 1):
-                for c in range(1, iws.max_column + 1):
-                    cell = iws.cell(row=r, column=c).value
-                    if isinstance(cell, str) and ("provident fund" in cell.lower()
-                                                  or cell.strip().lower() in ("epf", "vpf")):
-                        nums = [iws.cell(row=r, column=cc).value for cc in range(c + 1, iws.max_column + 1)]
-                        amt = max((n for n in nums if isinstance(n, (int, float)) and n > 0), default=0)
-                        if amt > 0:
-                            out.append({"investment_type": "EPF / Provident Fund", "monthly_amount": float(amt),
-                                        "purpose": "retirement", "remarks": "Provident Fund contribution (salary deduction)"})
-                        break
-                else:
-                    continue
-                break
-            break
-    return out or None
 
 
 # Section keys parsed deterministically by intake_sheets.parse_workbook. Lists
@@ -1265,6 +713,13 @@ def _apply_det_state(partial: dict[str, Any], det: dict[str, Any]) -> None:
             else:
                 merged[sub] = blk
         partial[key] = merged
+    # Goals MERGE with the LLM's (never drop an LLM goal — only add the ones the
+    # deterministic sheet parse found that the LLM missed).
+    if det.get("financial_goals"):
+        _merge_goal_rows(partial, det["financial_goals"])
+    # Universal catch-all: deterministic extra_inputs are authoritative.
+    if det.get("extra_inputs"):
+        partial["extra_inputs"] = det["extra_inputs"]
 
 
 async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
@@ -1294,21 +749,15 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
         except Exception:
             retirement_inputs = {}
         try:
-            recurring_rows = _parse_recurring_investments(wb)
+            recurring_rows = intake_sheets.parse_recurring(wb)
         except Exception:
             recurring_rows = None
         try:
-            goal_rows = _parse_goals_sheet(wb)
-        except Exception:
-            goal_rows = []
-        try:
-            expense_parse = _parse_expenses_sheet(wb)
+            expense_parse = intake_sheets.parse_expenses(wb)
         except Exception:
             expense_parse = None
-        try:
-            extra_inputs = _parse_extra_inputs(wb)
-        except Exception:
-            extra_inputs = []
+        # Goals + the universal catch-all (extra_inputs) come from det_state
+        # (parse_workbook) and are applied via _apply_det_state below.
         sheet_blocks: list[tuple[str, list[str]]] = []
         for sn in wb.sheetnames:
             # Skip COMPUTED / projection tabs — they hold derived figures
@@ -1382,12 +831,6 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
     if retirement_inputs and result.get("partial_state") is not None:
         result["partial_state"]["retirement_plan_inputs"] = retirement_inputs
 
-    # Deterministic goals capture — ensure EVERY named goal row reaches the plan,
-    # even the name-only ones the LLM omits for having no amount/year. Only adds
-    # goals the LLM missed; never overwrites an LLM-parsed goal.
-    if goal_rows and result.get("partial_state") is not None:
-        _merge_goal_rows(result["partial_state"], goal_rows)
-
     # Deterministic expenses — capture EVERY line item, route EMI/SIP out of
     # living expenses, reconcile to the stated total. Authoritative over the LLM
     # (which dropped the biggest residual and double-counted the loan EMI).
@@ -1397,25 +840,6 @@ async def _parse_xlsx(buf: bytes, filename: str) -> dict[str, Any]:
             "living": expense_parse["living"], "emi": expense_parse["emi"],
             "sip": expense_parse["sip"], "stated_total": expense_parse["stated_total"],
             "category": "intake"})
-
-    # Capture labelled fields with no standard slot (Dependents, Occupation, RM
-    # observations, family members from the firm-template personal table, …) so
-    # nothing labelled is silently dropped. Combines the observations-sheet scan
-    # with the deterministic personal-table extras, deduped by (label, value).
-    combined_extras = list(extra_inputs or [])
-    combined_extras.extend(det_state.get("_personal_extras") or [])
-    if combined_extras and result.get("partial_state") is not None:
-        seen: set[tuple] = set()
-        deduped = []
-        for e in combined_extras:
-            sig = (str(e.get("label", "")).strip().lower(), str(e.get("value", "")).strip().lower())
-            if sig in seen:
-                continue
-            seen.add(sig)
-            deduped.append(e)
-        result["partial_state"]["extra_inputs"] = deduped
-        _log.info("intake.extra_inputs.captured",
-                  extra={"count": len(deduped), "category": "intake"})
 
     if yoy_manual and result.get("partial_state") is not None:
         ps = result["partial_state"]

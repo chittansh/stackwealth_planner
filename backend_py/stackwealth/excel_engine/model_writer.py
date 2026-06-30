@@ -144,7 +144,10 @@ def write_plan_to_master(master_wb, plan) -> int:
         setc(ws, "H6", retire)
         setc(ws, "I6", (_num(getattr(p_self, "life_expectancy", None)) if p_self else None) or 85)
 
-    # ── 2_Income (rows 6-9: salary/business/rental/other; F=client G=spouse) ─
+    # ── 2_Income (rows 6-9 GROSS income; rows 17-18 deductions; F=client G=spouse)
+    # Net income (I24) = gross − deductions, so when the source carries explicit
+    # taxes / PF (e.g. the firm tab's Deductions section) they MUST be written or
+    # the projection treats gross salary as take-home and overstates income.
     inc = plan.income_details
     if inc:
         ws = master_wb["2_Income"]
@@ -156,6 +159,10 @@ def write_plan_to_master(master_wb, plan) -> int:
         setc(ws, "G8", _num(inc.spouse_rental_income))
         setc(ws, "F9", _num(inc.client_other_income))
         setc(ws, "G9", _num(inc.spouse_other_income))
+        setc(ws, "F17", _num(getattr(inc, "client_taxes", None)))      # Taxes from Salary
+        setc(ws, "G17", _num(getattr(inc, "spouse_taxes", None)))
+        setc(ws, "F18", _num(getattr(inc, "client_provident_fund", None)))  # Provident Fund
+        setc(ws, "G18", _num(getattr(inc, "spouse_provident_fund", None)))
 
     # Salary in the YoY must stop at the client's actual retirement age, not the
     # template's frozen 20-year horizon.
@@ -190,18 +197,24 @@ def write_plan_to_master(master_wb, plan) -> int:
         else:
             rp["E13"] = self_le
 
-    # ── 3_Expenses (value in col H, total I; map model fields to firm rows) ──
+    # ── 3_Expenses (value in col H, total I=SUM(F:H); map model fields to firm
+    # rows). Every monthly_expenses field maps to its firm row so nothing is
+    # dropped from the I26 total. Firm rows: 6 Rent, 7 Living, 8 Children, 9
+    # Transport, 10 Utilities, 11 Other, 12 Lifestyle, 13 Medical, 14 Insurance
+    # Health, 15 Insurance Life, 19 Entertainment/Discretionary.
     exp = plan.monthly_expenses
     if exp:
         ws = master_wb["3_Expenses "]
-        # Firm rows: 6 Rent, 7 Living, 8 Children (excluded post-retirement),
-        # 9 Transport, 10 Utilities, 11 Other, 12 Lifestyle, 13 Medical/Insurance.
         setc(ws, "H6", _num(exp.rent_or_emi))
         setc(ws, "H7", (_num(exp.household_expenses) or 0) + (_num(exp.groceries) or 0) or None)
         setc(ws, "H8", _num(exp.school_fees))          # children → row 8 (post-retire excl.)
+        setc(ws, "H9", _num(exp.transport))
         setc(ws, "H10", _num(exp.utilities))
+        setc(ws, "H11", _num(exp.other_expenses))      # essential residual
         setc(ws, "H12", _num(exp.travel_or_lifestyle))
-        setc(ws, "H13", (_num(exp.medical) or 0) + (_num(exp.insurance_premium) or 0) or None)
+        setc(ws, "H13", _num(exp.medical))
+        setc(ws, "H14", _num(exp.insurance_premium))   # insurance premium → Health row
+        setc(ws, "H19", _num(exp.discretionary))       # discretionary → Entertainment row
         # NB: EMIs are NOT regular expenses — they go to the "Loan Repayments"
         # rows (23-25) below so they flow into the YoY loan-repayment column.
 

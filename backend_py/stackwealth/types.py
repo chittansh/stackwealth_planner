@@ -102,6 +102,13 @@ class IncomeDetails(StrictModel):
     spouse_rental_income: Optional[float] = None
     client_other_income: Optional[float] = None
     spouse_other_income: Optional[float] = None
+    # Mandatory monthly deductions from GROSS income (the firm `2_Income` tab's
+    # Deductions section). Captured so the model-writer path computes true NET
+    # income (gross − deductions) instead of treating gross as take-home.
+    client_taxes: Optional[float] = None
+    spouse_taxes: Optional[float] = None
+    client_provident_fund: Optional[float] = None
+    spouse_provident_fund: Optional[float] = None
 
 
 class MonthlyExpenses(StrictModel):
@@ -115,6 +122,12 @@ class MonthlyExpenses(StrictModel):
     travel_or_lifestyle: Optional[float] = None
     sip_investments: Optional[float] = None
     other_emis: Optional[float] = None
+    # Firm expense rows that previously had no slot — keeping them distinct stops
+    # them collapsing into household_expenses and lets model_writer place them on
+    # the correct firm rows (transport→H9, other→H11, discretionary→H19).
+    transport: Optional[float] = None
+    discretionary: Optional[float] = None
+    other_expenses: Optional[float] = None
 
 
 class MFHolding(StrictModel):
