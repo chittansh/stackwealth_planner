@@ -289,50 +289,42 @@ def write_plan_to_master(master_wb, plan) -> int:
         setc(ws, "C6", _num(mi.direct_equity))
         setc(ws, "C12", _num(mi.insurance_premium))
 
-    # ── 4A_Mutual_Funds (B name, H value, I SIP) ───────────────────────────
-    ws = master_wb["4A_Mutual_Funds"]
-    for i, h in enumerate(plan.mutual_funds or []):
-        r = 2 + i
-        if r > 9:
-            break
-        setc(ws, f"B{r}", getattr(h, "fund_name", None))
-        setc(ws, f"H{r}", _num(getattr(h, "current_value", None)))
-        setc(ws, f"I{r}", _num(getattr(h, "sip_amount", None)))
+    # Holding lists → firm sheets. last_row is the LAST data row before each
+    # sheet's Total (verified against the master): MF 2-21, Equity 2-23, FI/RE/
+    # Gold 2-9. If a client has MORE holdings than the template has rows, the
+    # overflow's value is folded into the last row so the sheet Total never loses
+    # money (the firm template caps individual rows; the portfolio total is what
+    # drives the math).
+    def _fill(ws, items, last_row, *, value_col, value_attr="current_value",
+              name_col=None, name_attr=None, extra=()):
+        items = list(items or [])
+        cap = last_row - 1                      # rows 2..last_row inclusive
+        head, tail = items[:cap], items[cap:]
+        for i, h in enumerate(head):
+            r = 2 + i
+            if name_col and name_attr:
+                setc(ws, f"{name_col}{r}", getattr(h, name_attr, None))
+            setc(ws, f"{value_col}{r}", _num(getattr(h, value_attr, None)))
+            for col, attr in extra:
+                setc(ws, f"{col}{r}", _num(getattr(h, attr, None)))
+        if tail and head:
+            agg = (_num(getattr(head[-1], value_attr, None)) or 0) + sum(
+                (_num(getattr(h, value_attr, None)) or 0) for h in tail)
+            setc(ws, f"{value_col}{last_row}", agg)
+            if name_col and name_attr:
+                setc(ws, f"{name_col}{last_row}",
+                     f"{getattr(head[-1], name_attr, None) or ''} +{len(tail)} more")
 
-    # ── 4B_Equity_Stocks (B name, E current value) ─────────────────────────
-    ws = master_wb["4B_Equity_Stocks"]
-    for i, h in enumerate(plan.equity_stocks or []):
-        r = 2 + i
-        if r > 25:
-            break
-        setc(ws, f"B{r}", getattr(h, "stock_name", None))
-        setc(ws, f"E{r}", _num(getattr(h, "current_value", None)))
-
-    # ── 4C_Fixed_Income (C name, D invested, E current value) ──────────────
-    ws = master_wb["4C_Fixed_Income"]
-    for i, h in enumerate(plan.fixed_income or []):
-        r = 2 + i
-        if r > 8:
-            break
-        setc(ws, f"C{r}", getattr(h, "instrument", None))
-        setc(ws, f"D{r}", _num(getattr(h, "invested_amount", None)))
-        setc(ws, f"E{r}", _num(getattr(h, "current_value", None)))
-
-    # ── 4D_Real_Estate (C market value, D loan, E rental) ──────────────────
-    ws = master_wb["4D_Real_Estate"]
-    for i, h in enumerate(plan.real_estate or []):
-        r = 2 + i
-        if r > 8:
-            break
-        setc(ws, f"C{r}", _num(getattr(h, "current_value", None)))
-
-    # ── 4E_Gold & Others (C current value) ─────────────────────────────────
-    ws = master_wb["4E_Gold & Others"]
-    for i, h in enumerate(plan.gold or []):
-        r = 2 + i
-        if r > 8:
-            break
-        setc(ws, f"C{r}", _num(getattr(h, "current_value", None)))
+    _fill(master_wb["4A_Mutual_Funds"], plan.mutual_funds, 21,
+          name_col="B", name_attr="fund_name", value_col="H",
+          extra=[("I", "sip_amount")])
+    _fill(master_wb["4B_Equity_Stocks"], plan.equity_stocks, 23,
+          name_col="B", name_attr="stock_name", value_col="E")
+    _fill(master_wb["4C_Fixed_Income"], plan.fixed_income, 9,
+          name_col="C", name_attr="instrument", value_col="E",
+          extra=[("D", "invested_amount")])
+    _fill(master_wb["4D_Real_Estate"], plan.real_estate, 9, value_col="C")
+    _fill(master_wb["4E_Gold & Others"], plan.gold, 9, value_col="C")
 
     # ── 6_Liquid_Capital (C amount) ────────────────────────────────────────
     lc = plan.liquid_capital
