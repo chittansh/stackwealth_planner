@@ -291,21 +291,36 @@ def write_plan_to_master(master_wb, plan) -> int:
 
     # Holding lists → firm sheets. last_row is the LAST data row before each
     # sheet's Total (verified against the master): MF 2-21, Equity 2-23, FI/RE/
-    # Gold 2-9. If a client has MORE holdings than the template has rows, the
+    # Gold 2-9. Every NAME and VALUE comes from the input — the firm template's
+    # sample instrument names ("100 grams gold jewellery", "ICICI Bond 9%" …) are
+    # CLEARED across the whole data range first so nothing hardcoded bleeds
+    # through. If a client has MORE holdings than the template has rows, the
     # overflow's value is folded into the last row so the sheet Total never loses
-    # money (the firm template caps individual rows; the portfolio total is what
-    # drives the math).
+    # money (the firm template caps individual rows; the portfolio total drives
+    # the math). apply_dynamic_allocation reads the plan (not these cells), so
+    # clearing/rewriting here can't affect goal funding.
+    def _text(h, attr):
+        v = getattr(h, attr, None)
+        return getattr(v, "value", v)  # unwrap enums (e.g. Instrument) to their string
+
     def _fill(ws, items, last_row, *, value_col, value_attr="current_value",
-              name_col=None, name_attr=None, extra=()):
+              name_col=None, name_attr=None, num_extra=(), text_extra=(), clear=()):
         items = list(items or [])
+        cols = ([c for c in (name_col, value_col) if c]
+                + [c for c, _ in num_extra] + [c for c, _ in text_extra] + list(clear))
+        for r in range(2, last_row + 1):       # wipe ALL sample data in the range
+            for col in cols:
+                ws[f"{col}{r}"] = None
         cap = last_row - 1                      # rows 2..last_row inclusive
         head, tail = items[:cap], items[cap:]
         for i, h in enumerate(head):
             r = 2 + i
             if name_col and name_attr:
-                setc(ws, f"{name_col}{r}", getattr(h, name_attr, None))
+                setc(ws, f"{name_col}{r}", _text(h, name_attr))
             setc(ws, f"{value_col}{r}", _num(getattr(h, value_attr, None)))
-            for col, attr in extra:
+            for col, attr in text_extra:
+                setc(ws, f"{col}{r}", _text(h, attr))
+            for col, attr in num_extra:
                 setc(ws, f"{col}{r}", _num(getattr(h, attr, None)))
         if tail and head:
             agg = (_num(getattr(head[-1], value_attr, None)) or 0) + sum(
@@ -313,26 +328,37 @@ def write_plan_to_master(master_wb, plan) -> int:
             setc(ws, f"{value_col}{last_row}", agg)
             if name_col and name_attr:
                 setc(ws, f"{name_col}{last_row}",
-                     f"{getattr(head[-1], name_attr, None) or ''} +{len(tail)} more")
+                     f"{_text(head[-1], name_attr) or ''} +{len(tail)} more")
 
+    # B=Fund name, H=value, I=SIP
     _fill(master_wb["4A_Mutual_Funds"], plan.mutual_funds, 21,
           name_col="B", name_attr="fund_name", value_col="H",
-          extra=[("I", "sip_amount")])
+          num_extra=[("I", "sip_amount")])
+    # B=Stock name, E=value
     _fill(master_wb["4B_Equity_Stocks"], plan.equity_stocks, 23,
           name_col="B", name_attr="stock_name", value_col="E")
+    # B=Instrument type, C=details/name from input, D=invested, E=value
     _fill(master_wb["4C_Fixed_Income"], plan.fixed_income, 9,
-          name_col="C", name_attr="instrument", value_col="E",
-          extra=[("D", "invested_amount")])
-    _fill(master_wb["4D_Real_Estate"], plan.real_estate, 9, value_col="C")
-    _fill(master_wb["4E_Gold & Others"], plan.gold, 9, value_col="C")
+          name_col="B", name_attr="instrument", value_col="E",
+          text_extra=[("C", "notes")], num_extra=[("D", "invested_amount")])
+    # B=Property name, C=value (also wipe sample loan D / rental E so they can't
+    # leak into 8_Loans / 2_Income rental).
+    _fill(master_wb["4D_Real_Estate"], plan.real_estate, 9,
+          name_col="B", name_attr="label", value_col="C", clear=["D", "E"])
+    # B=Asset name, C=value
+    _fill(master_wb["4E_Gold & Others"], plan.gold, 9,
+          name_col="B", name_attr="label", value_col="C")
 
     # ── 6_Liquid_Capital (C amount) ────────────────────────────────────────
     lc = plan.liquid_capital
     if lc:
         ws = master_wb["6_Liquid_Capital"]
+        for r in range(2, 7):                  # clear sample amounts + remarks
+            ws[f"C{r}"], ws[f"D{r}"] = None, None
         setc(ws, "C2", _num(lc.savings_account_balance))
         setc(ws, "C3", _num(lc.idle_cash_for_investment))
         setc(ws, "C4", _num(lc.fd_breakable_for_investment))
+        setc(ws, "C5", _num(getattr(lc, "bonus_expected_for_investment", None)))
 
     # ── 7_Emergency_Fund (C3 total corpus) ─────────────────────────────────
     ef = plan.emergency_fund
@@ -344,8 +370,13 @@ def write_plan_to_master(master_wb, plan) -> int:
     li = plan.loans_liabilities
     home_emi = 0.0
     other_structured_emi = 0.0
+    ws = master_wb["8_Loans_Liabilities"]
+    # Clear the template's sample loan figures + 'X years left' remarks across all
+    # loan rows so a client without a given loan never inherits sample values.
+    for r in range(2, 7):
+        for col in ("C", "D", "E", "F"):
+            ws[f"{col}{r}"] = None
     if li:
-        ws = master_wb["8_Loans_Liabilities"]
         rows = {"home_loan": 2, "car_loan": 3, "personal_loan": 4, "credit_card_dues": 5}
         for name, r in rows.items():
             blk = getattr(li, name, None)
@@ -354,6 +385,7 @@ def write_plan_to_master(master_wb, plan) -> int:
             setc(ws, f"C{r}", _num(getattr(blk, "outstanding_amount", None)))
             setc(ws, f"D{r}", _num(getattr(blk, "emi", None)))
             setc(ws, f"E{r}", _num(getattr(blk, "interest_rate", None)))
+            setc(ws, f"F{r}", _num(getattr(blk, "tenure_left", None)))
             emi = _num(getattr(blk, "emi", None)) or 0.0
             if name == "home_loan":
                 home_emi += emi
@@ -377,16 +409,24 @@ def write_plan_to_master(master_wb, plan) -> int:
     if other_emi:
         setc(exp_ws, "H24", round(other_emi))    # EMI - Other Loans
 
-    # ── 9_Insurance_Details (E cover, F premium) ───────────────────────────
+    # ── 9_Insurance_Details (D company, E cover, F premium) ────────────────
     ins = plan.insurance_details
     if ins:
         ws = master_wb["9_Insurance_Details"]
+        # Wipe the template's sample company names ('HDFC', 'Star') + cover/premium
+        # across every policy row so nothing hardcoded leaks for a client missing
+        # that policy; the real company comes from the input.
+        for r in (2, 3, 4, 5):
+            for col in ("D", "E", "F"):
+                ws[f"{col}{r}"] = None
         term = getattr(ins, "term_plan", None)
         if term:
+            setc(ws, "D2", getattr(term, "company", None))
             setc(ws, "E2", _num(getattr(term, "cover_amount", None)))
             setc(ws, "F2", _num(getattr(term, "annual_premium", None)))
         health = getattr(ins, "health_insurance", None) or getattr(ins, "family_floater", None)
         if health:
+            setc(ws, "D5", getattr(health, "company", None))
             setc(ws, "E5", _num(getattr(health, "cover_amount", None)))
             setc(ws, "F5", _num(getattr(health, "annual_premium", None)))
 
