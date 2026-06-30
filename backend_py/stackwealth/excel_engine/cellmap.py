@@ -109,7 +109,10 @@ SCALAR_OUTPUTS: dict[str, tuple[str, str]] = {
     "health_cover_existing": ("Insurance Computation", "G64"),
     "health_cover_additional": ("Insurance Computation", "G65"),
     # --- Income / Net-worth summary (tab 11; values in cols F & I) ---
-    "total_income_net_monthly": ("11. Inc Exp,Networth,Rec Invest", "F5"),
+    # I5 is the Total (household) net income column — client + spouse + others,
+    # net of deductions. F5 was the client-only column, which understated net
+    # income whenever the spouse/family had business or rental income.
+    "total_income_net_monthly": ("11. Inc Exp,Networth,Rec Invest", "I5"),
     "monthly_surplus": ("11. Inc Exp,Networth,Rec Invest", "I22"),
     "total_financial_assets": ("11. Inc Exp,Networth,Rec Invest", "I42"),
     "total_non_financial_assets": ("11. Inc Exp,Networth,Rec Invest", "I47"),
